@@ -9,8 +9,9 @@ import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
-import { createHandler, hostKey, inspectHostKey, issueGrant, previewAmneziaSetup,
-  requireUnrestrictedAdmin, safeAmneziaPreview, validateAmneziaPreview, validateLogin } from "../server.js";
+import { createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
+  previewAmneziaSetup, requireUnrestrictedAdmin, safeAmneziaPreview,
+  validateAmneziaPreview, validateLogin, validateTargetHostKey } from "../server.js";
 
 function wireKey() {
   const type = Buffer.from("ssh-ed25519");
@@ -82,6 +83,12 @@ test("real SSH handshake checks the host key before any password is sent", async
     const key = await inspectHostKey({ clientFactory });
     assert.match(key.fingerprint, /^SHA256:/);
     assert.equal(passwordAuthentications, 0);
+    const targetKey = await inspectTargetHostKey({ host: "remote.example", port: 22022 },
+      { clientFactory });
+    assert.equal(targetKey.fingerprint, key.fingerprint);
+    assert.equal(targetKey.scope, "entered_target");
+    assert.equal(targetKey.reverify_required, true);
+    assert.equal(passwordAuthentications, 0);
     const raw = { username: "root", method: "password", fingerprint: "SHA256:" + "B".repeat(43),
       password: "secret", private_key: "", passphrase: "" };
     await assert.rejects(issueGrant(raw, { clientFactory }), /HOST_KEY_CHANGED/);
@@ -134,6 +141,51 @@ test("host key is inspected without any SSH authentication", async () => {
   assert.equal(operations.command, undefined);
   assert.equal(operations.ended, true);
   assert.throws(() => hostKey(Buffer.alloc(0)), /Invalid SSH host key/);
+});
+
+test("entered target host key accepts an explicit IP or hostname but no URL or credentials", async () => {
+  assert.deepEqual(validateTargetHostKey({ host: "EXAMPLE.org", port: 22022 }),
+    { host: "example.org", port: 22022 });
+  assert.deepEqual(validateTargetHostKey({ host: "198.51.100.7", port: 22 }),
+    { host: "198.51.100.7", port: 22 });
+  assert.deepEqual(validateTargetHostKey({ host: "2001:db8::1", port: 22 }),
+    { host: "2001:db8::1", port: 22 });
+  for (const host of ["", " example.org", "example.org ", "https://example.org", "user@example.org",
+    "example.org:22", "example..org", "-example.org", "example.org/", "[2001:db8::1]",
+    "fe80::1%eth0", "127.1", "2130706433", "a\n.example.org", "я.example.org",
+    "a".repeat(64) + ".example.org"]) {
+    assert.throws(() => validateTargetHostKey({ host, port: 22 }), /INVALID_INPUT/, host);
+  }
+  for (const port of [0, -1, 65536, "22", 22.5, null]) {
+    assert.throws(() => validateTargetHostKey({ host: "example.org", port }), /INVALID_INPUT/);
+  }
+  assert.throws(() => validateTargetHostKey({ host: "example.org", port: 22,
+    password: "secret" }), /INVALID_INPUT/);
+  const operations = {};
+  const result = await inspectTargetHostKey({ host: "REMOTE.example", port: 22022 },
+    { clientFactory: () => fakeClient(operations) });
+  assert.deepEqual(result, { protocol: 1, scope: "entered_target", host: "remote.example",
+    port: 22022, key_type: "ssh-ed25519", fingerprint: FINGERPRINT,
+    reverify_required: true });
+  assert.equal(operations.config.host, "remote.example");
+  assert.equal(operations.config.port, 22022);
+  assert.equal(operations.config.username, "sovagrid-probe");
+  assert.equal(operations.config.password, undefined);
+  assert.equal(operations.config.privateKey, undefined);
+  assert.equal(operations.config.tryKeyboard, false);
+  assert.equal(operations.command, undefined);
+  assert.equal(operations.ended, true);
+});
+
+test("entered target host-key probe times out without trying authentication", async () => {
+  const operations = {};
+  const client = new EventEmitter();
+  client.connect = (config) => { operations.config = config; };
+  client.end = () => { operations.ended = true; };
+  await assert.rejects(inspectTargetHostKey({ host: "remote.example", port: 22 },
+    { clientFactory: () => client, timeoutMs: 10 }), /SSH_UNAVAILABLE/);
+  assert.equal(operations.config.password, undefined);
+  assert.equal(operations.ended, true);
 });
 
 test("correctly pinned password SSH grants only the fixed local Hub command", async () => {
@@ -391,4 +443,43 @@ test("Amnezia HTTP preview denies missing role and cross-origin before SSH", asy
   assert.equal(parsedCredentials.password, "");
   assert.equal(parsedCredentials.private_key, "");
   assert.equal(parsedCredentials.passphrase, "");
+});
+
+test("entered target host-key route requires unrestricted admin and a safe origin", async () => {
+  const path = "/api/v1/browser-ssh/target-host-key";
+  let inspected = 0;
+  let adminChecks = 0;
+  const handler = createHandler({ admin: async (authorization) => {
+    adminChecks++;
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, inspectTarget: async (target) => {
+    inspected++;
+    assert.deepEqual(target, { host: "remote.example", port: 22022 });
+    return { protocol: 1, scope: "entered_target", host: target.host, port: target.port,
+      key_type: "ssh-ed25519", fingerprint: FINGERPRINT, reverify_required: true };
+  }, login: async () => { throw new Error("must not authenticate"); } });
+  const payload = { host: "remote.example", port: 22022 };
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal((await call(handler, { path, payload, headers: {
+    host: "example.com", origin: "http://example.com", "x-forwarded-proto": "http",
+    authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal(adminChecks, 0);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(inspected, 0);
+  const restricted = createHandler({ admin: async () => { throw new Error("ADMIN_FORBIDDEN"); },
+    inspectTarget: async () => { throw new Error("must not reach SSH"); } });
+  assert.equal((await call(restricted, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+  assert.equal((await call(handler, { path, payload: { ...payload, password: "secret" },
+    headers: { authorization: "Bearer " + TOKEN } })).status, 400);
+  assert.equal(inspected, 0);
+  const result = await call(handler, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.fingerprint, FINGERPRINT);
+  assert.equal(result.body.reverify_required, true);
+  assert.equal(inspected, 1);
 });

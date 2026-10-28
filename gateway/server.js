@@ -82,6 +82,30 @@ export function validateAmneziaPreview(value) {
   return { login, target: value.target };
 }
 
+export function validateTargetHostKey(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== 2 || !Object.hasOwn(value, "host") ||
+      !Object.hasOwn(value, "port") || typeof value.host !== "string" ||
+      !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) {
+    throw new Error("INVALID_INPUT");
+  }
+  const host = value.host;
+  if (!host || host.length > 253 || host !== host.trim() || host.includes("%") ||
+      host.includes("[") || host.includes("]")) {
+    throw new Error("INVALID_INPUT");
+  }
+  if (net.isIP(host) === 0) {
+    // A hostname is an ASCII DNS name or a single-label local name. A
+    // numeric-only string is ambiguous in resolver APIs and must be an IP.
+    const labels = host.split(".");
+    if (/^[0-9.]+$/.test(host) || labels.some((label) => label.length < 1 ||
+        label.length > 63 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label))) {
+      throw new Error("INVALID_INPUT");
+    }
+  }
+  return { host: host.toLowerCase(), port: value.port };
+}
+
 export async function requireUnrestrictedAdmin(authorization, { fetchImpl = fetch } = {}) {
   if (typeof authorization !== "string" || !BEARER.test(authorization)) {
     throw new Error("AUTH_REQUIRED");
@@ -150,7 +174,7 @@ export function safeAmneziaPreview(raw, expectedTarget) {
   return result;
 }
 
-export function inspectHostKey({ clientFactory = () => new Client(), timeoutMs = 8000 } = {}) {
+function inspectSSHHostKey(host, port, { clientFactory = () => new Client(), timeoutMs = 8000 } = {}) {
   return new Promise((resolve, reject) => {
     const client = clientFactory();
     let settled = false;
@@ -166,16 +190,28 @@ export function inspectHostKey({ clientFactory = () => new Client(), timeoutMs =
     client.on("error", () => finish(new Error("SSH_UNAVAILABLE")));
     client.on("close", () => finish(new Error("SSH_UNAVAILABLE")));
     try {
-      client.connect({ host: TARGET, port: PORT, username: "sovagrid-probe",
+      client.connect({ host, port, username: "sovagrid-probe",
         readyTimeout: Math.min(timeoutMs, 7000), tryKeyboard: false,
         hostVerifier: (key) => {
-          try { finish(null, { protocol: 1, port: PORT, ...hostKey(key) }); }
+          try { finish(null, { protocol: 1, port, ...hostKey(key) }); }
           catch { finish(new Error("SSH_UNAVAILABLE")); }
           return false; // Inspection never authenticates.
         },
       });
     } catch { finish(new Error("SSH_UNAVAILABLE")); }
   });
+}
+
+export function inspectHostKey(options = {}) {
+  return inspectSSHHostKey(TARGET, PORT, options);
+}
+
+export async function inspectTargetHostKey(raw, options = {}) {
+  const target = validateTargetHostKey(raw);
+  const key = await inspectSSHHostKey(target.host, target.port, options);
+  // The key belongs to this one probe only. Every future SSH authentication
+  // must repeat host-key verification against the user's chosen fingerprint.
+  return { ...key, scope: "entered_target", host: target.host, reverify_required: true };
 }
 
 export function issueGrant(raw, { clientFactory = () => new Client(), timeoutMs = 60000 } = {}) {
@@ -394,7 +430,8 @@ async function body(req) {
   }
 }
 
-export function createHandler({ inspect = inspectHostKey, login = issueGrant,
+export function createHandler({ inspect = inspectHostKey, inspectTarget = inspectTargetHostKey,
+  login = issueGrant,
   preview = previewAmneziaSetup, admin = requireUnrestrictedAdmin } = {}) {
   const probes = new WindowLimit(20, 60);
   const attempts = new WindowLimit(5, 60);
@@ -409,16 +446,18 @@ export function createHandler({ inspect = inspectHostKey, login = issueGrant,
     const proto = req.headers["x-forwarded-proto"];
     const address = req.headers["x-sovagrid-client-ip"];
     const isPreview = req.url === "/api/v1/browser-ssh/vpn-setup/preview";
+    const isTargetProbe = req.url === "/api/v1/browser-ssh/target-host-key";
+    const isAdminRoute = isPreview || isTargetProbe;
     if (req.method !== "POST" || !["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
-        "/api/v1/browser-ssh/vpn-setup/preview"].includes(req.url) ||
+        "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key"].includes(req.url) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
-        (isPreview && proto !== "https" && !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/.test(host))) {
+        (isAdminRoute && proto !== "https" && !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/.test(host))) {
       json(res, 404, { error: "NOT_FOUND" });
       return;
     }
-    const isProbe = req.url.endsWith("/host-key");
+    const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     if (!(isProbe ? probes : attempts).take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
       return;
@@ -430,11 +469,13 @@ export function createHandler({ inspect = inspectHostKey, login = issueGrant,
     active++;
     const bodyTimer = setTimeout(() => req.destroy(), 10000);
     try {
-      if (isPreview) await admin(req.headers.authorization);
+      if (isAdminRoute) await admin(req.headers.authorization);
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (isProbe) {
+        if (isTargetProbe) {
+          json(res, 200, await inspectTarget(validateTargetHostKey(value)));
+        } else if (isProbe) {
           if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length) {
             throw new Error("INVALID_INPUT");
           }
