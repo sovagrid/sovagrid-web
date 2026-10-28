@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">SovaGrid</title>
+  <rect width="512" height="512" rx="112" fill="#0a1119"/>
+  <path d="M116 165c29-35 82-55 140-55s111 20 140 55l-12 185c-41 30-83 48-128 48s-87-18-128-48z" fill="#80e1af"/>
+  <path d="M175 233c0-30 19-48 41-48s41 18 41 48-19 48-41 48-41-18-41-48zm81 0c0-30 19-48 41-48s41 18 41 48-19 48-41 48-41-18-41-48z" fill="#0c2b2b"/>
+  <path d="m230 304 26 27 26-27" fill="none" stroke="#0c2b2b" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

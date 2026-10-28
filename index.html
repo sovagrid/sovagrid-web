@@ -1,0 +1,847 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only
+     Copyright (C) 2026 Jigokuraku01
+     Additional author attribution terms: see ATTRIBUTION.md. -->
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0a1119">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data:; manifest-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'self'">
+  <title>SovaGrid — управление серверами</title>
+  <script src="theme.js?v=1"></script>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icons/sovagrid.svg">
+  <link rel="apple-touch-icon" sizes="180x180" href="/sovagrid/monitoring/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="SovaGrid">
+  <link rel="stylesheet" href="install.css?v=1">
+  <script src="install.js?v=3" defer></script>
+  <link rel="stylesheet" href="vendor/xterm.css?v=1">
+  <link rel="stylesheet" href="styles.css?v=34">
+  <link rel="stylesheet" href="theme.css?v=6">
+  <link rel="stylesheet" href="users.css?v=2">
+  <link rel="stylesheet" href="backups.css?v=2">
+  <link rel="stylesheet" href="host-backups.css?v=1">
+  <link rel="stylesheet" href="public-web.css?v=2">
+  <script src="vendor/xterm.js?v=1" defer></script>
+  <script src="vendor/addon-fit.js?v=2" defer></script>
+  <script src="app.js?v=46" defer></script>
+  <script src="browser-ssh.js?v=3" defer></script>
+  <script src="users.js?v=2" defer></script>
+  <script src="backups.js?v=2" defer></script>
+  <script src="backups-restore.js?v=1" defer></script>
+  <script src="host-backups.js?v=1" defer></script>
+  <script src="access.js?v=1" defer></script>
+  <script src="checks.js?v=5" defer></script>
+  <link rel="stylesheet" href="checks.css?v=3">
+  <script src="files.js?v=4" defer></script>
+  <script src="amnezia.js?v=6" defer></script>
+  <script src="process-inventory.js?v=1" defer></script>
+  <script src="container-logs.js?v=1" defer></script>
+  <script src="container-control.js?v=1" defer></script>
+  <script src="container-alerts.js?v=1" defer></script>
+  <script src="filesystem-alerts.js?v=1" defer></script>
+  <link rel="stylesheet" href="filesystem-alerts.css?v=1">
+  <script src="service-control.js?v=2" defer></script>
+  <script src="telegram.js?v=4" defer></script>
+  <script src="monitoring.js?v=3" defer></script>
+  <script src="inode.js?v=1" defer></script>
+  <script src="public-web.js?v=2" defer></script>
+  <script src="local-web.js?v=1" defer></script>
+  <script src="journal.js?v=2" defer></script>
+  <script src="maintenance.js?v=2" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+
+  <main id="loginView" class="login-layout">
+    <section class="login-card" aria-labelledby="loginTitle">
+      <div class="brand-mark" aria-hidden="true"><span class="brand-eye"></span><span class="brand-eye"></span></div>
+      <label class="theme-picker theme-picker-login" for="loginThemeSelect">Тема интерфейса <select id="loginThemeSelect" data-theme-select><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label>
+      <p class="eyebrow">Пульт управления инфраструктурой</p>
+      <h1 id="loginTitle">Добро пожаловать в <span>SovaGrid</span></h1>
+      <p class="login-intro">Подключитесь к Ubuntu по SSH или войдите в панель этого сервера.</p>
+      <p id="loginNotice" class="login-notice" role="status" hidden></p>
+      <div class="login-modes" role="tablist" aria-label="Способ подключения">
+        <button id="sshLoginMode" type="button" role="tab" aria-controls="browserSshView" aria-selected="true">Подключиться по SSH</button>
+        <button id="hubLoginMode" type="button" role="tab" aria-controls="hubLoginView" aria-selected="false">Войти в панель</button>
+      </div>
+      <section id="browserSshView" role="tabpanel" aria-labelledby="sshLoginMode">
+        <p class="ssh-target">Сервер этого сайта: <strong id="sshTargetHost"></strong><span id="sshTargetPort"></span></p>
+        <form id="browserSshForm" autocomplete="off">
+          <label for="sshUsername">Пользователь SSH</label>
+          <input id="sshUsername" name="ssh-username" autocomplete="off" value="root" required>
+          <fieldset class="ssh-auth-modes">
+            <legend>Способ входа</legend>
+            <label class="ssh-method-option"><input id="sshAuthPassword" type="radio" name="ssh-method" value="password" checked> Пароль SSH</label>
+            <label class="ssh-method-option"><input id="sshAuthKey" type="radio" name="ssh-method" value="private_key"> Ключ из «Файлов»</label>
+          </fieldset>
+          <div id="sshKeyFields" hidden>
+            <label for="sshPrivateKey">Файл приватного ключа</label>
+            <input id="sshPrivateKey" type="file" accept=".pem,.key,.openssh,.txt,application/octet-stream,text/plain">
+            <label for="sshPassphrase">Парольная фраза ключа, если есть</label>
+            <input id="sshPassphrase" type="password" autocomplete="off">
+          </div>
+          <div id="sshPasswordFields">
+            <label for="sshPassword">Пароль SSH</label>
+            <input id="sshPassword" type="password" autocomplete="off">
+          </div>
+          <label for="sshOpenServer">Открыть после входа сервер из панели (необязательно)</label>
+          <input id="sshOpenServer" type="text" autocomplete="off" maxlength="80" placeholder="Например, имя или ID сервера">
+          <label class="ssh-trust" for="sshOpenCommands"><input id="sshOpenCommands" type="checkbox"> Сразу открыть команды и терминал</label>
+          <p class="ssh-hint">SSH-вход выполняется на сервер этого сайта. Выбранный сервер откроется через Hub после входа, если у вас есть к нему доступ.</p>
+          <button id="sshInspectHost" class="secondary-button" type="button">Проверить ключ сервера</button>
+          <div id="sshHostKeyReview" class="ssh-host-key" hidden>
+            <p>Сверьте отпечаток с тем, который получили от владельца сервера или видели в другом доверенном SSH-клиенте:</p>
+            <code id="sshHostFingerprint"></code>
+            <p id="sshHostKeyType"></p>
+            <label class="ssh-trust"><input id="sshTrustHost" type="checkbox"> Отпечаток совпадает; закрепить для этого сайта</label>
+            <button id="sshReplaceHostKey" class="secondary-button" type="button" hidden>После сверки заменить старый отпечаток</button>
+          </div>
+          <p id="sshLoginError" class="form-error" role="alert" hidden></p>
+          <button id="sshConnectButton" class="primary-button" type="submit" disabled>Подключиться <span aria-hidden="true">→</span></button>
+        </form>
+        <p class="ssh-hint">Браузер проверяет SSH этого Ubuntu-хоста через защищённый сайт. Ключ и пароль не сохраняются. Добавленные серверы доступны через Hub и установленный Agent; прямой SSH-вход на них через этот сайт не выполняется.</p>
+      </section>
+      <section id="hubLoginView" role="tabpanel" aria-labelledby="hubLoginMode" hidden>
+      <form id="loginForm" autocomplete="on">
+        <label for="hubUrl">Адрес центра мониторинга</label>
+        <input id="hubUrl" type="url" spellcheck="false" placeholder="https://monitor.example.com" required>
+        <label for="username">Логин</label>
+        <input id="username" name="username" autocomplete="username" required>
+        <label for="password">Пароль</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <p id="loginError" class="form-error" role="alert" hidden></p>
+        <button id="loginButton" class="primary-button" type="submit">Войти в центр <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="ssh-hint">Это учётная запись панели. Логин SSH может отличаться от неё.</p>
+      </section>
+      <section class="install-invite" aria-labelledby="installInviteTitle">
+        <h2 id="installInviteTitle">Панель под рукой</h2>
+        <p>Добавьте SovaGrid на экран устройства и открывайте эту панель с отдельной иконки. Скачивать APK или искать её в магазине не нужно.</p>
+        <button class="secondary-button install-open" data-install-open type="button">Сделать приложением</button>
+      </section>
+      <p class="security-note"><a href="legal.html">О программе · автор и лицензия</a></p>
+      <p class="security-note">Пароль и сеанс не сохраняются в браузере. Для удалённого доступа используйте HTTPS.</p>
+    </section>
+    <aside class="login-aside" aria-label="Возможности">
+      <div class="orbit orbit-large" aria-hidden="true"></div>
+      <div class="orbit orbit-small" aria-hidden="true"></div>
+      <div class="aside-content">
+        <span class="live-pill"><span class="pulse-dot"></span> Система под контролем</span>
+        <h2>Видеть главное.<br><em>Действовать вовремя.</em></h2>
+        <p>Нагрузка, память, диски, события и команды в одной панели. Для постоянной SSH-сессии есть отдельные приложения для телефона и компьютера.</p>
+        <div class="aside-metrics" aria-hidden="true">
+          <div><strong>24/7</strong><span>мониторинг</span></div>
+          <div><strong>SSH</strong><span>доступ</span></div>
+          <div><strong>TG</strong><span>оповещения</span></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="appView" class="app-layout" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-brand"><div class="brand-mark small" aria-hidden="true"><span class="brand-eye"></span><span class="brand-eye"></span></div><span>SovaGrid</span></div>
+      <nav class="workspace-nav" aria-label="Разделы панели">
+        <button class="workspace-link" data-view="start" type="button"><span aria-hidden="true">✦</span> Начало</button>
+        <button class="workspace-link" data-view="overview" type="button" aria-current="page"><span aria-hidden="true">◫</span> Обзор</button>
+        <button class="workspace-link" data-view="commands" type="button"><span aria-hidden="true">›_</span> Команды</button>
+        <button class="workspace-link" data-view="journal" type="button"><span aria-hidden="true">≣</span> Логи</button>
+        <button class="workspace-link" data-view="files" type="button"><span aria-hidden="true">▤</span> Файлы</button>
+        <button class="workspace-link" data-view="incidents" type="button"><span aria-hidden="true">◇</span> События <span id="navIncidentCount" class="nav-count">0</span></button>
+        <button class="workspace-link" data-view="vpn" type="button"><span aria-hidden="true">◈</span> VPN</button>
+        <button class="workspace-link" data-view="telegram" type="button"><span aria-hidden="true">✈</span> Telegram</button>
+        <button class="workspace-link" data-view="audit" type="button"><span aria-hidden="true">≡</span> Журнал</button>
+        <button class="workspace-link" data-view="settings" type="button"><span aria-hidden="true">⚙</span> Настройки</button>
+      </nav>
+      <div class="sidebar-heading">СЕРВЕРЫ <span id="serverCount">0</span></div>
+      <nav id="serverList" class="server-list" aria-label="Серверы"></nav>
+      <button id="addServerButton" data-global-admin-only class="add-server-button" type="button"><span aria-hidden="true">＋</span> Добавить сервер</button>
+      <div class="sidebar-bottom">
+        <p id="sessionIdentity" class="session-identity"></p>
+        <div class="hub-indicator"><span class="pulse-dot"></span><span>Центр мониторинга<br><small>Подключён</small></span></div>
+        <p><a class="text-button" href="legal.html">О программе</a></p>
+        <button id="logoutButton" class="text-button" type="button">Выйти</button>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div><p id="viewEyebrow" class="eyebrow">Обзор инфраструктуры</p><h1 id="viewTitle">Панель управления</h1></div>
+        <div class="topbar-actions"><button class="secondary-button install-open" data-install-open type="button">Сделать приложением</button><label class="theme-picker theme-picker-top" for="topThemeSelect">Тема <select id="topThemeSelect" data-theme-select><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label><span id="refreshTime" class="refresh-time"></span><button id="refreshButton" class="icon-button" title="Обновить" aria-label="Обновить">↻</button></div>
+      </header>
+
+      <div id="globalError" class="banner-error" role="alert" hidden></div>
+      <p id="sshLandingNotice" class="access-notice" role="status" hidden></p>
+      <p id="accessNotice" class="access-notice" role="status" hidden></p>
+
+      <div id="emptyState" class="empty-state" hidden>
+        <div class="empty-icon" aria-hidden="true">◎</div>
+        <h2>Добавьте первый сервер</h2>
+        <p>Создайте сервер здесь, затем установите агент SovaGrid на Ubuntu, чтобы получать метрики и оповещения.</p>
+        <button id="emptyAddButton" data-global-admin-only class="primary-button" type="button">Добавить сервер</button>
+      </div>
+
+      <main id="startView" data-view-panel="start" hidden>
+        <section class="hero-card start-hero" aria-labelledby="startHeading">
+          <div><div class="hero-kicker"><span class="section-tag">ПЕРВЫЕ ШАГИ</span><span id="startHubBadge" class="status-badge">Hub на связи</span></div><h2 id="startHeading">С чего начать</h2><p id="startIntro">Проверьте подключение сервера и настройте нужные функции прямо в панели.</p></div>
+          <div class="hero-symbol" aria-hidden="true">✦</div>
+        </section>
+        <section class="start-callout" aria-labelledby="startNextHeading">
+          <div><p class="eyebrow">СЛЕДУЮЩИЙ ШАГ</p><h2 id="startNextHeading">Подключите первый сервер</h2><p id="startNextText">Создайте запись Ubuntu-сервера и установите Agent на эту машину.</p></div>
+          <button id="startPrimaryButton" class="primary-button" type="button">Добавить сервер</button>
+        </section>
+        <div class="section-heading start-section-heading"><div><p class="eyebrow">ВОЗМОЖНОСТИ</p><h2>Настройка и проверка</h2></div></div>
+        <div class="start-grid">
+          <section class="panel start-card" aria-labelledby="startServersHeading"><div class="start-card-heading"><h3 id="startServersHeading">Ubuntu-серверы</h3><span id="startServersBadge" class="status-badge waiting">Нет серверов</span></div><p id="startServersText">Добавьте сервер и дождитесь первого отчёта Agent.</p><button id="startServersAction" class="secondary-button" type="button" data-start-action="add">Добавить сервер</button></section>
+          <section class="panel start-card" aria-labelledby="startTelegramHeading"><div class="start-card-heading"><h3 id="startTelegramHeading">Telegram</h3><span id="startTelegramBadge" class="status-badge waiting">Проверяем</span></div><p id="startTelegramText">Вставьте токен BotFather в разделе Telegram, затем выдайте людям роли.</p><button class="secondary-button" type="button" data-start-action="telegram">Настроить бота</button></section>
+          <section class="panel start-card" aria-labelledby="startMonitoringHeading"><div class="start-card-heading"><h3 id="startMonitoringHeading">Мониторинг</h3><span id="startMonitoringBadge" class="status-badge waiting">Ожидает Agent</span></div><p id="startMonitoringText">Метрики и тревоги появятся после первого отчёта сервера. Пороги можно менять в настройках.</p><button class="secondary-button" type="button" data-start-action="settings">Настроить пороги</button></section>
+          <section class="panel start-card" aria-labelledby="startCommandsHeading"><div class="start-card-heading"><h3 id="startCommandsHeading">Команды и терминал</h3><span id="startCommandsBadge" class="status-badge waiting">Проверка доступа</span></div><p id="startCommandsText">Нужны разрешение команд в Hub и локальное разрешение на Agent. Терминал включается отдельно.</p><button class="secondary-button" type="button" data-start-action="commands">Открыть команды</button></section>
+          <section class="panel start-card" aria-labelledby="startFilesHeading"><div class="start-card-heading"><h3 id="startFilesHeading">Файлы</h3><span id="startFilesBadge" class="status-badge waiting">Проверьте доступ</span></div><p id="startFilesText">Agent показывает только явно разрешённые каталоги: текстовый редактор и двоичные файлы до 4 МБ.</p><button class="secondary-button" type="button" data-start-action="files">Открыть файлы</button></section>
+          <section class="panel start-card" aria-labelledby="startVpnHeading"><div class="start-card-heading"><h3 id="startVpnHeading">VPN и Amnezia</h3><span id="startVpnBadge" class="status-badge waiting">Проверьте раздел</span></div><p id="startVpnText">Состояние Amnezia видно для хоста Hub. Управление WireGuard и профилями Amnezia требует отдельных локальных компонентов.</p><button class="secondary-button" type="button" data-start-action="vpn">Открыть VPN</button></section>
+        </div>
+        <p class="start-footnote">Новый удалённый Agent требует установки на Ubuntu. При добавлении записи его ID и токен показываются один раз. Автоматическая привязка удалённой машины из браузера пока недоступна.</p>
+      </main>
+
+      <main id="journalView" data-view-panel="journal" hidden>
+        <section class="hero-card operations-hero"><div><div class="hero-kicker"><span class="section-tag">SYSTEMD</span><span id="journalStatus" class="status-badge waiting">Проверяем доступ</span></div><h2 id="journalServerName">Выберите сервер</h2><p>Журналы только тех служб, которые явно разрешены на выбранном Agent.</p></div><div class="hero-symbol" aria-hidden="true">≣</div></section>
+        <section class="panel journal-panel" aria-labelledby="journalHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ДИАГНОСТИКА СЛУЖБ</p><h2 id="journalHeading">Последние записи</h2></div></div>
+          <p class="panel-intro">Выберите службу и число строк. Перед чтением панель попросит подтверждение. Поиск ограничен последними 24 часами, максимум 100 строками, 8 КБ вывода и 5 секундами работы Agent.</p>
+          <div class="journal-controls"><div><label for="journalUnit">Служба</label><select id="journalUnit" disabled></select></div><div><label for="journalLines">Строк</label><select id="journalLines"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select></div><button id="journalPrepare" class="primary-button" type="button" disabled>Показать журнал</button><button id="journalAutoStart" class="secondary-button" type="button" disabled>Автообновлять последние строки</button><button id="journalAutoStop" class="secondary-button" type="button" disabled>Остановить</button></div>
+          <p class="field-help">Автообновление заменяет текущий снимок не чаще чем раз в 30 секунд и завершается через пять минут. Это повторное чтение последних строк: при ротации журнала или более чем 100 новых строках между снимками ранние записи могут не попасть на экран.</p>
+          <p id="journalAccessHint" class="field-help">На Agent требуется отдельное разрешение на чтение журналов.</p>
+          <p id="journalError" class="form-error" role="alert" hidden></p>
+          <p id="journalResultStatus" class="field-help" role="status">Запрос ещё не отправлен.</p>
+          <pre id="journalOutput" class="journal-output" aria-label="Записи журнала выбранной службы"></pre>
+          <p class="field-help">Записи могут содержать чувствительные данные приложения. Hub держит текст до пяти минут в памяти (не больше 32 результатов); в SQLite остаются только состояние задания и аудит без строк журнала. Выход, смена пароля или перезапуск Hub удаляют текст раньше.</p>
+        </section>
+      </main>
+
+      <main id="serverDetail" data-view-panel="overview" hidden>
+        <section class="hero-card" aria-label="Выбранный сервер">
+          <div><div class="hero-kicker"><span class="section-tag">СЕРВЕР</span><span id="serverStatus" class="status-badge">—</span></div><h2 id="serverName">—</h2><p id="lastSeen">Данные ещё не поступали</p></div>
+          <div class="hero-symbol" aria-hidden="true">◉</div>
+        </section>
+
+        <section class="panel maintenance-panel" aria-labelledby="maintenanceHeading">
+          <div class="panel-heading"><div><p class="eyebrow">УВЕДОМЛЕНИЯ</p><h2 id="maintenanceHeading">Окно обслуживания</h2></div><span id="maintenanceBadge" class="status-badge waiting">Не активно</span></div>
+          <p class="panel-intro">Для плановых работ временно приостановите Telegram-оповещения выбранного сервера. Метрики и инциденты останутся видимыми. Если проблема сохранится после окна, уведомление придёт тогда.</p>
+          <div id="maintenanceActive" class="maintenance-active" hidden><strong id="maintenanceActiveUntil"></strong><p id="maintenanceActiveReason"></p><p id="maintenanceActiveId" class="maintenance-id"></p><button id="maintenanceEnd" data-admin-only class="secondary-button" type="button">Завершить досрочно</button></div>
+          <form id="maintenanceForm">
+            <div class="maintenance-fields"><div><label for="maintenanceDuration">Длительность</label><select id="maintenanceDuration"><option value="1800">30 минут</option><option value="7200">2 часа</option><option value="86400">1 день</option></select></div><div><label for="maintenanceReason">Причина</label><input id="maintenanceReason" type="text" maxlength="200" placeholder="Например, обновление Ubuntu" autocomplete="off" required></div></div>
+            <button id="maintenanceStart" class="primary-button" type="submit">Начать обслуживание</button>
+          </form>
+          <p id="maintenanceError" class="form-error" role="alert" hidden></p><p id="maintenanceMessage" class="maintenance-message" role="status" hidden></p>
+          <details class="maintenance-history"><summary>История обслуживания</summary><div id="maintenanceHistory" class="maintenance-history-list"><p class="field-help">Загружаем историю…</p></div></details>
+        </section>
+
+        <section class="panel checks-panel" aria-labelledby="checksHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ДОСТУПНОСТЬ СЕРВИСОВ</p><h2 id="checksHeading">Сетевые проверки</h2></div><span id="checksCount" class="count-pill">—</span></div>
+          <p class="panel-intro">Проверяйте сайт или TCP-порт с выбранного сервера. HTTPS также показывает срок действия проверенного сертификата. Результаты доступны всем ролям панели.</p>
+          <p id="checksWorker" class="field-help" role="status"></p>
+          <div class="checks-actions"><button id="checksAdd" data-admin-only class="primary-button" type="button" disabled>Добавить проверку</button><button id="checksReload" class="secondary-button" type="button">Обновить результаты</button></div>
+          <p id="checksError" class="form-error" role="alert" hidden></p><p id="checksMessage" class="checks-message" role="status" hidden></p>
+          <div id="checksList" class="checks-list" aria-live="polite"></div>
+          <p class="field-help">Без заданных целей соединения не выполняются. Подтверждённые сбои и настроенный срок HTTPS-сертификата могут отправлять уведомления через подключённого Telegram-бота. Потеря связи с Agent показывает давность результата, а не подтверждённый отказ сервиса.</p>
+        </section>
+
+        <section class="metrics-section" aria-labelledby="metricsHeading">
+          <div class="section-heading"><div><p class="eyebrow">В реальном времени</p><h2 id="metricsHeading">Состояние системы</h2></div><span class="section-caption">Автообновление каждые 15 секунд</span></div>
+          <div class="metrics-grid">
+            <article class="metric-card"><div class="metric-label"><span class="metric-icon cpu">◷</span> Процессор</div><strong id="cpuValue">—</strong><div class="meter"><span id="cpuBar"></span></div><p>Текущая загрузка CPU</p></article>
+            <article class="metric-card"><div class="metric-label"><span class="metric-icon memory">▦</span> Память</div><strong id="memoryValue">—</strong><div class="meter"><span id="memoryBar"></span></div><p id="memoryDetail">Использование RAM</p></article>
+            <article class="metric-card"><div class="metric-label"><span class="metric-icon disk">◫</span> Диск</div><strong id="diskValue">—</strong><div class="meter"><span id="diskBar"></span></div><p id="diskDetail">Заполненность корневого раздела</p></article>
+            <article class="metric-card"><div class="metric-label"><span class="metric-icon uptime">⌁</span> Время работы</div><strong id="uptimeValue">—</strong><div class="meter subtle"><span id="uptimeBar"></span></div><p>С последней перезагрузки</p></article>
+          </div>
+        </section>
+
+        <div class="lower-grid">
+          <section class="panel history-panel" aria-labelledby="historyHeading">
+            <div class="panel-heading"><div><p class="eyebrow">История</p><h2 id="historyHeading">Нагрузка CPU</h2></div><div class="chart-tabs" role="group" aria-label="Показатель на графике"><button type="button" data-chart="cpu_percent" aria-pressed="true">CPU</button><button type="button" data-chart="memory_percent" aria-pressed="false">RAM</button><button type="button" data-chart="disk_percent" aria-pressed="false">Диск</button></div></div>
+            <div class="chart-wrap"><svg id="cpuChart" viewBox="0 0 600 180" preserveAspectRatio="none" role="img" aria-label="График загрузки процессора"><path class="chart-grid" d="M0 30 H600 M0 90 H600 M0 150 H600"></path><path id="chartArea" class="chart-area"></path><path id="chartLine" class="chart-line"></path></svg><span id="chartEmpty" class="chart-empty">История появится после первых измерений</span></div>
+            <div class="chart-axis"><span id="chartStart">—</span><span>100%</span><span id="chartEnd">—</span></div>
+          </section>
+          <section class="panel details-panel" aria-labelledby="detailsHeading">
+            <div class="panel-heading"><div><p class="eyebrow">Дополнительно</p><h2 id="detailsHeading">Сводка</h2></div></div>
+            <dl class="detail-list"><div><dt>ID сервера</dt><dd id="serverIdDetail">—</dd></div><div><dt>Средняя нагрузка · 1 мин</dt><dd id="loadValue">—</dd></div><div><dt>Сетевая активность · RX</dt><dd id="networkRx">—</dd></div><div><dt>Сетевая активность · TX</dt><dd id="networkTx">—</dd></div><div><dt>Последний отчёт</dt><dd id="sampleTime">—</dd></div></dl>
+          </section>
+        </div>
+
+        <section class="panel advanced-panel" aria-labelledby="advancedHeading">
+          <div class="panel-heading"><div><p class="eyebrow">Диагностика</p><h2 id="advancedHeading">Подробные показатели</h2></div></div>
+          <div class="advanced-overview">
+            <div><span>Swap</span><strong id="swapValue">—</strong></div>
+            <div><span>Нагрузка · 5 мин</span><strong id="load5Value">—</strong></div>
+            <div><span>Нагрузка · 15 мин</span><strong id="load15Value">—</strong></div>
+            <div><span>Активные процессы</span><strong id="processValue">—</strong></div>
+            <div><span>Службы с ошибкой</span><strong id="failedServicesValue">—</strong></div>
+          </div>
+          <section class="clock-diagnostics" aria-labelledby="clockHeading">
+            <h3 id="clockHeading">Время сервера</h3>
+            <p id="clockWarning" class="clock-warning" role="alert" hidden></p>
+            <dl class="clock-values">
+              <div><dt>Системное время UTC</dt><dd id="clockUtcValue">—</dd></div>
+              <div><dt>Синхронизация NTP</dt><dd id="clockSyncValue">—</dd></div>
+              <div><dt>Часовой пояс</dt><dd id="clockZoneValue">—</dd></div>
+              <div><dt>RTC относительно системы</dt><dd id="clockRtcOffsetValue">—</dd></div>
+            </dl>
+            <p class="clock-caption">Системное время сервера показано в UTC. Время событий в остальных разделах показано в часовом поясе устройства.</p>
+          </section>
+          <div class="advanced-grid">
+            <div class="advanced-group"><h3>Файловые системы</h3><p id="rootInodeStatus" class="field-help">Состояние inode корня неизвестно.</p><div id="filesystemsList" class="advanced-list"></div></div>
+            <div class="advanced-group"><h3>Сетевые интерфейсы</h3><div id="interfacesList" class="advanced-list"></div></div>
+            <div class="advanced-group"><h3>Дисковый ввод-вывод</h3><div id="diskIoList" class="advanced-list"></div></div>
+            <div class="advanced-group"><h3>Системные службы</h3><div id="servicesList" class="advanced-list"></div></div>
+          </div>
+        </section>
+
+        <section class="panel filesystem-alerts-panel" aria-labelledby="filesystemAlertsHeading">
+          <div class="panel-heading"><div><p class="eyebrow">МЕСТО И INODE</p><h2 id="filesystemAlertsHeading">Оповещения по дискам</h2></div><span id="filesystemAlertsCount" class="count-pill">—</span></div>
+          <p id="filesystemAlertsSource" class="field-help" role="status">Получаем состояние файловых систем.</p>
+          <div class="filesystem-alert-actions" data-admin-only><button id="filesystemAlertsAdd" class="secondary-button" type="button" disabled>Добавить правило</button><button id="filesystemAlertsHold" class="secondary-button" type="button" disabled>Время подтверждения</button></div>
+          <p id="filesystemAlertsError" class="form-error" role="alert" hidden></p>
+          <p id="filesystemAlertsMessage" class="field-help" role="status" hidden></p>
+          <div id="filesystemAlertsList" class="filesystem-alert-list" aria-live="polite"></div>
+          <p class="field-help">Правило можно добавить только для файловой системы из свежего отчёта Agent. При потере данных Hub не объявляет восстановление. Telegram скрывает путь диска.</p>
+        </section>
+
+        <section class="panel process-panel" aria-labelledby="topProcessesHeading">
+          <div class="panel-heading"><div><p class="eyebrow">Последний отчёт</p><h2 id="topProcessesHeading">Топ процессов по памяти</h2></div><span class="section-caption">RSS · без аргументов команд</span></div>
+          <p id="topProcessesStatus" class="process-status" role="status">Список появится после первого отчёта агента.</p>
+          <table id="topProcessesTable" class="process-table" aria-label="Процессы с наибольшим использованием памяти" hidden>
+            <thead><tr><th scope="col">PID</th><th scope="col">Процесс</th><th scope="col">RSS</th></tr></thead>
+            <tbody id="topProcessesRows"></tbody>
+          </table>
+        </section>
+
+        <section class="panel process-panel action-control-panel" aria-labelledby="processInventoryHeading" data-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">ПО ЗАПРОСУ</p><h2 id="processInventoryHeading">Список процессов</h2></div><span class="section-caption">Имя · PID · RSS</span></div>
+          <p class="panel-intro">Читаются только короткое имя и память процесса. Аргументы команд, окружение и пути не собираются. Список может измениться во время просмотра.</p>
+          <form id="processInventoryForm" class="vpn-control-form"><label for="processInventoryFilter">Фильтр по имени (необязательно)</label><input id="processInventoryFilter" maxlength="16" autocomplete="off" spellcheck="false" placeholder="python"><button id="processInventoryStart" type="submit" class="secondary-button">Получить список</button></form>
+          <p id="processInventoryError" class="form-error" role="alert" hidden></p>
+          <p id="processInventoryStatus" class="field-help" role="status">Запрос ещё не отправлен.</p>
+          <table id="processInventoryTable" class="process-table" aria-label="Процессы на выбранном сервере" hidden><thead><tr><th scope="col">PID</th><th scope="col">Процесс</th><th scope="col">RSS</th></tr></thead><tbody id="processInventoryRows"></tbody></table>
+          <button id="processInventoryMore" type="button" class="secondary-button" hidden>Следующая страница</button>
+        </section>
+
+        <section class="panel container-panel" aria-labelledby="containersHeading">
+          <div class="panel-heading"><div><p class="eyebrow">DOCKER И PODMAN</p><h2 id="containersHeading">Контейнеры</h2></div><span id="containersCount" class="count-pill">—</span></div>
+          <p id="containersFreshness" class="container-freshness" role="status">Ожидаем данные Agent.</p>
+          <div id="containersList" class="container-engines" aria-live="polite"></div>
+          <p class="field-help">Снимок содержит только имена, образы, состояние и доступные показатели. Сбор включается отдельно на сервере; окружение контейнеров не передаётся.</p>
+          <section id="containerLogsPanel" class="container-logs-panel" aria-labelledby="containerLogsHeading" data-admin-only hidden>
+            <div class="panel-heading"><div><p class="eyebrow">ПО ЗАПРОСУ · АДМИНИСТРАТОР</p><h3 id="containerLogsHeading">Журнал контейнера</h3></div><span class="section-caption">До 100 строк · без постоянного хранения</span></div>
+            <p id="containerLogsHint" class="field-help">Выберите работающий сервер с включённым инвентарём контейнеров.</p>
+            <form id="containerLogsForm" class="container-logs-form">
+              <div><label for="containerLogsTarget">Контейнер</label><select id="containerLogsTarget" disabled></select></div>
+              <div><label for="containerLogsLines">Последние строки</label><select id="containerLogsLines"><option value="20">20</option><option value="50" selected>50</option><option value="100">100</option></select></div>
+              <button id="containerLogsRead" class="secondary-button" type="submit" disabled>Прочитать журнал</button>
+            </form>
+            <p class="field-help">Сейчас доступны только управляемые контейнеры SovaGrid Hub/Web; Agent отдельно проверяет Compose-метки. Журнал может содержать секреты. Текст виден только в этой вкладке пять минут, затем удаляется.</p>
+            <p id="containerLogsError" class="form-error" role="alert" hidden></p>
+            <p id="containerLogsResult" class="field-help" role="status">Запрос ещё не отправлен.</p>
+            <pre id="containerLogsOutput" class="container-logs-output" aria-label="Последние строки журнала контейнера"></pre>
+          </section>
+          <section id="containerActionPanel" class="container-logs-panel" aria-labelledby="containerActionHeading" data-admin-only hidden>
+            <div class="panel-heading"><div><p class="eyebrow">ОТДЕЛЬНОЕ РАЗРЕШЕНИЕ · АДМИНИСТРАТОР</p><h3 id="containerActionHeading">Действия с контейнером</h3></div><span id="containerActionBadge" class="status-badge waiting">Не проверено</span></div>
+            <p id="containerActionHint" class="field-help">Выберите Docker-контейнер из полного снимка работающего Agent.</p>
+            <form id="containerActionForm" class="vpn-control-form"><label for="containerActionTarget">Docker-контейнер</label><select id="containerActionTarget" disabled></select><button id="containerActionCheck" type="submit" class="secondary-button" disabled>Проверить состояние</button></form>
+            <p id="containerActionStatus" class="field-help" role="status">Контейнер ещё не проверен.</p>
+            <div class="user-actions"><button id="containerActionStart" type="button" class="secondary-button" disabled>Запустить</button><button id="containerActionStop" type="button" class="secondary-button" disabled>Остановить</button><button id="containerActionRestart" type="button" class="secondary-button" disabled>Перезапустить</button></div>
+            <p class="field-help">Для действий нужен отдельный список точных контейнеров на сервере. Контейнеры SovaGrid, Amnezia, SSH и сетевой инфраструктуры защищены. После каждого действия проверьте состояние заново.</p>
+            <p id="containerActionError" class="form-error" role="alert" hidden></p>
+          </section>
+          <section id="containerAlertsPanel" class="container-logs-panel" aria-labelledby="containerAlertsHeading">
+            <div class="panel-heading"><div><p class="eyebrow">ОПОВЕЩЕНИЯ ПО КОНТЕЙНЕРАМ</p><h3 id="containerAlertsHeading">Следить за Docker</h3></div><span id="containerAlertsCount" class="count-pill">—</span></div>
+            <p id="containerAlertsSource" class="field-help" role="status">Получаем правила мониторинга.</p>
+            <div class="container-alert-actions" data-admin-only><button id="containerAlertsAdd" class="secondary-button" type="button" disabled>Добавить контейнер</button><button id="containerAlertsHold" class="secondary-button" type="button" disabled>Время подтверждения</button></div>
+            <p id="containerAlertsError" class="form-error" role="alert" hidden></p>
+            <p id="containerAlertsMessage" class="field-help" role="status" hidden></p>
+            <div id="containerAlertsList" class="container-alert-list" aria-live="polite"></div>
+            <p class="field-help">Оповещения включаются для выбранных имён Docker. При неполном или устаревшем снимке Hub не закрывает тревогу. Сообщение Telegram не содержит имя контейнера.</p>
+          </section>
+        </section>
+
+        <dialog id="containerAlertDialog" aria-labelledby="containerAlertDialogHeading">
+          <form id="containerAlertForm">
+            <h2 id="containerAlertDialogHeading">Настроить оповещение</h2>
+            <p id="containerAlertDialogHint" class="field-help"></p>
+            <div id="containerAlertRuleFields" class="container-alert-fields">
+              <label for="containerAlertName">Docker-контейнер</label><select id="containerAlertName" required></select>
+              <label class="container-alert-checkbox"><input id="containerAlertStopped" type="checkbox" checked> Сообщать, если остановлен</label>
+              <label class="container-alert-checkbox"><input id="containerAlertUnhealthy" type="checkbox" checked> Сообщать о состоянии unhealthy</label>
+              <label class="container-alert-checkbox"><input id="containerAlertMissing" type="checkbox"> Сообщать, если контейнер исчез</label>
+            </div>
+            <div id="containerAlertHoldField" class="container-alert-fields" hidden>
+              <label for="containerAlertHoldSeconds">Подтверждать проблему через</label><input id="containerAlertHoldSeconds" type="number" min="0" max="86400" step="1" inputmode="numeric" value="120" required>
+              <p class="field-help">Секунд: 0 — сразу, 120 — через две минуты, максимум 24 часа.</p>
+            </div>
+            <p id="containerAlertDialogError" class="form-error" role="alert" hidden></p>
+            <div class="container-alert-actions"><button id="containerAlertCancel" class="secondary-button" type="button">Отмена</button><button id="containerAlertConfirm" class="primary-button" type="submit">Сохранить</button></div>
+          </form>
+        </dialog>
+
+        <dialog id="filesystemAlertDialog" aria-labelledby="filesystemAlertDialogHeading">
+          <form id="filesystemAlertForm">
+            <h2 id="filesystemAlertDialogHeading">Оповещение по диску</h2>
+            <p id="filesystemAlertDialogHint" class="field-help"></p>
+            <div id="filesystemAlertRuleFields" class="filesystem-alert-fields">
+              <label for="filesystemAlertMountpoint">Файловая система</label><select id="filesystemAlertMountpoint" required></select>
+              <label for="filesystemAlertMetric">Показатель</label><select id="filesystemAlertMetric"><option value="space">Занято место</option><option value="inodes">Занято inode</option></select>
+              <label for="filesystemAlertThreshold">Предупреждать при использовании от, %</label><input id="filesystemAlertThreshold" type="number" min="1" max="100" step="1" inputmode="numeric" value="90" required>
+            </div>
+            <div id="filesystemAlertHoldField" class="filesystem-alert-fields" hidden>
+              <label for="filesystemAlertHoldSeconds">Подтверждать проблему через</label><input id="filesystemAlertHoldSeconds" type="number" min="0" max="86400" step="1" inputmode="numeric" value="120" required>
+              <p class="field-help">Секунд: 0 — сразу, 120 — через две минуты, максимум 24 часа.</p>
+            </div>
+            <p id="filesystemAlertDialogError" class="form-error" role="alert" hidden></p>
+            <div class="filesystem-alert-actions"><button id="filesystemAlertCancel" class="secondary-button" type="button">Отмена</button><button id="filesystemAlertConfirm" class="primary-button" type="submit">Сохранить</button></div>
+          </form>
+        </dialog>
+
+        <section class="panel incidents-panel" aria-labelledby="incidentsHeading"><div class="panel-heading"><div><p class="eyebrow">События</p><h2 id="incidentsHeading">Оповещения</h2></div><span id="incidentCount" class="count-pill">0</span></div><div id="incidentsList" class="incidents-list"></div></section>
+      </main>
+
+      <main id="commandsView" data-view-panel="commands" hidden>
+        <section class="hero-card operations-hero"><div><div class="hero-kicker"><span class="section-tag">ОПЕРАЦИИ</span><span id="commandServerStatus" class="status-badge">—</span></div><h2 id="commandServerName">—</h2><p>Команды ставятся в очередь и выполняются агентом от пользователя <code>sovagrid</code> без прав root.</p></div><div class="hero-symbol" aria-hidden="true">›_</div></section>
+        <section class="panel terminal-panel" aria-labelledby="terminalHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ИНТЕРАКТИВНАЯ СЕССИЯ</p><h2 id="terminalHeading">Терминал</h2></div><span id="terminalStatusBadge" class="status-badge waiting">Отключён</span></div>
+          <div class="terminal-tab-bar"><div id="terminalTabs" class="terminal-tabs" role="tablist" aria-label="Сессии терминала"></div><button id="terminalAddTabButton" class="terminal-add-tab" type="button" aria-label="Добавить вкладку терминала" title="Открыть вкладку для выбранного сервера">+ Вкладка</button></div>
+          <p id="terminalTarget" class="panel-intro">Выберите сервер и откройте отдельную терминальную сессию.</p>
+          <div class="terminal-controls"><button id="terminalStartButton" class="primary-button" type="button">Открыть терминал</button><button id="terminalReconnectButton" class="secondary-button" type="button" hidden>Восстановить связь</button><button id="terminalCloseButton" class="secondary-button" type="button" hidden>Закрыть сессию</button></div>
+          <p id="terminalError" class="form-error" role="alert" hidden></p>
+          <div id="terminalScreen" class="terminal-screen" role="tabpanel" aria-label="Интерактивный терминал выбранного сервера"></div>
+          <form id="terminalInputForm" class="terminal-line-form" autocomplete="off">
+            <label for="terminalInput">Ввод с телефона</label>
+            <div class="terminal-line-controls"><input id="terminalInput" type="text" maxlength="2048" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="send" placeholder="Введите или вставьте одну строку" aria-describedby="terminalInputHelp terminalInputError" disabled><button id="terminalInputVisibility" class="secondary-button" type="button" aria-label="Скрыть ввод" aria-pressed="false" disabled>Скрыть</button><button id="terminalInputSend" class="primary-button" type="submit" disabled>Отправить ↵</button></div>
+            <p id="terminalInputHelp" class="field-help">Строка отправится после нажатия кнопки вместе с Enter. Для пароля можно скрыть ввод. Поле очищается сразу после отправки и не сохраняется.</p>
+            <p id="terminalInputError" class="form-error" role="alert" hidden></p>
+          </form>
+          <div id="terminalKeys" class="terminal-keys" role="group" aria-label="Клавиши терминала">
+            <button type="button" data-terminal-key="focus">Клавиатура</button><button type="button" data-terminal-key="esc">Esc</button><button type="button" data-terminal-key="tab">Tab</button><button type="button" data-terminal-key="ctrl-c">Ctrl+C</button><button type="button" data-terminal-key="ctrl-d">Ctrl+D</button><button type="button" data-terminal-key="ctrl-z">Ctrl+Z</button><button type="button" data-terminal-key="ctrl-l">Ctrl+L</button><button type="button" data-terminal-key="up">↑</button><button type="button" data-terminal-key="down">↓</button><button type="button" data-terminal-key="left">←</button><button type="button" data-terminal-key="right">→</button><button type="button" data-terminal-key="home">Home</button><button type="button" data-terminal-key="end">End</button><button type="button" data-terminal-key="pageup">PgUp</button><button type="button" data-terminal-key="pagedown">PgDn</button><button type="button" data-terminal-key="enter">Enter</button>
+          </div>
+          <p id="terminalHelp" class="field-help">До четырёх вкладок и одна сессия на сервер. Вкладки работают независимо. Незавершённый ввод хранится только пока открыта эта страница; при переходе к другой вкладке строка ввода на телефоне очищается. Закройте сессию, чтобы очистить её экран.</p>
+        </section>
+        <div class="operations-grid">
+          <section class="panel command-panel" aria-labelledby="commandHeading">
+            <div class="panel-heading"><div><p class="eyebrow">Управление</p><h2 id="commandHeading">Выполнить команду</h2></div></div>
+            <div class="permission-row"><div><strong id="commandPermissionTitle">Команды отключены</strong><p id="commandPermissionDescription">Для запуска нужен допуск в Hub и в локальной конфигурации агента.</p></div><button id="commandPermissionButton" class="secondary-button" type="button">Разрешить в Hub</button></div>
+            <form id="commandForm"><label for="commandInput">Команда на выбранном сервере</label><textarea id="commandInput" rows="4" maxlength="2048" spellcheck="false" placeholder="Например: uptime" required></textarea><p class="field-help">До 2048 байт, 15 секунд выполнения и 8 КБ вывода. Интерактивные программы и sudo здесь не поддерживаются.</p><p id="commandError" class="form-error" role="alert" hidden></p><button id="prepareCommandButton" class="primary-button" type="submit">Проверить и запустить <span aria-hidden="true">→</span></button></form>
+          </section>
+          <section class="panel quick-panel" aria-labelledby="quickHeading"><div class="panel-heading"><div><p class="eyebrow">Готовые проверки</p><h2 id="quickHeading">Диагностика</h2></div></div><p>Выберите проверку, затем подтвердите её перед выполнением.</p><div class="quick-command-list"><button type="button" data-command="uptime">Время работы <span>uptime</span></button><button type="button" data-command="df -h">Место на дисках <span>df -h</span></button><button type="button" data-command="free -h">Память <span>free -h</span></button><button type="button" data-command="systemctl --failed --no-pager">Сбойные службы <span>systemctl --failed</span></button><button type="button" data-command="ps -eo pid,stat,%cpu,%mem,comm --sort=-%cpu | head -n 16">Активные процессы <span>ps -eo …</span></button></div></section>
+        </div>
+        <section class="panel jobs-panel action-control-panel" aria-labelledby="serviceControlHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ОТДЕЛЬНЫЕ РАЗРЕШЕНИЯ</p><h2 id="serviceControlHeading">Системные службы</h2></div><span id="serviceControlBadge" class="status-badge waiting">Не проверено</span></div>
+          <p class="panel-intro">Проверьте службу, затем выберите действие. Локальный Agent должен отдельно разрешать эту службу и каждое действие через root-брокер.</p>
+          <form id="serviceControlForm" class="vpn-control-form"><label for="serviceControlUnit">Имя службы systemd</label><input id="serviceControlUnit" list="serviceControlSuggestions" maxlength="96" placeholder="nginx.service" autocomplete="off" spellcheck="false" required><datalist id="serviceControlSuggestions"></datalist><button id="serviceControlCheck" type="submit" class="secondary-button">Проверить состояние</button></form>
+          <p id="serviceControlStatus" class="field-help" role="status">Служба ещё не проверена.</p>
+          <p id="serviceControlPolicyHint" class="field-help" hidden>Эта служба связана с доступом к хосту, сетью или SovaGrid. Здесь можно проверить её состояние; запуск, остановка и перезапуск защищены.</p>
+          <div class="user-actions"><button id="serviceControlStart" type="button" class="secondary-button" disabled>Запустить</button><button id="serviceControlStop" type="button" class="secondary-button" disabled>Остановить</button><button id="serviceControlRestart" type="button" class="secondary-button" disabled>Перезапустить</button></div>
+          <p id="serviceControlError" class="form-error" role="alert" hidden></p>
+          <p class="field-help">Перед каждым изменением состояние должно быть успешно проверено за последние 90 секунд. После тайм-аута действие может уже выполниться: сначала проверьте состояние ещё раз.</p>
+        </section>
+        <section class="panel jobs-panel" aria-labelledby="jobsHeading"><div class="panel-heading"><div><p class="eyebrow">История запусков</p><h2 id="jobsHeading">Задания</h2></div><span id="jobsCount" class="count-pill">0</span></div><div id="jobsList" class="jobs-list"></div></section>
+      </main>
+
+      <main id="filesView" data-view-panel="files" hidden>
+        <section class="hero-card operations-hero"><div><div class="hero-kicker"><span class="section-tag">ФАЙЛЫ СЕРВЕРА</span><span id="filesStatus" class="status-badge waiting">Не подключено</span></div><h2 id="filesServerName">Выберите сервер</h2><p>Просмотр, текстовый редактор и передача файлов только в каталогах, явно разрешённых на Agent.</p></div><div class="hero-symbol" aria-hidden="true">▤</div></section>
+        <div class="files-layout">
+          <section class="panel files-browser" aria-labelledby="filesBrowseHeading">
+            <div class="panel-heading"><div><p class="eyebrow">НАВИГАЦИЯ</p><h2 id="filesBrowseHeading">Каталоги</h2></div><button id="filesRefresh" class="secondary-button" type="button">Обновить</button></div>
+            <label for="filesRoot">Разрешённый каталог</label><select id="filesRoot" aria-describedby="filesHelp"></select>
+            <p id="filesHelp" class="field-help">Файлы доступны только в папках, разрешённых владельцем сервера.</p>
+            <div class="files-path-row"><button id="filesUp" class="secondary-button" type="button" aria-label="На уровень выше">↑</button><code id="filesPath">/</code></div>
+            <div class="files-transfer-toolbar"><button id="filesUpload" class="secondary-button" type="button" disabled>Загрузить файл</button><input id="filesUploadInput" type="file" hidden aria-label="Выбрать файл для загрузки"><span>До 4 МБ за файл</span></div>
+            <p id="filesTransferStatus" class="field-help" role="status"></p><button id="filesTransferCancel" class="text-button" type="button" hidden>Остановить передачу</button>
+            <p id="filesError" class="form-error" role="alert" hidden></p><div id="filesEntries" class="files-entries" aria-live="polite"></div>
+          </section>
+          <section class="panel files-editor" aria-labelledby="filesEditorHeading">
+            <div class="panel-heading"><div><p class="eyebrow">ТЕКСТОВЫЙ РЕДАКТОР</p><h2 id="filesEditorHeading">Редактор</h2></div><span id="filesEditorState" class="status-badge waiting">Файл не открыт</span></div>
+            <p id="filesCurrentFile" class="panel-intro">Откройте текстовый файл из списка.</p>
+            <textarea id="filesText" spellcheck="false" aria-label="Содержимое файла" disabled></textarea>
+            <div class="files-editor-actions"><span id="filesSize">До 8 КБ UTF-8</span><button id="filesDiscard" class="secondary-button" type="button" disabled>Отменить правки</button><button id="filesSave" class="primary-button" type="button" disabled>Сохранить</button></div>
+            <p class="field-help">Сохранение проверяет версию файла и требует подтверждения. Если файл изменился на сервере, ваши правки остаются в редакторе.</p>
+          </section>
+        </div>
+      </main>
+
+      <main id="incidentsView" data-view-panel="incidents" hidden><section class="panel events-panel"><div class="panel-heading"><div><p class="eyebrow">Контроль состояния</p><h2>События выбранного сервера</h2></div><span id="eventsCount" class="count-pill">0</span></div><p class="panel-intro">Подтверждение отмечает событие как просмотренное. Оно закроется после восстановления показателя.</p><div id="eventsList" class="incidents-list"></div></section></main>
+
+      <main id="vpnView" data-view-panel="vpn" hidden>
+        <section class="hero-card vpn-hero" aria-label="Состояние VPN">
+          <div><div class="hero-kicker"><span class="section-tag">СЕТЕВЫЕ СЕРВИСЫ</span><span id="vpnSourceBadge" class="status-badge vpn-status-unavailable">Нет данных</span></div><h2>Amnezia VPN</h2><p id="vpnSourceText">Получаем состояние сервисов...</p><small id="vpnSnapshotTime">Снимок ещё не получен</small></div>
+          <div class="hero-symbol" aria-hidden="true">◈</div>
+        </section>
+        <section class="vpn-summary-grid" aria-label="Сводка VPN">
+          <article><span>Обнаружено сервисов</span><strong id="vpnTotal">—</strong></article>
+          <article><span>Работают</span><strong id="vpnRunning">—</strong></article>
+          <article><span>Ошибки проверки</span><strong id="vpnUnhealthy">—</strong></article>
+        </section>
+        <section class="panel vpn-services-panel" aria-labelledby="vpnServicesHeading">
+          <div class="panel-heading"><div><p class="eyebrow">Инвентаризация</p><h2 id="vpnServicesHeading">Обнаруженные сервисы</h2></div><span id="vpnServicesCount" class="count-pill">—</span></div>
+          <p class="panel-intro">Состояние, проверка работоспособности и опубликованные порты на хосте центра мониторинга. Данные доступны только для просмотра.</p>
+          <div id="vpnServicesList" class="vpn-service-grid"></div>
+        </section>
+        <section class="panel vpn-services-panel" aria-labelledby="amneziaDetailHeading">
+          <div class="panel-heading"><div><p class="eyebrow">Проверка протоколов</p><h2 id="amneziaDetailHeading">Amnezia изнутри</h2></div><span id="amneziaDetailBadge" class="status-badge vpn-status-unavailable">Нет данных</span></div>
+          <p id="amneziaDetailText" class="panel-intro">Получаем состояние интерфейсов, клиентов и активности. Ключи и адреса не передаются в панель.</p>
+          <div id="amneziaDetailList" class="vpn-service-grid"></div>
+        </section>
+        <section class="panel vpn-control-panel" aria-labelledby="amneziaControlHeading" data-vpn-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">ОПЦИОНАЛЬНОЕ УПРАВЛЕНИЕ</p><h2 id="amneziaControlHeading">Профили Amnezia и WireGuard</h2></div><span id="amneziaControlBadge" class="status-badge vpn-status-unavailable">Нет доступа</span></div>
+          <label for="amneziaTarget">Тип установленного контейнера</label><select id="amneziaTarget"><option value="awg2">AmneziaWG 2</option><option value="wireguard">WireGuard</option></select>
+          <p id="amneziaControlText" class="panel-intro">Выберите сервер для операций ниже и проверьте состояние локального брокера. Он подключается отдельно на сервере и по умолчанию выключен.</p>
+          <div class="amnezia-status-row"><button id="amneziaCheck" class="secondary-button" type="button">Проверить управление</button><button id="amneziaSettingsPreview" class="secondary-button" type="button">Посмотреть настройки сервера</button><span id="amneziaObserved" class="field-help"></span></div>
+          <p id="amneziaError" class="form-error" role="alert" hidden></p>
+          <section id="amneziaSettingsCard" class="amnezia-settings" aria-labelledby="amneziaSettingsHeading" aria-live="polite" hidden><h3 id="amneziaSettingsHeading">Настройки VPN-сервера</h3><p id="amneziaSettingsState"></p><div id="amneziaSettingsValues"></div><details id="amneziaSettingsDetails"><summary>Технические идентификаторы снимка</summary><p id="amneziaSettingsDigests"></p></details></section>
+          <section id="amneziaPlanSection" class="amnezia-settings" aria-labelledby="amneziaPlanHeading" hidden>
+            <h3 id="amneziaPlanHeading">Предпросмотр изменения AWG3</h3>
+            <p>Измените числовые параметры и получите план для текущего снимка сервера. Если клиентов нет, можно отдельно подтвердить применение. При действующих клиентах понадобится миграция их профилей.</p>
+            <form id="amneziaPlanForm" autocomplete="off">
+              <div class="amnezia-plan-fields">
+                <label for="amneziaPlanJc">Jc<input id="amneziaPlanJc" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanJmin">Jmin<input id="amneziaPlanJmin" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanJmax">Jmax<input id="amneziaPlanJmax" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanS1">S1<input id="amneziaPlanS1" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanS2">S2<input id="amneziaPlanS2" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanS3">S3<input id="amneziaPlanS3" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanS4">S4<input id="amneziaPlanS4" inputmode="numeric" maxlength="10" spellcheck="false"></label>
+                <label for="amneziaPlanH1">H1<input id="amneziaPlanH1" maxlength="21" spellcheck="false"></label>
+                <label for="amneziaPlanH2">H2<input id="amneziaPlanH2" maxlength="21" spellcheck="false"></label>
+                <label for="amneziaPlanH3">H3<input id="amneziaPlanH3" maxlength="21" spellcheck="false"></label>
+                <label for="amneziaPlanH4">H4<input id="amneziaPlanH4" maxlength="21" spellcheck="false"></label>
+              </div>
+              <p class="field-help">J и S: 0–65535; S1–S4 минимум 12. H: число 0–4294967295 или диапазон «начало-конец». Jmin не больше Jmax.</p>
+              <p id="amneziaPlanError" class="form-error" role="alert" hidden></p>
+              <div class="amnezia-plan-actions"><button id="amneziaPlanSubmit" class="secondary-button" type="submit">Показать план</button><button id="amneziaPlanReset" class="secondary-button" type="button">Сбросить ввод</button></div>
+            </form>
+            <div id="amneziaPlanResult" class="amnezia-plan-result" role="status" aria-live="polite" hidden><strong id="amneziaPlanResultState"></strong><p id="amneziaPlanSummary"></p><p id="amneziaPlanBlockers"></p><button id="amneziaPlanPrepareApply" class="primary-button" type="button" hidden>Подготовить применение</button><details><summary>Контрольные суммы плана</summary><p id="amneziaPlanDigests"></p></details></div>
+          </section>
+          <h3 class="vpn-form-heading">Клиенты, добавленные SovaGrid</h3>
+          <div id="amneziaOwned" class="amnezia-owned" aria-live="polite">Данные появятся после проверки.</div>
+          <h3 class="vpn-form-heading" id="amneziaAddHeading">Создать профиль AmneziaWG 3.1</h3>
+          <form id="amneziaAddForm" class="vpn-control-form">
+            <label for="amneziaAddClient">Имя клиента</label><input id="amneziaAddClient" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
+            <label for="amneziaAddAddress">IPv4-адрес клиента в подсети VPN</label><input id="amneziaAddAddress" required inputmode="decimal" placeholder="10.0.0.42" autocomplete="off" spellcheck="false">
+            <label for="amneziaAddEndpoint">Публичный IP или DNS сервера</label><input id="amneziaAddEndpoint" required placeholder="server.example.com" autocomplete="off" spellcheck="false">
+            <label for="amneziaAddRoute">Маршрутизация</label><select id="amneziaAddRoute"><option value="split">Только подсеть VPN</option><option value="full">Весь трафик · нужен NAT сервера</option></select>
+            <p class="field-help">Адрес должен быть свободен в существующей подсети. Профиль будет создан и зашифрован для этой вкладки. Для всего трафика заранее настройте IP forwarding и NAT самого контейнера/хоста Amnezia: SovaGrid меняет маршрут профиля, но не настраивает их за вас.</p>
+            <button id="amneziaAddButton" class="primary-button" type="submit">Создать профиль</button>
+          </form>
+          <h3 class="vpn-form-heading">Существующий профиль</h3>
+          <form id="amneziaExportForm" class="vpn-control-form">
+            <label for="amneziaExportClient">Имя клиента</label><input id="amneziaExportClient" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
+            <button id="amneziaExportButton" class="secondary-button" type="submit">Получить зашифрованный .conf</button>
+          </form>
+          <form id="amneziaRevokeForm" class="vpn-control-form">
+            <label for="amneziaRevokeClient">Отозвать доступ клиента</label><input id="amneziaRevokeClient" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
+            <button id="amneziaRevokeButton" class="secondary-button" type="submit">Проверить отзыв</button>
+          </form>
+          <div id="amneziaJobPanel" class="amnezia-job" hidden><h3>Последняя операция</h3><p id="amneziaJobState" role="status"></p><p id="amneziaProfileStatus" class="field-help"></p><div class="vpn-profile-actions"><button id="amneziaDownload" class="primary-button" type="button" hidden>Скачать .conf</button><button id="amneziaShare" class="secondary-button" type="button" hidden>Поделиться профилем</button></div></div>
+        </section>
+        <section class="panel vpn-services-panel" aria-labelledby="managedVpnHeading">
+          <div class="panel-heading"><div><p class="eyebrow">SovaGrid WireGuard</p><h2 id="managedVpnHeading">Управляемые инстансы</h2></div><span id="managedSourceBadge" class="status-badge vpn-status-unavailable">Нет данных</span></div>
+          <p id="managedSourceText" class="panel-intro">Получаем состояние WireGuard.</p>
+          <div class="vpn-summary-grid" aria-label="Сводка управляемого WireGuard">
+            <article><span>Инстансов</span><strong id="managedCount">—</strong></article>
+            <article><span>Активны</span><strong id="managedActive">—</strong></article>
+            <article><span>Требуют проверки</span><strong id="managedError">—</strong></article>
+          </div>
+          <div id="managedInstancesList" class="vpn-service-grid"></div>
+        </section>
+        <section class="panel vpn-control-panel" aria-labelledby="vpnControlHeading" data-vpn-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">Управление</p><h2 id="vpnControlHeading">WireGuard на сервере</h2></div></div>
+          <p class="panel-intro">Операции выполняются на выбранном Ubuntu-сервере через его Agent и отдельный локальный VPN-сервис. Сводка выше относится к хосту центра мониторинга. Создание подготавливает конфигурацию; интерфейс запускается отдельно.</p>
+          <label for="vpnTargetServer">Сервер для операций</label>
+          <select id="vpnTargetServer" aria-describedby="vpnTargetStatus"></select>
+          <p id="vpnTargetStatus" class="field-help">Выберите сервер с разрешёнными командами.</p>
+          <h3 class="vpn-form-heading">Подготовить новый инстанс</h3>
+          <form id="vpnCreateForm" class="vpn-control-form">
+            <label for="vpnCreateName">Имя инстанса</label><input id="vpnCreateName" required pattern="[a-z][a-z0-9-]{1,31}" maxlength="32" placeholder="phone-vpn" autocomplete="off">
+            <label for="vpnCreatePort">UDP-порт</label><input id="vpnCreatePort" required type="number" min="1024" max="65535" value="51821" inputmode="numeric">
+            <label for="vpnCreateSubnet">Подсеть</label><input id="vpnCreateSubnet" required placeholder="10.49.0.0/24" autocomplete="off" spellcheck="false">
+            <label for="vpnCreateEndpoint">Публичный IP или DNS сервера</label><input id="vpnCreateEndpoint" required placeholder="server.example.com" autocomplete="off" spellcheck="false">
+            <p id="vpnCreateError" class="form-error" role="alert" hidden></p>
+            <button id="vpnCreateButton" class="primary-button" type="submit">Подготовить инстанс</button>
+          </form>
+          <h3 class="vpn-form-heading">Действующий инстанс</h3>
+          <form id="vpnInstanceForm" class="vpn-control-form">
+            <label for="vpnInstanceAction">Операция</label><select id="vpnInstanceAction"><option value="activate">Запустить</option><option value="remove">Удалить</option></select>
+            <label for="vpnInstanceName">Имя инстанса на выбранном сервере</label><input id="vpnInstanceName" required pattern="[a-z][a-z0-9-]{1,31}" maxlength="32" placeholder="phone-vpn" autocomplete="off">
+            <p id="vpnInstanceError" class="form-error" role="alert" hidden></p>
+            <button id="vpnInstanceButton" class="secondary-button" type="submit">Проверить операцию</button>
+          </form>
+        </section>
+        <section class="panel vpn-control-panel" aria-labelledby="vpnClientHeading" data-vpn-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">Клиенты</p><h2 id="vpnClientHeading">Доступы WireGuard</h2></div></div>
+          <p class="panel-intro">Укажите имя инстанса на выбранном сервере. Закрытый профиль клиента хранится там; получить его можно через зашифрованную выдачу ниже.</p>
+          <form id="vpnClientForm" class="vpn-control-form">
+            <label for="vpnClientInstance">Имя инстанса</label><input id="vpnClientInstance" required pattern="[a-z][a-z0-9-]{1,31}" maxlength="32" placeholder="phone-vpn" autocomplete="off">
+            <label for="vpnClientAction">Операция</label><select id="vpnClientAction"><option value="add-client">Добавить клиента</option><option value="revoke-client">Отозвать клиента</option></select>
+            <label for="vpnClientName">Имя клиента</label><input id="vpnClientName" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
+            <p id="vpnClientError" class="form-error" role="alert" hidden></p>
+            <button id="vpnClientButton" class="primary-button" type="submit">Проверить операцию</button>
+          </form>
+          <h3 class="vpn-form-heading">Получить профиль на это устройство</h3>
+          <p class="field-help">Панель создаст временный ключ в этой вкладке и запросит зашифрованный файл у выбранного Agent. После выполнения задания нажмите «Скачать .conf» или «Поделиться». При обновлении страницы запросите файл заново.</p>
+          <form id="vpnExportForm" class="vpn-control-form">
+            <label for="vpnExportInstance">Имя инстанса</label><input id="vpnExportInstance" required pattern="[a-z][a-z0-9-]{1,31}" maxlength="32" placeholder="phone-vpn" autocomplete="off">
+            <label for="vpnExportClient">Имя клиента</label><input id="vpnExportClient" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
+            <label for="vpnExportRoute">Что направлять через VPN</label><select id="vpnExportRoute"><option value="split">Только подсеть VPN</option><option value="full">Весь интернет-трафик</option></select>
+            <p class="field-help">Полный маршрут требует включённой маршрутизации SovaGrid, NAT и работающего VPN-интерфейса на сервере. IPv6 тоже направляется в туннель (::/0): без IPv6-выхода на сервере он будет недоступен и не пойдёт мимо VPN. Проверьте внешний firewall и соединение после импорта.</p>
+            <p id="vpnExportError" class="form-error" role="alert" hidden></p>
+            <button id="vpnExportButton" class="secondary-button" type="submit">Запросить защищённый профиль</button>
+          </form>
+        </section>
+        <section id="vpnActionJobPanel" class="panel vpn-control-panel" aria-labelledby="vpnActionJobHeading" hidden>
+          <div class="panel-heading"><div><p class="eyebrow">Последняя операция</p><h2 id="vpnActionJobHeading">Задание VPN</h2></div><span id="vpnActionJobState" class="status-badge">В очереди</span></div>
+          <p id="vpnActionJobText" class="panel-intro"></p><pre id="vpnActionJobOutput" class="job-output" hidden></pre>
+          <p id="vpnProfileStatus" class="field-help" role="status"></p>
+          <div class="vpn-profile-actions"><button id="vpnProfileDownload" class="primary-button" type="button" hidden>Скачать .conf</button><button id="vpnProfileShare" class="secondary-button" type="button" hidden>Поделиться профилем</button></div>
+        </section>
+      </main>
+
+      <main id="auditView" data-view-panel="audit" hidden><section class="panel audit-panel"><div class="panel-heading"><div><p class="eyebrow">Безопасность</p><h2>Журнал действий</h2></div><span id="auditCount" class="count-pill">0</span></div><p class="panel-intro">Последние действия с серверами и заданиями. Текст команд в журнале не показывается.</p><div id="auditList" class="audit-list"></div></section></main>
+      <main id="settingsView" data-view-panel="settings" hidden>
+        <section class="hero-card settings-hero"><div><div class="hero-kicker"><span class="section-tag">НАСТРОЙКИ</span></div><h2>Мониторинг и доступ</h2><p>Настройте оповещения и пароль прямо в панели.</p></div><div class="hero-symbol" aria-hidden="true">⚙</div></section>
+        <section class="panel settings-panel theme-settings" aria-labelledby="themeSettingsHeading"><div class="panel-heading"><div><p class="eyebrow">ВНЕШНИЙ ВИД</p><h2 id="themeSettingsHeading">Тема панели</h2></div></div><label class="theme-picker" for="settingsThemeSelect">Отображение <select id="settingsThemeSelect" data-theme-select><option value="system">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option></select></label><p class="field-help">Выбор сохраняется только на этом устройстве. В режиме «Как в системе» панель меняется вместе с темой устройства.</p></section>
+        <section id="localWebPanel" class="panel settings-panel local-web-panel" aria-labelledby="localWebHeading" data-global-admin-only hidden>
+          <div class="panel-heading"><div><p class="eyebrow">ЛОКАЛЬНЫЙ АДРЕС</p><h2 id="localWebHeading">Путь панели через SSH</h2></div><span id="localWebBadge" class="status-badge waiting">Проверяем</span></div>
+          <p class="panel-intro">Настройка для серверов за NAT без публичного HTTPS. Меняет путь на локальном Web; порт сервера в Интернет не открывается. Откройте панель через SSH-туннель на этом устройстве.</p>
+          <p id="localWebCurrent" class="public-web-current" role="status">Проверяем путь…</p>
+          <p id="localWebDiscovery" class="field-help" role="status">Определяем путь через Hub…</p>
+          <a id="localWebCurrentLink" class="public-web-link" target="_blank" rel="noopener noreferrer" hidden>Открыть текущий путь в этом туннеле</a>
+          <form id="localWebForm" autocomplete="off">
+            <div class="public-web-grid"><div><label for="localWebPath">Путь панели</label><input id="localWebPath" type="text" maxlength="96" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" value="/sovagrid/monitoring/" required></div><div><label for="localWebRoot">Что делать с /</label><select id="localWebRoot"><option value="untouched">Оставить / как сейчас</option><option value="panel">Открывать панель</option><option value="redirect">Перенаправлять на путь панели</option><option value="not_found">Отвечать 404</option></select></div></div>
+            <p id="localWebOwnership" class="field-help">Значение «Оставить / как сейчас» не меняет базовый корень локального Web: он может продолжать открывать панель. Для публичного HTTPS то же правило не добавляет маршрут на /.</p>
+            <p id="localWebError" class="form-error" role="alert" hidden></p><p id="localWebMessage" class="monitoring-message" role="status" hidden></p>
+            <div class="public-web-actions"><button id="localWebPreview" class="primary-button" type="submit" disabled>Проверить путь</button><button id="localWebReload" class="secondary-button" type="button" disabled>Загрузить действующее</button><button id="localWebDisable" class="secondary-button" type="button" hidden>Отключить локальную настройку…</button></div>
+          </form>
+          <section id="localWebPreviewCard" class="public-web-preview" aria-labelledby="localWebPreviewHeading" hidden><h3 id="localWebPreviewHeading">Предпросмотр локального пути</h3><p id="localWebPreviewSummary"></p><p class="field-help">Проверка не меняет сервер. После применения Web может перезапуститься, затем браузер перейдёт на новый путь без токена в URL.</p><button id="localWebApply" class="primary-button" type="button">Применить…</button></section>
+          <section id="localWebRecovery" class="public-web-recovery" aria-labelledby="localWebRecoveryHeading" hidden><h3 id="localWebRecoveryHeading">Проверяем новый путь</h3><p id="localWebRecoveryText" role="status"></p><div class="public-web-actions"><button id="localWebRetry" class="secondary-button" type="button">Проверить состояние</button><button id="localWebRepeat" class="secondary-button" type="button" hidden>Повторить тот же запрос</button><a id="localWebRecoveryLink" class="public-web-link" target="_blank" rel="noopener noreferrer">Открыть предложенный путь</a></div><p class="field-help">ID запроса и путь хранятся на этом устройстве до результата. Сеанс, пароль и SSH-ключ не сохраняются. После перехода понадобится войти снова.</p></section>
+        </section>
+        <section id="publicWebPanel" class="panel settings-panel public-web-panel" aria-labelledby="publicWebHeading" data-global-admin-only hidden>
+          <div class="panel-heading"><div><p class="eyebrow">АДРЕС ПАНЕЛИ</p><h2 id="publicWebHeading">Доступ с телефона по HTTPS</h2></div><span id="publicWebBadge" class="status-badge waiting">Проверяем</span></div>
+          <p class="panel-intro">Выберите публичный IP или домен, путь панели и поведение главной страницы. Локальный доступ через SSH остаётся доступен. Если выше включён отдельный локальный маршрут, сначала отключите его подтверждаемой кнопкой: путь и правило / перейдут в черновик HTTPS.</p>
+          <p id="publicWebCurrent" class="public-web-current" role="status">Проверяем действующий адрес…</p>
+          <a id="publicWebCurrentLink" class="public-web-link" target="_blank" rel="noopener noreferrer" hidden>Открыть действующую панель</a>
+          <form id="publicWebForm" autocomplete="off">
+            <div class="public-web-grid">
+              <div><label for="publicWebMode">Способ адресации</label><select id="publicWebMode"><option value="ip">Статический IPv4</option><option value="dns">Домен</option></select></div>
+              <div><label for="publicWebAddress">Публичный адрес</label><input id="publicWebAddress" type="text" maxlength="253" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="server.example.com" required></div>
+              <div><label for="publicWebPath">Путь панели</label><input id="publicWebPath" type="text" maxlength="96" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" value="/sovagrid/monitoring/" required></div>
+              <div><label for="publicWebRoot">Что делать с /</label><select id="publicWebRoot"><option value="untouched">Не открывать панель на /</option><option value="panel">Открывать панель</option><option value="redirect">Перенаправлять на путь панели</option><option value="not_found">Отвечать 404</option></select></div>
+            </div>
+            <p class="field-help">Путь содержит 1–3 сегмента строчными латинскими буквами, цифрами и дефисами, например <code>/sovagrid/monitoring/</code>. Это удобный адрес, а не секрет и не замена входу. На выделенном публичном HTTPS-адресе вариант «Не открывать панель на /» отвечает 404 для корня и неизвестных путей.</p>
+            <details class="public-web-advanced"><summary>Сертификат и технические настройки</summary><label for="publicWebAcme">Сертификат HTTPS</label><select id="publicWebAcme"><option value="production">Настоящий, доверенный устройствами</option><option value="staging">Тестовый, браузер не доверяет</option></select><p class="field-help">Для настоящего сертификата порты 80 и 443 должны быть доступны извне. Тестовый режим нужен только для проверки.</p></details>
+            <p id="publicWebError" class="form-error" role="alert" hidden></p>
+            <p id="publicWebMessage" class="monitoring-message" role="status" hidden></p>
+            <div class="public-web-actions"><button id="publicWebPreview" class="primary-button" type="submit" disabled>Проверить настройки</button><button id="publicWebReload" class="secondary-button" type="button" disabled>Загрузить действующие</button></div>
+          </form>
+          <section id="publicWebPreviewCard" class="public-web-preview" aria-labelledby="publicWebPreviewHeading" hidden><h3 id="publicWebPreviewHeading">Предпросмотр</h3><p id="publicWebPreviewSummary"></p><p id="publicWebPreviewRoot"></p><p id="publicWebPreviewNotice" class="field-help"></p><div class="public-web-actions"><button id="publicWebApply" class="primary-button" type="button">Применить…</button></div></section>
+          <section id="publicWebRecovery" class="public-web-recovery" aria-labelledby="publicWebRecoveryHeading" hidden><h3 id="publicWebRecoveryHeading">Проверяем результат изменения</h3><p id="publicWebRecoveryText" role="status"></p><div class="public-web-actions"><button id="publicWebRetry" class="secondary-button" type="button">Проверить состояние</button><button id="publicWebRepeat" class="secondary-button" type="button" hidden>Повторить тот же запрос</button><a id="publicWebRecoveryLink" class="public-web-link" target="_blank" rel="noopener noreferrer">Открыть предложенный адрес</a></div><p class="field-help">Восстановление использует сохранённый на этом устройстве ID запроса. Пароль и токен сеанса в адрес или хранилище не записываются. После перехода потребуется снова войти.</p></section>
+        </section>
+        <section class="panel settings-panel monitoring-panel" aria-labelledby="monitoringHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ОПОВЕЩЕНИЯ</p><h2 id="monitoringHeading">Когда сообщать о проблеме</h2></div></div>
+          <p class="panel-intro">Задайте уровень и время, в течение которого проблема должна сохраняться. Новые пороги применяются при следующем измерении, а время без связи — при ближайшей проверке.</p>
+          <form id="monitoringForm" autocomplete="off">
+            <div class="monitoring-fields">
+              <div><label for="monitoringCpu">Загрузка процессора, %</label><input id="monitoringCpu" type="number" min="1" max="100" step="0.1" inputmode="decimal" required aria-describedby="monitoringHint"></div>
+              <div><label for="monitoringMemory">Использование памяти, %</label><input id="monitoringMemory" type="number" min="1" max="100" step="0.1" inputmode="decimal" required aria-describedby="monitoringHint"></div>
+              <div><label for="monitoringDisk">Заполненность основного диска, %</label><input id="monitoringDisk" type="number" min="1" max="100" step="0.1" inputmode="decimal" required aria-describedby="monitoringHint"></div>
+              <div><label for="monitoringOffline">Нет связи с сервером, секунд</label><input id="monitoringOffline" type="number" min="10" max="86400" step="1" inputmode="numeric" required aria-describedby="monitoringOfflineHint"></div>
+              <div><label for="monitoringTrigger">Проблема длится, минут</label><input id="monitoringTrigger" type="number" min="0" max="1440" step="1" inputmode="numeric" required aria-describedby="monitoringTriggerHint"></div>
+            </div>
+            <p id="monitoringHint" class="field-help">Допустимые значения для нагрузки, памяти и диска: от 1 до 100%.</p>
+            <p id="monitoringOfflineHint" class="field-help">Если за это время не придёт новое измерение, Hub начнёт отсчёт задержки тревоги. От 10 секунд до 24 часов; обычное значение — 120 секунд.</p>
+            <p id="monitoringTriggerHint" class="field-help">0 минут — тревога сразу. При большем значении Hub ждёт устойчивого превышения порога или отсутствия связи. Тревога CPU, памяти, диска и служб подтверждается новым измерением; отсутствие связи проверяется каждые 10 секунд.</p>
+            <p id="monitoringError" class="form-error" role="alert" hidden></p>
+            <p id="monitoringMessage" class="monitoring-message" role="status" hidden></p>
+            <div class="monitoring-actions"><button id="monitoringSave" class="primary-button" type="submit" disabled>Сохранить правила</button><button id="monitoringReload" class="secondary-button" type="button" disabled>Вернуть сохранённое</button></div>
+          </form>
+        </section>
+        <section class="panel settings-panel monitoring-panel" aria-labelledby="inodeHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ФАЙЛОВАЯ СИСТЕМА</p><h2 id="inodeHeading">Оповещение о свободных inode</h2></div></div>
+          <p class="panel-intro">Inode — записи для файлов и каталогов. Даже при свободном месте на диске их нехватка может мешать создавать файлы. Правило действует для корневой файловой системы на всех серверах.</p>
+          <p id="inodeStatus" class="field-help" role="status">Загружаем правило…</p>
+          <form id="inodeForm" autocomplete="off">
+            <label class="check-enabled" for="inodeEnabled"><input id="inodeEnabled" type="checkbox" disabled> Сообщать, когда использование inode достигнет порога</label>
+            <div id="inodeFields" class="monitoring-fields" hidden>
+              <div><label for="inodeThreshold">Порог использования inode, %</label><input id="inodeThreshold" type="number" max="100" step="any" inputmode="decimal" value="90" aria-describedby="inodeHint" disabled></div>
+              <div><label for="inodeHold">Проблема длится, секунд</label><input id="inodeHold" type="number" min="30" max="86400" step="1" inputmode="numeric" value="60" aria-describedby="inodeHint" disabled></div>
+            </div>
+            <p id="inodeHint" class="field-help">Порог больше 0 и не выше 100%; задержка от 30 секунд до 24 часов. Hub ждёт повторного подтверждённого измерения. Если Agent не передал согласованные счётчики, состояние неизвестно и восстановление не объявляется.</p>
+            <p id="inodeError" class="form-error" role="alert" hidden></p><p id="inodeMessage" class="monitoring-message" role="status" hidden></p>
+            <div class="monitoring-actions"><button id="inodeSave" class="primary-button" type="submit" disabled>Сохранить правило</button><button id="inodeReload" class="secondary-button" type="button" disabled>Вернуть сохранённое</button></div>
+          </form>
+        </section>
+        <section class="panel settings-panel" aria-labelledby="settingsPasswordHeading">
+          <div class="panel-heading"><div><p class="eyebrow">БЕЗОПАСНОСТЬ</p><h2 id="settingsPasswordHeading">Сменить пароль</h2></div></div>
+          <p class="panel-intro">После смены пароля завершатся ваши сеансы. Ваши открытые терминалы закроются, а задания в очереди отменятся. Затем войдите с новым паролем.</p>
+          <form id="changePasswordForm" autocomplete="on">
+            <label for="currentAdminPassword">Текущий пароль</label><input id="currentAdminPassword" type="password" autocomplete="current-password" required maxlength="1024">
+            <label for="newAdminPassword">Новый пароль</label><input id="newAdminPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="1024" aria-describedby="newPasswordHint">
+            <p id="newPasswordHint" class="field-help">Не менее 12 символов. Используйте пароль, который не применяете где-либо ещё.</p>
+            <label for="confirmAdminPassword">Повторите новый пароль</label><input id="confirmAdminPassword" type="password" autocomplete="new-password" required minlength="12" maxlength="1024">
+            <p id="settingsPasswordError" class="form-error" role="alert" hidden></p>
+            <button id="changePasswordButton" class="primary-button" type="submit">Сменить пароль</button>
+          </form>
+        </section>
+        <section class="panel settings-panel users-panel" aria-labelledby="usersHeading" data-global-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">СОВМЕСТНАЯ РАБОТА</p><h2 id="usersHeading">Пользователи панели</h2></div><span id="usersCount" class="count-pill">—</span></div>
+          <p class="panel-intro">Создайте отдельный вход для каждого человека и выберите, что ему разрешено. Эти учётные записи относятся к панели; SSH и Telegram имеют свои доступы.</p>
+          <div class="user-role-guide">
+            <article><h3>Наблюдатель</h3><p>Состояние серверов, графики, события и сводка VPN.</p></article>
+            <article><h3>Оператор</h3><p>Всё, что видит наблюдатель, и подтверждение событий.</p></article>
+            <article><h3>Администратор</h3><p>Команды, терминал, файлы, VPN, настройки и управление доступом.</p></article>
+          </div>
+          <div class="user-actions"><button id="usersAdd" class="primary-button" type="button" disabled>Добавить пользователя</button><button id="usersReload" class="secondary-button" type="button">Обновить список</button></div>
+          <p id="usersError" class="form-error" role="alert" hidden></p>
+          <p id="usersMessage" class="monitoring-message" role="status" hidden></p>
+          <div id="usersList" class="users-list" aria-live="polite"></div>
+        </section>
+        <section class="panel settings-panel backups-panel" aria-labelledby="backupsHeading" data-global-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">СОХРАННОСТЬ ДАННЫХ</p><h2 id="backupsHeading">Резервные копии Hub</h2></div><span id="backupsCount" class="count-pill">—</span></div>
+          <p class="panel-intro">Копия содержит базу Hub и, если он настроен, токен Telegram-бота. Содержимое и сам токен здесь не показываются. VPN-ключи, Agent и сертификаты хоста в эту копию не входят.</p>
+          <div class="backups-actions"><button id="backupsReload" class="secondary-button" type="button">Обновить список</button><button id="backupsCreate" class="primary-button" type="button" disabled>Создать копию</button></div>
+          <p id="backupsStatus" class="field-help" role="status" aria-live="polite">Проверяем доступ к копиям.</p>
+          <p id="backupsError" class="form-error" role="alert" hidden></p>
+          <div id="backupsList" class="backups-list" aria-live="polite"></div>
+          <button id="backupsMore" class="secondary-button" type="button" hidden>Показать ещё</button>
+          <div class="backups-restore-heading"><div><p class="eyebrow">ВОССТАНОВЛЕНИЕ</p><h3>История и состояние</h3></div><button id="backupsRestoresReload" class="secondary-button" type="button">Проверить историю</button></div>
+          <p id="backupsRestoreStatus" class="field-help" role="status" aria-live="polite">История восстановлений хранится на сервере.</p>
+          <p id="backupsRestoreError" class="form-error" role="alert" hidden></p>
+          <div id="backupsRestoreActive" class="backups-restore-active" hidden></div>
+          <div id="backupsRestoreList" class="backups-list" aria-live="polite"></div>
+          <button id="backupsRestoresMore" class="secondary-button" type="button" hidden>Показать ещё</button>
+        </section>
+        <section class="panel settings-panel host-backups-panel" aria-labelledby="hostBackupHeading" data-global-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">СОХРАННОСТЬ УЗЛА</p><h2 id="hostBackupHeading">Копии всего сервера</h2></div><span id="hostBackupCount" class="count-pill">—</span></div>
+          <p class="panel-intro">Создайте закрытый архив настроек и данных SovaGrid на сервере, где открыт этот Hub. Во время снимка службы и панель временно остановятся. После возвращения связи откройте сохранённый запрос; сами файлы и ключи в браузер не передаются.</p>
+          <p id="hostBackupPlan" class="field-help">Проверяем план хоста.</p>
+          <div class="backups-actions"><button id="hostBackupReload" class="secondary-button" type="button">Обновить</button><button id="hostBackupCreate" class="primary-button" type="button" disabled>Создать копию хоста…</button></div>
+          <p id="hostBackupStatus" class="field-help" role="status" aria-live="polite">Проверяем доступ к копиям хоста.</p>
+          <p id="hostBackupError" class="form-error" role="alert" hidden></p>
+          <div id="hostBackupActive" class="backups-restore-active" hidden></div>
+          <div class="backups-restore-heading"><div><p class="eyebrow">АРХИВЫ</p><h3>Копии хоста</h3></div></div>
+          <div id="hostBackupArchives" class="backups-list" aria-live="polite"></div>
+          <div class="backups-restore-heading"><div><p class="eyebrow">ЖУРНАЛ</p><h3>Операции копирования</h3></div></div>
+          <div id="hostBackupOperations" class="backups-list" aria-live="polite"></div>
+        </section>
+      </main>
+      <main id="telegramView" data-view-panel="telegram" hidden>
+        <section class="hero-card telegram-hero" aria-label="Состояние Telegram"><div><div class="hero-kicker"><span class="section-tag">УВЕДОМЛЕНИЯ И КОМАНДЫ</span><span id="telegramBadge" class="status-badge waiting" role="status">Проверяем</span></div><h2>Telegram-бот</h2><p id="telegramStatusText">Загружаем состояние бота.</p></div><div class="hero-symbol" aria-hidden="true">✈</div></section>
+        <p id="telegramError" class="form-error" role="alert" hidden></p>
+        <section class="panel telegram-panel" aria-labelledby="telegramTokenHeading">
+          <div class="panel-heading"><div><p class="eyebrow">BOTFATHER</p><h2 id="telegramTokenHeading">Токен бота</h2></div><span id="telegramTokenState" class="status-badge waiting" role="status">Не настроен</span></div>
+          <p class="panel-intro">Создайте бота через <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">BotFather</a> и вставьте его токен сюда. Сохранённый токен никогда не возвращается в браузер.</p>
+          <form id="telegramTokenForm"><label for="telegramTokenInput">Новый токен</label><div class="telegram-token-field"><input id="telegramTokenInput" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="128" aria-describedby="telegramTokenHint telegramTokenError" placeholder="Вставьте токен BotFather"><button id="telegramRevealToken" class="secondary-button" type="button" aria-label="Показать введённый токен" aria-pressed="false">Показать</button></div><p id="telegramTokenHint" class="field-help">Токен будет сохранён на сервере и бот начнёт подключаться без перезапуска.</p><p id="telegramTokenError" class="form-error" role="alert" hidden></p><div class="telegram-actions"><button id="telegramSaveToken" class="primary-button" type="submit">Сохранить токен</button><button id="telegramRemoveToken" class="secondary-button" type="button" hidden>Отключить и удалить токен</button></div></form>
+          <p id="telegramLastSuccess" class="field-help"></p>
+        </section>
+        <section class="panel telegram-panel" aria-labelledby="telegramRequestsHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ПОДКЛЮЧЕНИЕ</p><h2 id="telegramRequestsHeading">Запросы доступа</h2></div><span id="telegramRequestCount" class="count-pill">0</span></div>
+          <p class="panel-intro">Попросите человека открыть вашего бота в Telegram и нажать «Начать» или отправить <code>/connect</code>. Его запрос появится здесь; выберите роль и подтвердите доступ.</p>
+          <p class="field-help">Наблюдатель видит состояние и тревоги. Оператор также подтверждает тревоги. Администратор может запускать команды после подтверждения в боте.</p>
+          <p id="telegramRequestHint" class="field-help"></p>
+          <a id="telegramOpenBot" class="secondary-button telegram-open-bot" href="#" target="_blank" rel="noopener noreferrer" hidden>Открыть бота в Telegram</a>
+          <p id="telegramPairingError" class="form-error" role="alert" hidden></p>
+          <div id="telegramRequests" class="telegram-bindings" aria-live="polite"></div>
+        </section>
+        <section class="panel telegram-panel" aria-labelledby="telegramBindingsHeading">
+          <div class="panel-heading"><div><p class="eyebrow">ДОСТУП</p><h2 id="telegramBindingsHeading">Роли пользователей</h2></div><span id="telegramBindingCount" class="count-pill">0</span></div>
+          <div id="telegramBindings" class="telegram-bindings" aria-live="polite"></div>
+          <details class="telegram-manual"><summary>Добавить вручную по ID</summary><p class="field-help">Если пользователь не может отправить запрос, попросите его написать боту <code>/whoami</code> и сообщить вам ID из ответа. Работают только личные чаты.</p>
+            <form id="telegramBindingForm" class="telegram-binding-form"><div class="telegram-form-field"><label for="telegramUserId">User ID личного чата</label><input id="telegramUserId" type="text" inputmode="numeric" pattern="[0-9]+" autocomplete="off" aria-describedby="telegramBindingHint telegramBindingError" placeholder="123456789" required></div><div class="telegram-form-field"><label for="telegramRole">Роль</label><select id="telegramRole"><option value="viewer">Наблюдатель — статус и тревоги</option><option value="operator">Оператор — плюс подтверждение тревог</option><option value="admin">Администратор — плюс команды с подтверждением</option></select></div><p id="telegramBindingHint" class="field-help">В личном чате ID пользователя совпадает с ID чата.</p><p id="telegramBindingError" class="form-error" role="alert" hidden></p><button id="telegramSaveBinding" class="primary-button" type="submit">Добавить или изменить роль</button></form>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="addServerDialog" class="modal"><form id="addServerForm" method="dialog"><div class="modal-heading"><p class="eyebrow">Новый сервер</p><h2>Добавить Ubuntu-сервер</h2></div><p>После добавления скопируйте токен агента. Он будет показан только один раз.</p><label for="newServerName">Название</label><input id="newServerName" required maxlength="100" placeholder="Например, production-01"><p id="addServerError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="cancelAddButton" class="secondary-button" value="cancel" type="button">Отмена</button><button id="confirmAddButton" class="primary-button" type="submit">Добавить</button></div></form></dialog>
+  <dialog id="vpnActionDialog" class="modal vpn-action-confirm"><div class="modal-heading"><p class="eyebrow">Подтверждение VPN</p><h2 id="vpnActionTitle">Операция WireGuard</h2></div><p id="vpnActionSummary"></p><p id="vpnActionServer"></p><div id="vpnRemoveConfirmation" hidden><label for="vpnRemoveName">Введите имя инстанса для удаления</label><input id="vpnRemoveName" autocomplete="off" spellcheck="false"></div><p id="vpnActionError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="vpnActionCancel" class="secondary-button" type="button">Отмена</button><button id="vpnActionConfirm" class="primary-button" type="button">Выполнить</button></div></dialog>
+  <dialog id="serviceControlDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Подтверждение службы</p><h2 id="serviceControlDialogTitle">Изменение службы</h2></div><p id="serviceControlDialogSummary"></p><p id="serviceControlDialogServer"></p><p id="serviceControlDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="serviceControlCancel" class="secondary-button" type="button">Отмена</button><button id="serviceControlConfirm" class="primary-button" type="button">Выполнить</button></div></dialog>
+  <dialog id="containerActionDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Подтверждение контейнера</p><h2 id="containerActionDialogTitle">Изменение контейнера</h2></div><p id="containerActionDialogSummary"></p><p id="containerActionDialogServer"></p><p id="containerActionDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="containerActionCancel" class="secondary-button" type="button">Отмена</button><button id="containerActionConfirm" class="primary-button" type="button">Выполнить</button></div></dialog>
+  <dialog id="backupsCreateDialog" class="modal" aria-labelledby="backupsCreateHeading"><div class="modal-heading"><p class="eyebrow">Резервная копия</p><h2 id="backupsCreateHeading">Создать копию Hub?</h2></div><p id="backupsCreateDescription">Снимок базы и настроенного Telegram-токена будет сохранён в закрытом каталоге этого сервера. Операция может занять несколько минут; после создания копия будет проверена.</p><p id="backupsCreateError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="backupsCreateCancel" class="secondary-button" type="button">Отмена</button><button id="backupsCreateConfirm" class="primary-button" type="button">Создать</button></div></dialog>
+  <dialog id="backupsRestoreDialog" class="modal" aria-labelledby="backupsRestoreHeading"><div class="modal-heading"><p class="eyebrow">Восстановление Hub</p><h2 id="backupsRestoreHeading">Восстановить выбранную копию?</h2></div><p id="backupsRestoreSummary"></p><p class="command-warning">Hub временно остановится. Перед заменой данных будет сделана страховочная копия. После запуска потребуется войти в панель заново. Если Hub не запустится, исправление доступно через SovaGrid Connect по SSH.</p><p id="backupsRestoreDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="backupsRestoreCancel" class="secondary-button" type="button">Отмена</button><button id="backupsRestoreConfirm" class="primary-button" type="button">Остановить Hub и восстановить</button></div></dialog>
+  <dialog id="backupsRecoverDialog" class="modal" aria-labelledby="backupsRecoverHeading"><div class="modal-heading"><p class="eyebrow">Исправление</p><h2 id="backupsRecoverHeading">Проверить прерванное восстановление?</h2></div><p id="backupsRecoverSummary"></p><p class="command-warning">Сервер сверит сохранённый план и данные. Если безопасно, он вернёт прежнюю базу или завершит восстановление. При неясном состоянии Hub останется остановлен; потребуется SovaGrid Connect по SSH.</p><p id="backupsRecoverDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="backupsRecoverCancel" class="secondary-button" type="button">Отмена</button><button id="backupsRecoverConfirm" class="primary-button" type="button">Проверить и исправить</button></div></dialog>
+  <dialog id="backupsForgetDialog" class="modal" aria-labelledby="backupsForgetHeading"><div class="modal-heading"><p class="eyebrow">Локальный запрос</p><h2 id="backupsForgetHeading">Убрать запись с этого устройства?</h2></div><p id="backupsForgetSummary"></p><p class="command-warning">Это удалит только сохранённый в браузере UUID. Снимки и журнал на сервере не изменятся. Перед новым восстановлением убедитесь, что прежнее не идёт; сервер отклонит параллельную операцию.</p><div class="modal-actions"><button id="backupsForgetCancel" class="secondary-button" type="button">Оставить запрос</button><button id="backupsForgetConfirm" class="primary-button" type="button">Убрать локальную запись</button></div></dialog>
+  <dialog id="hostBackupCreateDialog" class="modal" aria-labelledby="hostBackupCreateHeading"><div class="modal-heading"><p class="eyebrow">КОПИЯ ХОСТА</p><h2 id="hostBackupCreateHeading">Временно остановить службы?</h2></div><p id="hostBackupCreateSummary"></p><p class="command-warning">Hub и Web могут не отвечать несколько минут; текущий сеанс может завершиться. Запрос продолжится на сервере. Если панель не вернётся, проверьте этот же ID через SovaGrid Connect по SSH.</p><p id="hostBackupCreateError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="hostBackupCreateCancel" class="secondary-button" type="button">Отмена</button><button id="hostBackupCreateConfirm" class="primary-button" type="button">Остановить и создать копию</button></div></dialog>
+  <dialog id="hostBackupRecoverDialog" class="modal" aria-labelledby="hostBackupRecoverHeading"><div class="modal-heading"><p class="eyebrow">КОПИЯ ХОСТА</p><h2 id="hostBackupRecoverHeading">Восстановить службы?</h2></div><p id="hostBackupRecoverSummary"></p><p class="command-warning">Пока предыдущий worker работает, сервер отклонит запрос. Повторное создание архива не выполняется. Если Hub остановлен, исправление возможно через Connect по SSH.</p><p id="hostBackupRecoverError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="hostBackupRecoverCancel" class="secondary-button" type="button">Отмена</button><button id="hostBackupRecoverConfirm" class="primary-button" type="button">Восстановить службы</button></div></dialog>
+  <dialog id="amneziaDialog" class="modal vpn-action-confirm"><div class="modal-heading"><p class="eyebrow">Подтверждение VPN</p><h2 id="amneziaDialogTitle">Операция с профилем</h2></div><p id="amneziaDialogSummary"></p><p id="amneziaDialogServer"></p><div id="amneziaRevokeConfirmation" hidden><label for="amneziaRevokeName">Введите имя клиента для отзыва</label><input id="amneziaRevokeName" autocomplete="off" spellcheck="false"></div><p id="amneziaDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="amneziaDialogCancel" class="secondary-button" type="button">Отмена</button><button id="amneziaDialogConfirm" class="primary-button" type="button">Выполнить</button></div></dialog>
+  <dialog id="telegramRemoveTokenDialog" class="modal" aria-labelledby="telegramRemoveTokenHeading"><div class="modal-heading"><p class="eyebrow">Telegram</p><h2 id="telegramRemoveTokenHeading">Отключить бота?</h2></div><p>Сохранённый токен будет удалён с сервера, опрос и уведомления остановятся. Привязки пользователей останутся.</p><p id="telegramRemoveTokenError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="telegramCancelRemoveToken" class="secondary-button" type="button">Отмена</button><button id="telegramConfirmRemoveToken" class="primary-button" type="button">Удалить токен</button></div></dialog>
+  <dialog id="telegramApproveDialog" class="modal" aria-labelledby="telegramApproveHeading"><div class="modal-heading"><p class="eyebrow">Telegram</p><h2 id="telegramApproveHeading">Открыть доступ к командам?</h2></div><p id="telegramApproveSummary"></p><p class="command-warning">Администратор Telegram может запускать произвольные команды на серверах после подтверждения в боте.</p><p id="telegramApproveError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="telegramCancelApprove" class="secondary-button" type="button">Отмена</button><button id="telegramConfirmApprove" class="primary-button" type="button">Выдать роль администратора</button></div></dialog>
+  <dialog id="telegramRemoveBindingDialog" class="modal" aria-labelledby="telegramRemoveBindingHeading"><div class="modal-heading"><p class="eyebrow">Telegram</p><h2 id="telegramRemoveBindingHeading">Удалить доступ?</h2></div><p id="telegramRemoveBindingSummary"></p><p id="telegramRemoveBindingError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="telegramCancelRemoveBinding" class="secondary-button" type="button">Отмена</button><button id="telegramConfirmRemoveBinding" class="primary-button" type="button">Удалить доступ</button></div></dialog>
+  <dialog id="tokenDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Настройка агента</p><h2>Сохраните данные сервера</h2></div><p>ID и токен потребуются для настройки агента на Ubuntu. Токен можно увидеть только сейчас.</p><span class="credential-label">ID сервера</span><code id="serverId" class="token-box"></code><span class="credential-label">Токен агента</span><code id="agentToken" class="token-box"></code><div class="modal-actions"><button id="copyTokenButton" class="secondary-button" type="button">Копировать токен</button><button id="closeTokenButton" class="primary-button" type="button">Готово</button></div></dialog>
+  <dialog id="confirmCommandDialog" class="modal command-confirm"><div class="modal-heading"><p class="eyebrow">Подтверждение</p><h2>Запустить на сервере?</h2></div><p id="confirmCommandServer">—</p><pre id="confirmCommandText" class="command-preview"></pre><p class="command-warning">Команда будет выполнена агентом на сервере и записана в журнал действий.</p><p id="confirmCommandError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="cancelCommandButton" class="secondary-button" type="button">Отмена</button><button id="runCommandButton" class="primary-button" type="button">Выполнить</button></div></dialog>
+  <dialog id="journalConfirmDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Подтверждение</p><h2>Прочитать журнал службы?</h2></div><p id="journalConfirmSummary"></p><p class="command-warning">Для кнопки «Логи» текст доступен только этому сеансу до пяти минут и не записывается в базу Hub. Произвольные команды сохраняют свой вывод в истории заданий.</p><p id="journalConfirmError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="journalCancel" class="secondary-button" type="button">Отмена</button><button id="journalConfirm" class="primary-button" type="button">Прочитать</button></div></dialog>
+  <dialog id="maintenanceConfirmDialog" class="modal" aria-labelledby="maintenanceConfirmHeading"><div class="modal-heading"><p class="eyebrow">Окно обслуживания</p><h2 id="maintenanceConfirmHeading">Подтвердите действие</h2></div><p id="maintenanceConfirmServer"></p><p id="maintenanceConfirmSummary"></p><p id="maintenanceConfirmWindow" class="maintenance-id"></p><p class="command-warning">Инциденты и метрики остаются в панели. После завершения окна действующие инциденты могут вызвать Telegram-уведомление.</p><p id="maintenanceConfirmError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="maintenanceCancel" class="secondary-button" type="button">Отмена</button><button id="maintenanceConfirm" class="primary-button" type="button">Подтвердить</button></div></dialog>
+  <dialog id="checkDialog" class="modal check-dialog" aria-labelledby="checkDialogHeading">
+    <form id="checkForm"><div class="modal-heading"><p class="eyebrow">ПРОВЕРКА С ВЫБРАННОГО СЕРВЕРА</p><h2 id="checkDialogHeading">Новая проверка</h2></div>
+      <p id="checkDialogTarget" class="field-help"></p>
+      <div id="checkFields">
+        <label for="checkName">Название</label><input id="checkName" type="text" maxlength="80" required autocomplete="off" placeholder="Например, основной сайт">
+        <label for="checkKind">Что проверить</label><select id="checkKind"><option value="http">Сайт HTTP / HTTPS</option><option value="tcp">Соединение TCP</option><option value="dns">DNS-запись A / AAAA</option></select>
+        <div id="checkUrlField"><label for="checkUrl">Конечный адрес страницы</label><input id="checkUrl" type="url" maxlength="1024" spellcheck="false" autocomplete="off" placeholder="https://example.com/health"><p class="field-help">Без логина, пароля и параметров. Успех — ответ 2xx; перенаправления не выполняются. Тело страницы не сохраняется.</p></div>
+        <div id="checkTlsAlertField" class="check-tls-alert" hidden><label class="check-enabled" for="checkTlsAlertEnabled"><input id="checkTlsAlertEnabled" type="checkbox"> Предупреждать об истечении HTTPS-сертификата</label><div id="checkTlsAlertDaysField" hidden><label for="checkTlsAlertDays">За сколько дней предупредить</label><input id="checkTlsAlertDays" type="number" min="1" max="90" step="1" inputmode="numeric" value="14" aria-describedby="checkTlsAlertHelp"></div><p id="checkTlsAlertHelp" class="field-help">От 1 до 90 дней. Инцидент появится после подтверждения проверкой. Если Telegram настроен, бот отправит уведомление с учётом доступа и окна обслуживания.</p></div>
+        <div id="checkCaField" class="check-tls-alert" hidden><label for="checkCaFile">Свой центр сертификации для HTTPS</label><input id="checkCaFile" type="file" accept=".pem,.crt,.cer,.der,application/x-x509-ca-cert" aria-describedby="checkCaHelp checkCaStatus"><p id="checkCaHelp" class="field-help">Выберите один CA-сертификат PEM или DER, до 1,5 КБ в DER. Например, сертификат домашнего центра сертификации. Имя сервера и цепочка всё равно проверяются.</p><div class="check-ca-actions"><p id="checkCaStatus" class="field-help" role="status">Используется системное доверие.</p><button id="checkCaClear" class="secondary-button" type="button" disabled>Удалить свой CA</button></div></div>
+        <div id="checkTcpFields" class="check-grid" hidden><div><label for="checkHost">Хост или IP</label><input id="checkHost" type="text" maxlength="253" spellcheck="false" autocomplete="off" placeholder="127.0.0.1"></div><div><label for="checkPort">TCP-порт</label><input id="checkPort" type="number" min="1" max="65535" step="1" inputmode="numeric"></div></div>
+        <div id="checkDnsFields" class="check-grid" hidden><div><label for="checkDnsHost">Доменное имя</label><input id="checkDnsHost" type="text" maxlength="253" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="example.com"></div><div><label for="checkRecordType">Тип записи</label><select id="checkRecordType"><option value="A">A · IPv4</option><option value="AAAA">AAAA · IPv6</option></select></div><div><label for="checkExpectedIp">Ожидаемый IP (необязательно)</label><input id="checkExpectedIp" type="text" maxlength="45" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" inputmode="decimal" placeholder="203.0.113.10"></div><p class="field-help">Проверка использует DNS выбранного Agent. Без ожидаемого IP достаточно любого ответа нужного типа; адреса ответа в историю не записываются.</p></div>
+        <div class="check-grid"><div><label for="checkInterval">Интервал, секунд</label><input id="checkInterval" type="number" min="60" max="3600" step="1" inputmode="numeric" required></div><div><label for="checkTimeout">Тайм-аут, секунд</label><input id="checkTimeout" type="number" min="1" max="10" step="1" inputmode="numeric" required></div></div>
+        <label class="check-enabled"><input id="checkEnabled" type="checkbox"> Проверка включена</label>
+      </div>
+      <p id="checkDialogNotice" class="field-help">Agent будет подключаться к указанной цели. Для HTTPS проверяются имя и доверие сертификату. Панель выделяет срок менее 14 дней; отдельное оповещение настраивается выше.</p>
+      <p id="checkDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="checkCancel" class="secondary-button" type="button">Отмена</button><button id="checkConfirm" class="primary-button" type="submit">Сохранить</button></div>
+    </form>
+  </dialog>
+  <dialog id="filesSaveDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Подтверждение записи</p><h2>Сохранить файл?</h2></div><p id="filesSaveTarget"></p><p id="filesSaveSize"></p><p id="filesSaveError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="filesSaveCancel" class="secondary-button" type="button">Отмена</button><button id="filesSaveConfirm" class="primary-button" type="button">Сохранить</button></div></dialog>
+  <dialog id="accessDialog" class="modal access-dialog" aria-labelledby="accessDialogHeading">
+    <form id="accessDialogForm" autocomplete="off">
+      <div class="modal-heading"><p class="eyebrow">ДОСТУП К СЕРВЕРАМ</p><h2 id="accessDialogHeading">Серверы пользователя</h2></div>
+      <p id="accessDialogTarget" class="user-dialog-target"></p>
+      <p id="accessDialogHelp" class="field-help">Общая роль пользователя ограничивает права на каждом сервере. Изменение доступа отменит ожидающие команды и закроет открытые соединения этого пользователя.</p>
+      <label for="accessMode">Какие серверы доступны</label>
+      <select id="accessMode"><option value="all">Все серверы</option><option value="selected">Только выбранные</option></select>
+      <div id="accessSelectedFields" hidden><p class="field-help">«Нет доступа» скрывает сервер. Можно выбрать отдельную роль для каждого доступного сервера.</p><div id="accessServerRows" class="access-server-rows"></div></div>
+      <p id="accessDialogError" class="form-error" role="alert" hidden></p>
+      <p id="accessDialogMessage" class="monitoring-message" role="status" hidden></p>
+      <div class="modal-actions"><button id="accessDialogCancel" class="secondary-button" type="button">Закрыть</button><button id="accessDialogReload" class="secondary-button" type="button">Обновить</button><button id="accessDialogSave" class="primary-button" type="submit">Сохранить доступ</button></div>
+    </form>
+  </dialog>
+  <dialog id="userDialog" class="modal user-dialog" aria-labelledby="userDialogHeading">
+    <form id="userDialogForm" autocomplete="off">
+      <div class="modal-heading"><p class="eyebrow">ДОСТУП К ПАНЕЛИ</p><h2 id="userDialogHeading">Новый пользователь</h2></div>
+      <p id="userDialogTarget" class="user-dialog-target"></p>
+      <div id="userUsernameField"><label for="userUsername">Логин</label><input id="userUsername" name="new-sovagrid-username" autocomplete="off" maxlength="80" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+      <div id="userRoleField"><label for="userRole">Роль</label><select id="userRole"><option value="viewer">Наблюдатель — просмотр</option><option value="operator">Оператор — просмотр и подтверждение событий</option><option value="admin">Администратор — полное управление</option></select></div>
+      <label id="userEnabledField" class="user-enabled"><input id="userEnabled" type="checkbox"> Разрешить вход</label>
+      <div id="userPasswordField"><label for="userPassword">Новый пароль</label><input id="userPassword" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="userPasswordHint"><div class="user-actions"><button id="userGeneratePassword" class="secondary-button" type="button">Сгенерировать пароль</button><button id="userRevealPassword" class="secondary-button" type="button" aria-pressed="false">Показать</button><button id="userCopyPassword" class="secondary-button" type="button">Скопировать</button></div><p id="userPasswordHint" class="field-help">От 12 символов. Сохраните пароль перед подтверждением; повторно получить его из панели нельзя.</p><p id="userPasswordStatus" class="field-help" role="status"></p><label id="userGeneratedConfirm" class="user-enabled" hidden><input id="userPasswordSaved" type="checkbox"> Я сохранил сгенерированный пароль</label></div>
+      <p id="userDialogNotice" class="field-help"></p>
+      <p id="userDialogError" class="form-error" role="alert" hidden></p>
+      <div class="modal-actions"><button id="userDialogCancel" class="secondary-button" type="button">Отмена</button><button id="userDialogConfirm" class="primary-button" type="submit">Создать пользователя</button></div>
+    </form>
+  </dialog>
+  <dialog id="filesTransferDialog" class="modal"><div class="modal-heading"><p class="eyebrow">Передача файла</p><h2 id="filesTransferHeading">Подтвердите передачу</h2></div><p id="filesTransferTarget"></p><p id="filesTransferDescription"></p><p class="command-warning">Файл проходит только через память Hub и Agent. Доступ ограничен разрешённым каталогом и вашим сеансом.</p><p id="filesTransferError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="filesTransferBack" class="secondary-button" type="button">Отмена</button><button id="filesTransferConfirm" class="primary-button" type="button">Продолжить</button></div></dialog>
+  <dialog id="localWebApplyDialog" class="modal" aria-labelledby="localWebApplyHeading"><div class="modal-heading"><p class="eyebrow">ЛОКАЛЬНЫЙ ПУТЬ</p><h2 id="localWebApplyHeading">Применить путь панели?</h2></div><p id="localWebApplySummary"></p><p class="command-warning">Локальный Web может перезапуститься. Туннель SSH сохранится; после перехода на новый путь потребуется снова войти. Ответ может пропасть, поэтому панель сохранит ID запроса для проверки.</p><p id="localWebApplyError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="localWebApplyCancel" class="secondary-button" type="button">Отмена</button><button id="localWebApplyConfirm" class="primary-button" type="button">Применить путь</button></div></dialog>
+  <dialog id="localWebDisableDialog" class="modal" aria-labelledby="localWebDisableHeading"><div class="modal-heading"><p class="eyebrow">ПЕРЕХОД К HTTPS</p><h2 id="localWebDisableHeading">Отключить локальную настройку?</h2></div><p id="localWebDisableSummary"></p><p class="command-warning">Специальный локальный путь будет снят; останется адрес <code>/sovagrid/monitoring/</code> через тот же SSH-туннель. Путь и правило для / сохранятся на этом устройстве как черновик для публичного HTTPS. Для публичного сайта значение «Не занимать /» обычно даёт 404 на корне, даже если локальный корень раньше открывал панель. Затем можно настроить IP или домен в соседнем разделе.</p><p id="localWebDisableError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="localWebDisableCancel" class="secondary-button" type="button">Оставить локальную настройку</button><button id="localWebDisableConfirm" class="primary-button" type="button">Отключить и перейти</button></div></dialog>
+  <dialog id="publicWebApplyDialog" class="modal" aria-labelledby="publicWebApplyHeading"><div class="modal-heading"><p class="eyebrow">ПУБЛИЧНЫЙ АДРЕС</p><h2 id="publicWebApplyHeading">Применить новый адрес?</h2></div><p id="publicWebApplySummary"></p><p class="command-warning">Web может перезапуститься на несколько минут. После перехода на новый адрес понадобится снова войти; данные входа не передаются через ссылку. При потере ответа панель проверит состояние запроса.</p><p id="publicWebApplyError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="publicWebApplyCancel" class="secondary-button" type="button">Отмена</button><button id="publicWebApplyConfirm" class="primary-button" type="button">Применить адрес</button></div></dialog>
+  <dialog id="installDialog" class="install-dialog" aria-labelledby="installTitle" aria-describedby="installDescription">
+    <div class="install-dialog-header"><img src="icons/icon-192.png" width="52" height="52" alt=""><div><h2 id="installTitle">SovaGrid — как приложение</h2><p id="installDescription">Та же панель, отдельная иконка. Установку подтверждаете вы в браузере или меню устройства.</p></div><button id="installClose" class="install-close" type="button" aria-label="Закрыть установку">×</button></div>
+    <p>Приложение будет открывать этот адрес:</p>
+    <code id="installOrigin" class="install-address"></code>
+    <p id="installStableHint" class="install-connection" hidden>Для ручного добавления на экран сначала откройте постоянный адрес панели. Он сохранит работу ярлыка, если администратор позже изменит путь панели.</p>
+    <p><a id="installStableLink" class="public-web-link" hidden>Открыть постоянный адрес для установки</a></p>
+    <p id="installConnection" class="install-connection"></p>
+    <p id="installSecureHint" class="install-warning" hidden>Для установки откройте защищённый HTTPS-адрес панели. Обычный HTTP на удалённом сервере не подходит для защищённого веб-приложения. Локальный адрес работает только на устройстве, где доступен сервер или туннель.</p>
+    <p id="installStatus" class="install-notice" role="status" aria-live="polite" hidden></p>
+    <section id="installGuide"><h3 id="installGuideTitle">Установить через браузер</h3><p id="installGuideIntro"></p><ol id="installSteps"></ol><p><a id="installHelp" target="_blank" rel="noopener noreferrer">Официальная инструкция</a></p></section>
+    <p class="install-connection">Для актуальных данных нужна связь с Hub. Пароли, сеанс, команды и метрики не сохраняются для работы без сети. После открытия с новой иконки может потребоваться повторный вход.</p>
+    <div class="install-actions"><button id="installDone" class="secondary-button" type="button">Понятно</button><button id="installConfirm" class="primary-button" type="button" hidden>Установить</button></div>
+  </dialog>
+</body>
+</html>

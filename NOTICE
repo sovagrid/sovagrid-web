@@ -1,0 +1,16 @@
+SovaGrid
+Copyright (C) 2026 Jigokuraku01
+Original author: https://github.com/Jigokuraku01
+Project: https://github.com/sovagrid
+
+Original SovaGrid material is licensed under the GNU Affero General Public
+License, version 3 only, with the additional author attribution term in
+ATTRIBUTION.md. See LICENSE for the unchanged GNU license text.
+
+Third-party components retain their own copyrights and licenses. Their notices
+and license files must be preserved. Attribution does not imply endorsement.
+
+The browser SSH gateway uses ssh2 1.17.0 (MIT), asn1 0.2.6 (MIT),
+bcrypt-pbkdf 1.0.2 (BSD-3-Clause), safer-buffer 2.1.2 (MIT), and
+tweetnacl 0.14.5 (Unlicense). The pinned npm lockfile records their exact
+integrity hashes; their own license files remain in the installed packages.

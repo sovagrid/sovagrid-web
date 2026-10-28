@@ -1,0 +1,14 @@
+{
+  "name": "sovagrid-ssh-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ssh2": "1.17.0"
+  }
+}

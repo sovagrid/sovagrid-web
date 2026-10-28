@@ -1,0 +1,11 @@
+FROM node:22.16.0-slim
+
+ENV NODE_ENV=production
+WORKDIR /app
+COPY gateway/package.json gateway/package-lock.json ./
+RUN npm ci --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund && npm cache clean --force
+COPY --chown=10003:10003 gateway/server.js ./server.js
+COPY --chown=10003:10003 LICENSE ATTRIBUTION.md NOTICE ./
+USER 10003:10003
+EXPOSE 8768
+CMD ["node", "server.js"]

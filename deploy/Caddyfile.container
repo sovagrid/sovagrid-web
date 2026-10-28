@@ -1,0 +1,63 @@
+{
+    admin off
+    auto_https disable_redirects
+    # Empty until the operator explicitly enables public HTTPS.
+    import /etc/caddy/public/global/*.options
+}
+
+# The Compose file publishes this listener only on the host loopback address.
+:8080 {
+    header {
+        Content-Security-Policy "frame-ancestors 'none'"
+        X-Frame-Options "DENY"
+    }
+
+    @browser_ssh path /api/v1/browser-ssh/*
+    handle @browser_ssh {
+        reverse_proxy ssh-gateway:8768 {
+            header_up X-SovaGrid-Client-IP {remote_host}
+        }
+    }
+
+    @api path /api/*
+    handle @api {
+        reverse_proxy hub:8765 {
+            header_up X-SovaGrid-Client-IP {remote_host}
+        }
+    }
+
+    handle /healthz {
+        reverse_proxy hub:8765
+    }
+
+    import /etc/caddy/public/local/*.caddy
+    import /etc/caddy/local/*.caddy
+
+    redir /sovagrid/monitoring /sovagrid/monitoring/ 308
+
+    handle_path /sovagrid/monitoring/* {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Local TLS ingress for the host Agent. Its CA certificate stays outside Git.
+localhost:8443 {
+    tls internal
+    header {
+        Content-Security-Policy "frame-ancestors 'none'"
+        X-Frame-Options "DENY"
+    }
+    reverse_proxy hub:8765 {
+        header_up X-SovaGrid-Client-IP {remote_host}
+    }
+}
+
+import /etc/caddy/public/sites/*.caddy

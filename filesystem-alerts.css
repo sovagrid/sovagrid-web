@@ -1,0 +1,16 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.filesystem-alerts-panel { margin: 1.2rem 0; }
+.filesystem-alert-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: .7rem 0; }
+.filesystem-alert-list { display: grid; gap: .8rem; margin-top: 1rem; }
+.filesystem-alert-row { border-top: 1px solid var(--sg-border); padding: .9rem 0; min-width: 0; }
+.filesystem-alert-row h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+.filesystem-alert-row p { margin: .35rem 0; overflow-wrap: anywhere; }
+.filesystem-alert-head { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; justify-content: space-between; }
+.filesystem-alert-fields { display: grid; gap: .35rem; margin: .7rem 0; }
+.filesystem-alert-fields select, .filesystem-alert-fields input { width: 100%; box-sizing: border-box; }
+@media (max-width: 600px) {
+  .filesystem-alert-actions button { flex: 1 1 130px; }
+  .filesystem-alert-head { align-items: flex-start; }
+}

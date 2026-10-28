@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.host-backups-panel { margin-top: 18px; }
+.host-backups-panel #hostBackupPlan,
+.host-backups-panel #hostBackupStatus { display: block; margin: 12px 0; line-height: 1.5; }
+.host-backups-panel .backups-restore-active p { margin: 8px 0 12px; }
+.host-backups-panel .backups-restore-active .backup-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.host-backups-panel .backups-restore-active .backup-card-actions button { min-height: 40px; }
+#hostBackupCreateSummary, #hostBackupRecoverSummary { white-space: pre-line; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .host-backups-panel .backups-restore-active .backup-card-actions { flex-direction: column; }
+  .host-backups-panel .backups-restore-active .backup-card-actions button { width: 100%; }
+}

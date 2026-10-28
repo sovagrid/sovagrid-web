@@ -1,0 +1,7 @@
+{
+  "name": "sovagrid-browser-regression",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": { "test": "playwright test --config=playwright.config.cjs" },
+  "devDependencies": { "@playwright/test": "1.64.1" }
+}

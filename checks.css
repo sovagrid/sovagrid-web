@@ -1,0 +1,29 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.checks-panel { margin: 1.2rem 0; }
+.checks-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.checks-list { display: grid; gap: .8rem; margin-top: 1rem; }
+.check-row { padding: 1rem 0; border-top: 1px solid var(--sg-border); min-width: 0; }
+.check-row h3 { font-size: 1rem; margin: 0 0 .6rem; overflow-wrap: anywhere; }
+.check-summary { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; }
+.check-row p, .check-row summary, .check-history { font-size: .85rem; line-height: 1.6; color: var(--sg-muted); overflow-wrap: anywhere; }
+.check-row .check-tls-warning { color: var(--sg-danger, var(--sg-text)); font-weight: 600; }
+.check-row .checks-actions { margin: .7rem 0; }
+.checks-message { color: var(--sg-accent); font-size: .85rem; }
+.check-history { padding-left: 1.2rem; max-height: 18rem; overflow: auto; }
+.check-dialog { max-height: calc(100dvh - 2rem); overflow: auto; }
+.check-dialog label { display: block; margin-top: .8rem; }
+.check-dialog input:not([type="checkbox"]), .check-dialog select { width: 100%; min-width: 0; box-sizing: border-box; }
+.check-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+.check-dialog .check-enabled { display: flex; align-items: center; gap: .6rem; }
+.check-enabled input { accent-color: var(--sg-accent); }
+.check-tls-alert { margin-top: .8rem; padding: .8rem; border: 1px solid var(--sg-border); border-radius: .7rem; }
+.check-tls-alert .check-enabled { margin-top: 0; line-height: 1.4; }
+.check-tls-alert .field-help { margin-bottom: 0; }
+.check-ca-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; margin-top: .5rem; }
+.check-ca-actions .field-help { flex: 1 1 13rem; margin: 0; }
+@media (max-width: 600px) {
+  .check-grid { grid-template-columns: 1fr; }
+  .check-row .checks-actions button { flex: 1 1 130px; }
+}

@@ -1,0 +1,41 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.backups-panel { margin-top: 18px; }
+.backups-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.backups-actions .primary-button { margin-top: 0; }
+.backups-actions .secondary-button, #backupsMore { min-height: 44px; padding: 10px 15px; }
+.backups-panel #backupsStatus { display: block; margin: 15px 0 8px; line-height: 1.5; }
+.backups-list { display: grid; gap: 9px; margin-top: 14px; }
+.backup-card { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 14px; border: 1px solid var(--sg-border); border-radius: 11px;
+  background: var(--sg-surface-soft); color: var(--sg-text); }
+.backup-card > div { min-width: 0; }
+.backup-card strong { display: block; font-size: .84rem; overflow-wrap: anywhere; }
+.backup-card p { margin: 6px 0 0; color: var(--sg-muted); font-size: .75rem;
+  line-height: 1.5; overflow-wrap: anywhere; }
+.backup-card button { flex: 0 0 auto; min-height: 40px; padding: 8px 12px; }
+#backupsMore { margin-top: 12px; }
+.backup-card-actions { display: flex; flex-wrap: wrap; gap: 8px; flex: 0 0 auto; }
+.backups-restore-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-top: 1px solid var(--sg-border); margin-top: 24px; padding-top: 19px; }
+.backups-restore-heading .eyebrow { margin: 0 0 4px; }
+.backups-restore-heading h3 { margin: 0; font-size: 1.02rem; }
+.backups-restore-heading button, #backupsRestoresMore { min-height: 44px; padding: 10px 15px; }
+.backups-restore-active { margin-top: 12px; padding: 14px; border: 1px solid var(--sg-border);
+  border-radius: 11px; background: var(--sg-surface-soft); white-space: pre-line;
+  overflow-wrap: anywhere; font-size: .78rem; line-height: 1.55; }
+.backups-restore-active strong { font-size: .88rem; }
+.backups-restore-active .backups-restore-actions { display: flex; flex-wrap: wrap;
+  gap: 8px; margin-top: 11px; }
+.backups-restore-actions button { min-height: 40px; padding: 8px 12px; }
+#backupsRestoreSummary, #backupsRecoverSummary { white-space: pre-line; overflow-wrap: anywhere; }
+#backupsRestoresMore { margin-top: 12px; }
+@media (max-width: 760px) {
+  .backups-actions { display: grid; grid-template-columns: 1fr; }
+  .backups-actions .primary-button, .backups-actions .secondary-button,
+  .backup-card button, #backupsMore, #backupsRestoresMore,
+  .backups-restore-heading button, .backups-restore-actions button { width: 100%; }
+  .backup-card { align-items: stretch; flex-direction: column; }
+  .backup-card-actions, .backups-restore-heading, .backups-restore-actions { flex-direction: column; align-items: stretch; }
+}

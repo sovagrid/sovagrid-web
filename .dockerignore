@@ -1,0 +1,6 @@
+.git
+tests
+gateway/test
+gateway/node_modules
+*.env
+*.token

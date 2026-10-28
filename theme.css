@@ -1,0 +1,224 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+/* theme.js resolves the device preference into data-theme before rendering.
+   Literal palette values also support Safari 17.0 and older Android WebViews. */
+:root[data-theme-choice="dark"] { color-scheme: dark; }
+:root[data-theme-choice="light"] { color-scheme: light; }
+:root[data-theme-choice="system"] { color-scheme: dark; }
+@media (prefers-color-scheme: light) {
+  :root[data-theme-choice="system"] { color-scheme: light; }
+}
+
+:root {
+  --sg-page: #0a1119;
+  --sg-text: #edf3f5;
+  --sg-surface: #14222c;
+  --sg-surface-soft: #192d36;
+  --sg-surface-raised: #20343d;
+  --sg-sidebar: #0f1a23;
+  --sg-input: #0b1822;
+  --sg-border: #293b45;
+  --sg-border-strong: #3a5360;
+  --sg-muted: #94aab2;
+  --sg-muted-soft: #829aa4;
+  --sg-accent: #80e1af;
+  --sg-accent-bright: #a0f0c6;
+  --sg-accent-bg: #203c37;
+  --sg-accent-border: #305c4e;
+  --sg-on-accent: #0b261c;
+  --sg-hero-start: #1d3e37;
+  --sg-hero-end: #162d31;
+  --sg-code-bg: #081821;
+  --sg-terminal-bg: #07151a;
+  --sg-error: #ff9e9d;
+  --sg-error-bg: #4a2028;
+  --sg-warn-bg: #444b33;
+  --sg-warn-text: #ced6ad;
+  --sg-page-glow: #122b33;
+  --sg-ambient-one: #133d44;
+  --sg-ambient-two: #293259;
+  --sg-brand: #73e0aa;
+  --sg-brand-eye: #0d2c2b;
+  --sg-login-bg: #101a24d9;
+  --sg-login-border: #ffffff0d;
+  --sg-offline-bg: #633136;
+  --sg-offline-text: #ffaca2;
+  --sg-pulse-shadow: #80e1af1c;
+  --sg-hero-symbol: #7de4ae20;
+  --sg-chart-grid: #314149;
+  --sg-chart-area: #75dbaa1a;
+  --sg-chart-line: #80e0ac;
+  --sg-modal-shadow: #0009;
+  --sg-modal-backdrop: #071018c9;
+}
+
+:root[data-theme="light"] {
+  --sg-page: #f3f7f5;
+  --sg-text: #18312d;
+  --sg-surface: #ffffff;
+  --sg-surface-soft: #edf4f1;
+  --sg-surface-raised: #e5efea;
+  --sg-sidebar: #e9f1ed;
+  --sg-input: #ffffff;
+  --sg-border: #c8d9d2;
+  --sg-border-strong: #9ebbb0;
+  --sg-muted: #526b68;
+  --sg-muted-soft: #607772;
+  --sg-accent: #17694c;
+  --sg-accent-bright: #0e5b42;
+  --sg-accent-bg: #dfefe6;
+  --sg-accent-border: #91bea4;
+  --sg-on-accent: #ffffff;
+  --sg-hero-start: #dceee3;
+  --sg-hero-end: #e6f3ed;
+  --sg-code-bg: #eaf2ee;
+  --sg-terminal-bg: #eef4f1;
+  --sg-error: #9f282f;
+  --sg-error-bg: #fff0ed;
+  --sg-warn-bg: #fff3db;
+  --sg-warn-text: #74511b;
+  --sg-page-glow: #d7eae1;
+  --sg-ambient-one: #a4d6b7;
+  --sg-ambient-two: #b9d5e2;
+  --sg-brand: #1b7954;
+  --sg-brand-eye: #eef8f1;
+  --sg-login-bg: #f8fbf9ed;
+  --sg-login-border: #cdded6;
+  --sg-offline-bg: #fee9e5;
+  --sg-offline-text: #a12d29;
+  --sg-pulse-shadow: #17694c24;
+  --sg-hero-symbol: #2d80652b;
+  --sg-chart-grid: #b4cdc0;
+  --sg-chart-area: #1a9b6260;
+  --sg-chart-line: #14724f;
+  --sg-modal-shadow: #183b3333;
+  --sg-modal-backdrop: #1c413f88;
+}
+
+
+html, body { background: var(--sg-page); color: var(--sg-text); }
+body { background: radial-gradient(circle at 75% 15%, var(--sg-page-glow) 0, transparent 35%), var(--sg-page); }
+.ambient-one { background: var(--sg-ambient-one); }
+.ambient-two { background: var(--sg-ambient-two); }
+.eyebrow, .section-tag, .login-card h1 span, .login-aside h2 em { color: var(--sg-accent); }
+.brand-mark { background: var(--sg-brand); }
+.brand-eye { background: var(--sg-brand-eye); }
+.login-card { background: var(--sg-login-bg); border-color: var(--sg-login-border); }
+.login-intro, .login-aside p, .aside-metrics span, .security-note { color: var(--sg-muted); }
+.login-card label, .modal label { color: var(--sg-text); }
+.login-card input, .modal input { background: var(--sg-input); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.login-card input::placeholder, .modal input::placeholder { color: var(--sg-muted-soft); }
+.login-modes { background: var(--sg-surface-raised); }
+.login-modes button { color: var(--sg-muted); }
+.login-modes button[aria-selected="true"] { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.login-modes button:hover { color: var(--sg-text); }
+.ssh-target, .ssh-hint, .ssh-host-key p { color: var(--sg-muted); }
+.ssh-target strong { color: var(--sg-text); }
+.login-card select { background: var(--sg-input); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.ssh-host-key { background: var(--sg-surface-soft); border-color: var(--sg-accent-border); }
+.ssh-host-key code { color: var(--sg-accent); }
+.primary-button { background: var(--sg-accent); color: var(--sg-on-accent); }
+.primary-button:hover { background: var(--sg-accent-bright); color: var(--sg-on-accent); }
+.secondary-button, .icon-button { background: var(--sg-surface-raised); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.secondary-button:hover, .icon-button:hover { background: var(--sg-accent-bg); border-color: var(--sg-accent-border); }
+.form-error { color: var(--sg-error); }
+.live-pill, .status-badge, .count-pill { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.status-badge.offline, .vpn-status-error, .vpn-service-state.problem { background: var(--sg-offline-bg); color: var(--sg-offline-text); }
+.status-badge.waiting, .vpn-status-stale, .vpn-service-state.waiting { background: var(--sg-warn-bg); color: var(--sg-warn-text); }
+.vpn-status-unavailable, .vpn-status-loading, .vpn-service-state { background: var(--sg-surface-raised); color: var(--sg-muted); }
+.vpn-service-state.running { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.pulse-dot { background: var(--sg-accent); box-shadow: 0 0 0 4px var(--sg-pulse-shadow); }
+.sidebar { background: var(--sg-sidebar); border-color: var(--sg-border); }
+.sidebar-heading, .sidebar-heading span, .server-item, .workspace-link, .text-button, .refresh-time, .section-caption { color: var(--sg-muted); }
+.sidebar-heading span, .nav-count { background: var(--sg-surface-raised); color: var(--sg-muted); }
+.server-item:hover, .workspace-link:hover { background: var(--sg-surface-raised); color: var(--sg-text); }
+.server-item.active, .workspace-link.active { background: var(--sg-accent-bg); border-color: var(--sg-accent-border); color: var(--sg-text); }
+.workspace-link.active>span:first-child, .workspace-link>span:first-child { color: var(--sg-accent); }
+.workspace-nav { border-color: var(--sg-border); }
+.add-server-button { background: var(--sg-accent-bg); color: var(--sg-accent); border-color: var(--sg-accent-border); }
+.add-server-button:hover { background: var(--sg-hero-start); }
+.hub-indicator, .text-button:hover { color: var(--sg-text); }
+.hub-indicator small { color: var(--sg-muted); }
+.hero-card { background: linear-gradient(120deg, var(--sg-hero-start), var(--sg-hero-end) 72%); border-color: var(--sg-accent-border); }
+.hero-card p, .vpn-hero small, .start-callout p:last-child { color: var(--sg-muted); }
+.hero-symbol { color: var(--sg-hero-symbol); }
+.operations-hero code { color: var(--sg-accent); }
+.metric-card, .panel, .modal { background: var(--sg-surface); border-color: var(--sg-border); color: var(--sg-text); }
+.metric-label, .metric-card p, .panel-intro, .permission-row p, .quick-panel>p, .field-help, .no-incidents, .empty-state p, .start-card p, .start-footnote, .process-status { color: var(--sg-muted); }
+.metric-icon { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.meter { background: var(--sg-surface-raised); }
+.meter span, .chart-key span { background: var(--sg-accent); }
+.chart-key, .chart-empty, .chart-axis { color: var(--sg-muted); }
+.chart-grid { stroke: var(--sg-chart-grid); }
+.chart-area { fill: var(--sg-chart-area); }
+.chart-line { stroke: var(--sg-chart-line); }
+.detail-list div, .process-table td, .process-table th { border-color: var(--sg-border); }
+.detail-list dt, .incident p, .process-table th, .process-table td:first-child { color: var(--sg-muted); }
+.detail-list dd, .process-table td { color: var(--sg-text); }
+.incident, .advanced-overview>div, .advanced-group, .advanced-row, .job-card, .audit-row, .vpn-summary-grid article, .vpn-service-card, .amnezia-owned, .amnezia-job, .telegram-binding { background: var(--sg-surface-soft); border-color: var(--sg-border); }
+.advanced-overview span, .advanced-row p, .advanced-empty, .advanced-list p, .audit-row span, .job-heading span, .job-card p, .vpn-service-card>p, .vpn-service-meta span, .telegram-binding span { color: var(--sg-muted); }
+.advanced-overview strong, .advanced-group h3, .advanced-row-top span, .incident h3, .audit-row strong, .vpn-summary-grid strong, .vpn-service-heading h3, .vpn-service-meta strong, .amnezia-job h3, .telegram-binding strong { color: var(--sg-text); }
+.advanced-row-top strong, .job-heading strong, .telegram-panel a, .telegram-manual summary { color: var(--sg-accent); }
+.empty-icon { color: var(--sg-accent); }
+.modal { box-shadow: 0 30px 80px var(--sg-modal-shadow); }
+.modal::backdrop { background: var(--sg-modal-backdrop); }
+.modal p:not(.eyebrow):not(.form-error) { color: var(--sg-muted); }
+.token-box, .job-output, .command-preview, .journal-output { background: var(--sg-code-bg); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.banner-error { background: var(--sg-error-bg); color: var(--sg-error); border-color: var(--sg-error); }
+.login-notice, .start-callout, .permission-row { background: var(--sg-accent-bg); border-color: var(--sg-accent-border); color: var(--sg-text); }
+.permission-row strong { color: var(--sg-text); }
+.chart-tabs { background: var(--sg-surface-raised); }
+.chart-tabs button { color: var(--sg-muted); }
+.chart-tabs button[aria-pressed="true"] { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.command-panel label, .files-browser label, .vpn-control-panel label, .action-control-panel label, .telegram-panel label, .settings-panel label, .terminal-line-form label, .credential-label { color: var(--sg-text); }
+.command-panel textarea, .files-editor textarea, .files-browser select, .vpn-control-panel input, .vpn-control-panel select, .action-control-panel input, .telegram-panel input, .telegram-panel select, .settings-panel input, .terminal-line-controls input, .journal-controls select { background: var(--sg-input); border-color: var(--sg-border-strong); color: var(--sg-text); }
+.action-control-panel .field-help { color: var(--sg-muted); }
+.quick-command-list button, .files-entries button { background: var(--sg-surface-soft); color: var(--sg-text); border-color: var(--sg-border); }
+.quick-command-list button:hover, .files-entries button:hover { background: var(--sg-accent-bg); border-color: var(--sg-accent-border); }
+.quick-command-list span, .files-path-row code, .files-entries span, .vpn-action-confirm #vpnActionSummary, .settings-panel .monitoring-message, .telegram-panel code { color: var(--sg-accent); }
+.files-editor-actions span, .vpn-action-confirm #vpnActionServer, .amnezia-job p { color: var(--sg-muted); }
+.audit-list, .audit-row, .telegram-manual { border-color: var(--sg-border); }
+.vpn-form-heading { color: var(--sg-text); border-color: var(--sg-border); }
+.terminal-screen { background: var(--sg-terminal-bg); border-color: var(--sg-border-strong); }
+.terminal-screen .xterm-viewport { background: var(--sg-terminal-bg) !important; }
+.terminal-keys button { background: var(--sg-surface-raised); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.terminal-keys button:active { background: var(--sg-accent-bg); }
+.terminal-tab { background: var(--sg-surface-soft); border-color: var(--sg-border-strong); }
+.terminal-tab.active { background: var(--sg-accent-bg); border-color: var(--sg-accent); }
+.terminal-tab-select, .terminal-tab-close { color: var(--sg-text); }
+.terminal-tab-dot.active { background: var(--sg-accent); }
+.terminal-add-tab { background: var(--sg-surface-raised); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.terminal-add-tab:hover, .terminal-tab-close:hover { background: var(--sg-accent-bg); color: var(--sg-accent); }
+.theme-picker { display: inline-flex; align-items: center; gap: 9px; color: var(--sg-muted); font-size: .75rem; font-weight: 700; }
+.theme-picker select { min-height: 40px; max-width: 145px; padding: 7px 28px 7px 10px; border: 1px solid var(--sg-border-strong); border-radius: 9px; background: var(--sg-input); color: var(--sg-text); cursor: pointer; font: inherit; }
+.login-card { position: relative; }
+.theme-picker-login { position: absolute; top: 25px; right: 26px; }
+.theme-picker-login select { max-width: 170px; }
+.theme-settings { margin-bottom: 18px; }
+.theme-settings .theme-picker { display: flex; width: fit-content; margin: 14px 0 12px; }
+.theme-settings .theme-picker select { max-width: none; min-width: 160px; }
+.maintenance-panel .panel-intro,.maintenance-active p,.maintenance-history-row span { color: var(--sg-muted); }
+.maintenance-active { background: var(--sg-warn-bg); border-color: var(--sg-border-strong); }
+.maintenance-active strong { color: var(--sg-warn-text); }
+.maintenance-id { color: var(--sg-muted); }
+.maintenance-fields label { color: var(--sg-text); }
+.maintenance-fields input,.maintenance-fields select { background: var(--sg-input); color: var(--sg-text); border-color: var(--sg-border-strong); }
+.maintenance-fields input::placeholder { color: var(--sg-muted-soft); }
+.maintenance-fields input:focus,.maintenance-fields select:focus { border-color: var(--sg-accent); }
+.maintenance-message { color: var(--sg-accent); }
+.maintenance-history { border-color: var(--sg-border); }
+.maintenance-history summary { color: var(--sg-accent); }
+.maintenance-history-row { background: var(--sg-surface-soft); border-color: var(--sg-border); }
+.maintenance-history-row strong { color: var(--sg-text); }
+.theme-picker select:focus-visible, .terminal-tab-select:focus-visible, .terminal-tab-close:focus-visible, .terminal-add-tab:focus-visible { outline: 2px solid var(--sg-accent); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .topbar { flex-wrap: wrap; gap: 12px; }
+  .topbar-actions { width: 100%; justify-content: flex-end; gap: 9px; }
+  .theme-picker-top { margin-right: auto; }
+  .theme-picker-top select { max-width: 133px; }
+  .theme-picker-login { top: 24px; right: 20px; }
+  .theme-picker-login select { max-width: 130px; }
+  .login-card .theme-picker-login { font-size: 0; }
+  .login-card .theme-picker-login select { font-size: .75rem; }
+}

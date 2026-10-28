@@ -1,0 +1,394 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ../../ATTRIBUTION.md. */
+"use strict";
+
+import assert from "node:assert/strict";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
+import test from "node:test";
+import ssh2 from "ssh2";
+import { createHandler, hostKey, inspectHostKey, issueGrant, previewAmneziaSetup,
+  requireUnrestrictedAdmin, safeAmneziaPreview, validateAmneziaPreview, validateLogin } from "../server.js";
+
+function wireKey() {
+  const type = Buffer.from("ssh-ed25519");
+  const key = Buffer.alloc(32, 0x2a);
+  const result = Buffer.alloc(4 + type.length + 4 + key.length);
+  result.writeUInt32BE(type.length, 0);
+  type.copy(result, 4);
+  result.writeUInt32BE(key.length, 4 + type.length);
+  key.copy(result, 8 + type.length);
+  return result;
+}
+
+const KEY = wireKey();
+const FINGERPRINT = "SHA256:" + createHash("sha256").update(KEY).digest("base64").replace(/=+$/, "");
+const GRANT = "a".repeat(43);
+const TOKEN = "t".repeat(43);
+const PREVIEW = { schema_version: 1, action: "preview", writes: false,
+  selected_target: "awg2", marker: "absent", other_marker: "absent",
+  socket_active: false, service_active: false, installer_ready: true,
+  installed_current: false, can_arm: false,
+  target: { ready: false, reason: "AWG2 is not enrolled" } };
+
+function previewInput(overrides = {}) {
+  return { username: "root", method: "password", fingerprint: FINGERPRINT,
+    password: "server-secret", private_key: "", passphrase: "", target: "awg2", ...overrides };
+}
+
+test("real SSH handshake checks the host key before any password is sent", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } });
+  let passwordAuthentications = 0;
+  let commands = 0;
+  const server = new ssh2.Server({ hostKeys: [privateKey] }, (client) => {
+    client.on("error", () => {}); // A rejected host key closes KEX by design.
+    client.on("authentication", (ctx) => {
+      if (ctx.method === "password") passwordAuthentications++;
+      if (ctx.method === "password" && ctx.username === "root" && ctx.password === "secret") ctx.accept();
+      else ctx.reject();
+    }).on("ready", () => {
+      client.on("session", (accept) => {
+        const session = accept();
+        session.on("exec", (accept, _reject, info) => {
+          commands++;
+          assert.match(info.command, / ssh-grant$/);
+          const channel = accept();
+          channel.write(JSON.stringify({ protocol: 1, grant: GRANT,
+            expires_at: Math.floor(Date.now() / 1000) + 60, username: "admin" }));
+          channel.exit(0);
+          channel.end();
+        });
+      });
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const clientFactory = () => {
+    const client = new ssh2.Client();
+    const result = {
+      on(event, callback) { client.on(event, callback); return result; },
+      end() { client.end(); },
+      exec(...args) { client.exec(...args); },
+      connect(options) {
+        client.connect({ ...options, host: "127.0.0.1", port: server.address().port });
+      },
+    };
+    return result;
+  };
+  try {
+    const key = await inspectHostKey({ clientFactory });
+    assert.match(key.fingerprint, /^SHA256:/);
+    assert.equal(passwordAuthentications, 0);
+    const raw = { username: "root", method: "password", fingerprint: "SHA256:" + "B".repeat(43),
+      password: "secret", private_key: "", passphrase: "" };
+    await assert.rejects(issueGrant(raw, { clientFactory }), /HOST_KEY_CHANGED/);
+    assert.equal(passwordAuthentications, 0);
+    const result = await issueGrant({ ...raw, fingerprint: key.fingerprint }, { clientFactory });
+    assert.equal(result.grant, GRANT);
+    assert.equal(passwordAuthentications, 1);
+    assert.equal(commands, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+function fakeClient(operations, { key = KEY, output, code = 0 } = {}) {
+  const client = new EventEmitter();
+  client.end = () => { operations.ended = true; };
+  client.connect = (config) => {
+    operations.config = config;
+    queueMicrotask(() => {
+      const trusted = config.hostVerifier(key);
+      if (trusted) client.emit("ready");
+      else client.emit("error", new Error("rejected"));
+    });
+  };
+  client.exec = (command, options, callback) => {
+    operations.command = command;
+    operations.options = options;
+    const stream = new EventEmitter();
+    stream.stderr = new EventEmitter();
+    callback(null, stream);
+    queueMicrotask(() => {
+      stream.emit("data", Buffer.from(output ?? JSON.stringify({
+        protocol: 1, grant: GRANT, expires_at: Math.floor(Date.now() / 1000) + 60,
+        username: "admin",
+      })));
+      stream.emit("close", code, null);
+    });
+  };
+  return client;
+}
+
+test("host key is inspected without any SSH authentication", async () => {
+  const operations = {};
+  const result = await inspectHostKey({ clientFactory: () => fakeClient(operations) });
+  assert.deepEqual(result, { protocol: 1, port: 22, key_type: "ssh-ed25519",
+    fingerprint: FINGERPRINT });
+  assert.equal(operations.config.host, "172.30.253.1");
+  assert.equal(operations.config.username, "sovagrid-probe");
+  assert.equal(operations.config.password, undefined);
+  assert.equal(operations.command, undefined);
+  assert.equal(operations.ended, true);
+  assert.throws(() => hostKey(Buffer.alloc(0)), /Invalid SSH host key/);
+});
+
+test("correctly pinned password SSH grants only the fixed local Hub command", async () => {
+  const operations = {};
+  const result = await issueGrant({ username: "root", method: "password", fingerprint: FINGERPRINT,
+    password: "server-secret", private_key: "", passphrase: "" },
+  { clientFactory: () => fakeClient(operations) });
+  assert.equal(result.grant, GRANT);
+  assert.equal(operations.config.port, 22);
+  assert.equal(operations.config.password, "server-secret");
+  assert.equal(operations.config.tryKeyboard, true);
+  assert.match(operations.command, /^\/usr\/bin\/docker compose /);
+  assert.match(operations.command, / ssh-grant$/);
+  assert.deepEqual(operations.options, { pty: false });
+  assert.equal(operations.ended, true);
+});
+
+test("key SSH supports a passphrase and sudo, and rejects a changed host key", async () => {
+  const operations = {};
+  const raw = { username: "operator", method: "private_key", fingerprint: FINGERPRINT,
+    password: "", private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n", passphrase: "key-password" };
+  await issueGrant(raw, { clientFactory: () => fakeClient(operations) });
+  assert.match(operations.command, /^\/usr\/bin\/sudo -n -- \/usr\/bin\/docker compose /);
+  assert.equal(operations.config.passphrase, "key-password");
+  assert.equal(operations.config.privateKey.every((byte) => byte === 0), true);
+  const changed = { ...raw, fingerprint: "SHA256:" + "A".repeat(43) };
+  const rejected = {};
+  await assert.rejects(issueGrant(changed, { clientFactory: () => fakeClient(rejected) }),
+    /HOST_KEY_CHANGED/);
+  assert.equal(rejected.command, undefined);
+  assert.equal(rejected.ended, true);
+});
+
+test("invalid credentials and fabricated grants do not issue a session", async () => {
+  assert.throws(() => validateLogin({ username: "root; echo x" }), /INVALID_INPUT/);
+  const raw = { username: "root", method: "password", fingerprint: FINGERPRINT,
+    password: "secret", private_key: "", passphrase: "" };
+  const operations = {};
+  await assert.rejects(issueGrant(raw, { clientFactory: () => fakeClient(operations,
+    { output: JSON.stringify({ protocol: 1, grant: "bad", expires_at: 0, username: "admin" }) }) }),
+  /GRANT_UNAVAILABLE/);
+  assert.equal(operations.ended, true);
+});
+
+async function call(handler, { path = "/api/v1/browser-ssh/host-key", payload = {},
+  chunks, headers = {} } = {}) {
+  const request = Readable.from(chunks ?? [Buffer.from(JSON.stringify(payload))]);
+  request.method = "POST";
+  request.url = path;
+  request.headers = { host: "example.com", origin: "https://example.com",
+    "x-forwarded-proto": "https", "x-sovagrid-client-ip": "203.0.113.17",
+    "content-type": "application/json", ...headers };
+  request.setTimeout = () => {};
+  const result = {};
+  const response = { writeHead(status, responseHeaders) {
+    result.status = status;
+    result.headers = responseHeaders;
+  }, end(body) { result.body = JSON.parse(body); }, destroyed: false };
+  await handler(request, response);
+  return result;
+}
+
+test("pre-auth HTTP route refuses cross-site origins and limits credential attempts", async () => {
+  let logins = 0;
+  const handler = createHandler({ inspect: async () => ({ protocol: 1, fingerprint: FINGERPRINT,
+    key_type: "ssh-ed25519", port: 22 }), login: async () => { logins++; throw new Error("AUTH_FAILED"); } });
+  const crossSite = await call(handler, { headers: { origin: "https://attacker.example" } });
+  assert.equal(crossSite.status, 404);
+  assert.equal(logins, 0);
+  const header = await call(handler);
+  assert.equal(header.status, 200);
+  assert.equal(header.headers["Cache-Control"], "no-store");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    assert.equal((await call(handler, { path: "/api/v1/browser-ssh/login" })).status, 401);
+  }
+  assert.equal((await call(handler, { path: "/api/v1/browser-ssh/login" })).status, 429);
+  assert.equal(logins, 5);
+});
+
+test("updater's loopback probe receives the SSH host key without credentials", async () => {
+  let inspected = 0;
+  const handler = createHandler({ inspect: async () => {
+    inspected++;
+    return { protocol: 1, port: 22, key_type: "ssh-ed25519", fingerprint: FINGERPRINT };
+  }, login: async () => { throw new Error("must not authenticate"); } });
+  const result = await call(handler, { headers: {
+    host: "127.0.0.1:8766", origin: "http://127.0.0.1:8766",
+    "x-forwarded-proto": "http", "x-sovagrid-client-ip": "127.0.0.1",
+  } });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { protocol: 1, port: 22,
+    key_type: "ssh-ed25519", fingerprint: FINGERPRINT });
+  assert.equal(inspected, 1);
+});
+
+test("Amnezia setup preview validates the exact SSH input and returns only safe fields", async () => {
+  assert.deepEqual(validateAmneziaPreview(previewInput()).target, "awg2");
+  assert.throws(() => validateAmneziaPreview(previewInput({ target: "awg2; id" })), /INVALID_INPUT/);
+  assert.throws(() => validateAmneziaPreview(previewInput({ extra: "command" })), /INVALID_INPUT/);
+  assert.throws(() => validateAmneziaPreview(previewInput({ username: "root; id" })), /INVALID_INPUT/);
+  const summary = safeAmneziaPreview(JSON.stringify({ ...PREVIEW,
+    secret: "must-not-appear", target: { ready: true, container_id: "a".repeat(64),
+      configured_clients: 2, owned_clients: ["private-client"], private_key: "must-not-appear" } }), "awg2");
+  assert.equal(summary.container_id, "a".repeat(64));
+  assert.equal(summary.configured_clients, 2);
+  assert.equal(summary.owned_clients, 1);
+  assert.doesNotMatch(JSON.stringify(summary), /private-client|private_key|must-not-appear/);
+  assert.deepEqual(safeAmneziaPreview(JSON.stringify(PREVIEW), "awg2").reason, "NOT_ENROLLED");
+  assert.throws(() => safeAmneziaPreview("{", "awg2"), /SETUP_UNAVAILABLE/);
+  assert.throws(() => safeAmneziaPreview(JSON.stringify(PREVIEW), "wireguard"), /SETUP_UNAVAILABLE/);
+});
+
+test("Amnezia setup preview runs one fixed local root command after a pinned host-key check", async () => {
+  const operations = {};
+  const result = await previewAmneziaSetup(previewInput(), { clientFactory: () => fakeClient(operations,
+    { output: JSON.stringify(PREVIEW) }) });
+  assert.equal(result.reason, "NOT_ENROLLED");
+  assert.equal(operations.config.host, "172.30.253.1");
+  assert.equal(operations.config.password, "server-secret");
+  assert.equal(operations.command,
+    "/usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py preview --target awg2");
+  assert.deepEqual(operations.options, { pty: false });
+  assert.equal(operations.ended, true);
+  const keyOps = {};
+  const keyInput = previewInput({ username: "operator", method: "private_key", password: "",
+    private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n", passphrase: "phrase",
+    target: "wireguard" });
+  await previewAmneziaSetup(keyInput, { clientFactory: () => fakeClient(keyOps,
+    { output: JSON.stringify({ ...PREVIEW, selected_target: "wireguard",
+      target: { ready: false, reason: "WireGuard is not enrolled" } }) }) });
+  assert.equal(keyOps.command,
+    "/usr/bin/sudo -n -- /usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py preview --target wireguard");
+  assert.equal(keyOps.config.privateKey.every((byte) => byte === 0), true);
+  assert.equal(keyOps.ended, true);
+  const changed = {};
+  await assert.rejects(previewAmneziaSetup(previewInput({ fingerprint: "SHA256:" + "B".repeat(43) }),
+    { clientFactory: () => fakeClient(changed, { output: JSON.stringify(PREVIEW) }) }), /HOST_KEY_CHANGED/);
+  assert.equal(changed.command, undefined);
+});
+
+test("Amnezia setup preview refuses malformed or failed root output", async () => {
+  const malformed = {};
+  await assert.rejects(previewAmneziaSetup(previewInput(), { clientFactory: () => fakeClient(malformed,
+    { output: JSON.stringify({ ...PREVIEW, writes: true }) }) }), /SETUP_UNAVAILABLE/);
+  const failed = {};
+  await assert.rejects(previewAmneziaSetup(previewInput(), { clientFactory: () => fakeClient(failed,
+    { output: JSON.stringify(PREVIEW), code: 2 }) }), /SETUP_UNAVAILABLE/);
+  assert.equal(failed.ended, true);
+});
+
+test("Amnezia setup preview handles 128 maximum-length client names without exposing them", async () => {
+  const names = Array.from({ length: 128 }, (_, index) =>
+    `a${String(index).padStart(3, "0")}${"x".repeat(28)}`);
+  const output = JSON.stringify({ ...PREVIEW, target: { ready: true,
+    container_id: "a".repeat(64), configured_clients: 128, owned_clients: names } });
+  assert.ok(Buffer.byteLength(output) > 4096);
+  assert.ok(Buffer.byteLength(output) < 16 * 1024);
+  const operations = {};
+  const summary = await previewAmneziaSetup(previewInput(), {
+    clientFactory: () => fakeClient(operations, { output }),
+  });
+  assert.equal(summary.configured_clients, 128);
+  assert.equal(summary.owned_clients, 128);
+  assert.doesNotMatch(JSON.stringify(summary), /a000x/);
+  assert.equal(operations.ended, true);
+  await assert.rejects(previewAmneziaSetup(previewInput(), {
+    clientFactory: () => fakeClient({}, { output: output + " ".repeat(16 * 1024) }),
+  }), /SETUP_UNAVAILABLE/);
+});
+
+test("gateway clears already read SSH secrets when a request body exceeds the limit", async () => {
+  const first = Buffer.alloc(32 * 1024, "s");
+  const oversized = Buffer.alloc(40 * 1024, "p");
+  const handler = createHandler({ login: async () => { throw new Error("must not authenticate"); } });
+  const result = await call(handler, { path: "/api/v1/browser-ssh/login",
+    chunks: [first, oversized] });
+  assert.equal(result.status, 400);
+  assert.equal(first.every((byte) => byte === 0), true);
+  assert.equal(oversized.every((byte) => byte === 0), true);
+});
+
+test("gateway clears already read SSH secrets when the request stream aborts", async () => {
+  const first = Buffer.from("partial-ssh-password");
+  const chunks = (async function* () {
+    yield first;
+    throw new Error("request stream aborted");
+  })();
+  const handler = createHandler({ login: async () => { throw new Error("must not authenticate"); } });
+  const result = await call(handler, { path: "/api/v1/browser-ssh/login", chunks });
+  assert.equal(result.status, 503);
+  assert.equal(first.every((byte) => byte === 0), true);
+});
+
+test("Hub access proof must be a fresh unrestricted administrator session", async () => {
+  let calls = 0;
+  const fetchImpl = async (url, options) => {
+    calls++;
+    assert.equal(url, "http://hub:8765/api/v1/session/access");
+    assert.equal(options.headers.Authorization, "Bearer " + TOKEN);
+    assert.equal(options.redirect, "error");
+    return { status: 200, headers: { get: () => null },
+      text: async () => JSON.stringify({ access: { mode: "all", revision: 0,
+        unrestricted_admin: true } }) };
+  };
+  await requireUnrestrictedAdmin("Bearer " + TOKEN, { fetchImpl });
+  assert.equal(calls, 1);
+  await assert.rejects(requireUnrestrictedAdmin("Bearer bad", { fetchImpl }), /AUTH_REQUIRED/);
+  assert.equal(calls, 1);
+  await assert.rejects(requireUnrestrictedAdmin("Bearer " + TOKEN, {
+    fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+      text: async () => JSON.stringify({ access: { mode: "selected", revision: 1,
+        unrestricted_admin: false } }) }),
+  }), /ADMIN_FORBIDDEN/);
+  await assert.rejects(requireUnrestrictedAdmin("Bearer " + TOKEN, {
+    fetchImpl: async () => ({ status: 401 }),
+  }), /AUTH_REQUIRED/);
+  await assert.rejects(requireUnrestrictedAdmin("Bearer " + TOKEN, {
+    fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+      text: async () => JSON.stringify({ access: { unrestricted_admin: true } }) }),
+  }), /HUB_UNAVAILABLE/);
+});
+
+test("Amnezia HTTP preview denies missing role and cross-origin before SSH", async () => {
+  let adminChecks = 0;
+  let previews = 0;
+  let parsedCredentials;
+  const handler = createHandler({ admin: async (authorization) => {
+    adminChecks++;
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, preview: async (value) => {
+    previews++;
+    assert.deepEqual(value, previewInput());
+    parsedCredentials = value;
+    return safeAmneziaPreview(JSON.stringify(PREVIEW), "awg2");
+  } });
+  const path = "/api/v1/browser-ssh/vpn-setup/preview";
+  assert.equal((await call(handler, { path, payload: previewInput(),
+    headers: { origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal((await call(handler, { path, payload: previewInput(), headers: {
+    host: "example.com", origin: "http://example.com", "x-forwarded-proto": "http",
+    authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal(adminChecks, 0);
+  assert.equal((await call(handler, { path, payload: previewInput() })).status, 401);
+  assert.equal(previews, 0);
+  const restricted = createHandler({ admin: async () => { throw new Error("ADMIN_FORBIDDEN"); },
+    preview: async () => { throw new Error("must not reach SSH"); } });
+  assert.equal((await call(restricted, { path, payload: previewInput(),
+    headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+  const result = await call(handler, { path, payload: previewInput(),
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.reason, "NOT_ENROLLED");
+  assert.equal(previews, 1);
+  assert.equal(parsedCredentials.password, "");
+  assert.equal(parsedCredentials.private_key, "");
+  assert.equal(parsedCredentials.passphrase, "");
+});

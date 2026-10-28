@@ -1,0 +1,18 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.install-invite{margin-top:26px;padding:17px;border:1px solid var(--sg-border);border-radius:15px;background:var(--sg-surface-soft)}
+.install-invite h2{font-size:1rem;margin:0 0 7px}.install-invite p{color:var(--sg-muted);font-size:.81rem;line-height:1.5;margin:0 0 12px}
+.install-open{white-space:normal}.topbar-actions{flex-wrap:wrap}.topbar .install-open{font-size:.76rem;padding:9px 12px;min-height:38px}
+.install-dialog{background:var(--sg-surface);color:var(--sg-text);border:1px solid var(--sg-border);border-radius:20px;width:min(580px,calc(100vw - 28px));max-height:calc(100dvh - 32px);overflow:auto;padding:24px;box-shadow:0 24px 90px var(--sg-modal-shadow)}
+.install-dialog::backdrop{background:var(--sg-modal-backdrop)}.install-dialog[open]{display:block}
+.install-dialog-header{display:flex;align-items:flex-start;gap:14px;margin-bottom:15px}.install-dialog-header img{flex:none;width:52px;height:52px;border-radius:13px}
+.install-dialog-header h2{font-size:1.25rem;line-height:1.25;margin:0 0 7px}.install-dialog-header p{margin:0;color:var(--sg-muted);font-size:.83rem;line-height:1.5}
+.install-close{margin-left:auto;flex:none;width:34px;height:34px;border:1px solid var(--sg-border);border-radius:9px;color:var(--sg-text);background:var(--sg-surface-soft);font-size:1.25rem}
+.install-dialog h3{font-size:.98rem;margin:20px 0 8px}.install-dialog p,.install-dialog li{font-size:.86rem;line-height:1.6}
+.install-dialog ol{padding-left:22px}.install-dialog li{padding-left:3px;margin-bottom:10px}.install-dialog a{color:var(--sg-accent)}
+.install-address{display:block;overflow-wrap:anywhere;padding:11px 13px;background:var(--sg-code-bg);border:1px solid var(--sg-border);border-radius:10px;margin:9px 0 12px;font-size:.82rem;user-select:all}
+.install-connection{color:var(--sg-muted);font-size:.8rem!important}.install-notice{padding:12px;border-radius:10px;background:var(--sg-accent-bg);color:var(--sg-text)}
+.install-warning{padding:12px;border:1px solid var(--sg-border-strong);border-radius:10px;background:var(--sg-warn-bg);color:var(--sg-warn-text)}
+.install-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px;margin-top:20px}.install-dialog [hidden]{display:none!important}
+@media(max-width:600px){.install-dialog{padding:18px}.install-dialog-header{gap:10px}.install-dialog-header h2{font-size:1.1rem}.install-dialog-header img{width:42px;height:42px}.install-dialog .primary-button,.install-dialog .secondary-button{flex:1}.topbar .install-open{max-width:175px}}

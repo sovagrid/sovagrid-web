@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Jigokuraku01
+# Additional author attribution terms: see ATTRIBUTION.md.
+name: Web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check browser scripts
+        run: |
+          for script in app.js install.js users.js checks.js theme.js files.js amnezia.js telegram.js monitoring.js journal.js maintenance.js sw.js; do
+            node --check "$script"
+          done
+      - name: Run panel regression tests
+        run: node --test tests/*.test.cjs
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker build --tag sovagrid-web:ci .
+      - name: Verify packaged entry points
+        run: docker run --rm --network none --entrypoint /bin/sh sovagrid-web:ci -ec 'for file in index.html app.js install.js install.css manifest.webmanifest sw.js icons/icon-192.png icons/icon-512.png icons/maskable-192.png icons/maskable-512.png icons/apple-touch-icon.png users.js users.css checks.js checks.css theme.css legal.html LICENSE ATTRIBUTION.md NOTICE; do test -s "/srv/$file"; done'
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOVAGRID_TEST_HUB: ${{ github.workspace }}/_hub
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check out the tested Hub API version
+        uses: actions/checkout@v6
+        with:
+          repository: sovagrid/sovagrid-hub
+          ref: ee7117f634dbcc0900e03a9d355f6ac3e53bd251
+          path: _hub
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - name: Install pinned browser test dependencies
+        working-directory: tests/browser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install isolated browser runtimes
+        working-directory: tests/browser
+        run: npx playwright install --with-deps chromium webkit
+      - name: Test real forms on desktop Chromium and phone WebKit
+        working-directory: tests/browser
+        run: npm test
+      - name: Keep test-only screenshots and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: panel-browser-results
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
