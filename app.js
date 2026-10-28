@@ -306,7 +306,7 @@ globalThis.sovagridRedeemNativeSSHGrant = async (grant) => {
 // returns the existing one-use Hub grant. Never put it in a URL or storage.
 globalThis.sovagridRedeemBrowserSSHGrant = async (grant, landing = null) => {
   const allowedOrigin = location.protocol === "https:" ||
-    (location.protocol === "http:" && ["127.0.0.1", "localhost"].includes(location.hostname));
+    (location.protocol === "http:" && isLoopback(location));
   if (!allowedOrigin || state.token || typeof grant !== "string" ||
       !/^[A-Za-z0-9_-]{43}$/.test(grant)) {
     throw new Error("SSH-вход доступен только на защищённом адресе этого сервера.");
@@ -2549,7 +2549,7 @@ const serverSetupKinds = {
 function serverSetupAllowed() {
   return Boolean(state.token && state.user?.role === "admin" && state.access?.unrestricted_admin === true &&
     state.base === location.origin && (location.protocol === "https:" ||
-      (location.protocol === "http:" && ["127.0.0.1", "localhost"].includes(location.hostname))));
+      (location.protocol === "http:" && isLoopback(location))));
 }
 function serverSetupReason() {
   if (!state.token || state.user?.role !== "admin" || state.access?.unrestricted_admin !== true)
