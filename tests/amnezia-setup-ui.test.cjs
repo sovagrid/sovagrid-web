@@ -70,8 +70,8 @@ test('VPN panel includes local-only read-only SSH preview and fresh PWA assets',
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
   assert.match(html, /amnezia\.js\?v=7/);
   assert.match(shell, /amnezia\.js\?v=7/);
-  assert.match(html, /styles\.css\?v=36/);
-  assert.match(shell, /styles\.css\?v=36/);
+  assert.match(html, /styles\.css\?v=37/);
+  assert.match(shell, /styles\.css\?v=37/);
 });
 
 test('preview requires reviewed host key and clears SSH password before same-origin request', async () => {
