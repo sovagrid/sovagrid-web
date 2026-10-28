@@ -14,9 +14,90 @@ const TARGET = "172.30.253.1"; // Fixed Docker bridge gateway: this Ubuntu host 
 const PORT = Number(process.env.SOVAGRID_HOST_SSH_PORT || "22");
 const GRANT_COMMAND = "/usr/bin/docker compose --env-file /etc/sovagrid/deploy.env -f /opt/sovagrid-src/sovagrid-blueprint/deploy/compose.yaml run --rm --no-deps -T --entrypoint python3 hub -m sovagrid_hub --db /data/hub.sqlite ssh-grant";
 const AMNEZIA_PREVIEW_COMMAND = "/usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py preview --target ";
+// Fixed, read-only inventory. No user input is interpolated into the command or script.
+// Keep the classification in step with sovagrid-connect/server_status.py.
+const STATUS_COMMAND = "sh -c 'if ! command -v python3 >/dev/null 2>&1; then printf \"SG_STATUS_V1:unsupported\\n\"; exit 0; fi; if [ \"$(id -u)\" = 0 ]; then exec python3 -I -; fi; if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then exec sudo -n python3 -I -; fi; printf \"SG_STATUS_V1:unknown\\n\"'";
+const STATUS_SCRIPT = String.raw`# SOVAGRID_SSH_STATUS_V1
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+
+def node(path):
+    try:
+        return Path(path).lstat()
+    except FileNotFoundError:
+        return None
+
+def present(path):
+    return node(path) is not None
+
+def regular(path):
+    info = node(path)
+    return info is not None and stat.S_ISREG(info.st_mode) and info.st_uid == 0
+
+def directory(path):
+    info = node(path)
+    return info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == 0
+
+def result(kind):
+    print('SG_STATUS_V1:' + kind, flush=True)
+    raise SystemExit(0)
+
+try:
+    if os.geteuid() != 0:
+        result('unknown')
+    release = Path('/etc/os-release')
+    if not release.is_file():
+        result('unsupported')
+    raw = release.read_text(encoding='utf-8')[:8192]
+    values = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line and not line.startswith('#'))
+    if values.get('ID', '').strip('"\'') != 'ubuntu':
+        result('unsupported')
+    full = directory('/opt/sovagrid-src') and regular('/opt/sovagrid-src/sovagrid-bundle.json') and \
+        regular('/var/lib/sovagrid/.managed-by-run-sh')
+    if full:
+        result('managed')
+    agent = regular('/opt/sovagrid-agent-installer/source-manifest.json') and \
+        regular('/etc/systemd/system/sovagrid-agent.service') and \
+        directory('/var/lib/sovagrid-agent-enrollment')
+    if agent and not any(present(path) for path in (
+        '/opt/sovagrid-src', '/etc/sovagrid-hub', '/var/lib/sovagrid',
+        '/etc/sovagrid/.agent-unit-managed-by-run-sh',
+    )):
+        result('agent_only')
+    reserved = (
+        '/opt/sovagrid-src', '/opt/sovagrid-agent', '/opt/sovagrid-agent-installer',
+        '/opt/sovagrid-vpn', '/etc/sovagrid', '/etc/sovagrid-hub',
+        '/etc/sovagrid-agent-tunnel', '/etc/sovagrid-agent-tunnel-public',
+        '/var/lib/sovagrid', '/var/lib/sovagrid-agent',
+        '/var/lib/sovagrid-agent-enrollment', '/var/lib/sovagrid-hub-tunnels',
+        '/var/lib/sovagrid-first-install',
+    )
+    if any(present(path) for path in reserved):
+        result('conflict')
+    for base in ('/etc/systemd/system', '/run/systemd/system', '/usr/local/lib/systemd/system'):
+        path = Path(base)
+        if path.is_dir() and any(entry.name.startswith('sovagrid-') for entry in path.iterdir()):
+            result('conflict')
+    if shutil.which('docker'):
+        scan = subprocess.run(
+            ['docker', 'ps', '-a', '--filter', 'label=com.docker.compose.project=sovagrid',
+             '--format', '{{.ID}}'], capture_output=True, timeout=8, check=False,
+        )
+        if scan.returncode != 0:
+            result('unknown')
+        if scan.stdout.strip():
+            result('conflict')
+    result('missing')
+except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+    result('unknown')
+`;
 const HUB_ACCESS_URL = "http://hub:8765/api/v1/session/access";
 const MAX_BODY = 70 * 1024;
 const MAX_OUTPUT = 4096;
+const MAX_STATUS_OUTPUT = 512;
 // The installer can list 128 owned clients, each with a 32-character name.
 const MAX_AMNEZIA_PREVIEW_OUTPUT = 16 * 1024;
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
@@ -104,6 +185,23 @@ export function validateTargetHostKey(value) {
     }
   }
   return { host: host.toLowerCase(), port: value.port };
+}
+
+export function validateTargetStatus(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== 8 ||
+      !["host", "port", "username", "method", "fingerprint", "password", "private_key", "passphrase"]
+        .every((key) => Object.hasOwn(value, key))) {
+    throw new Error("INVALID_INPUT");
+  }
+  const target = validateTargetHostKey({ host: value.host, port: value.port });
+  if (typeof value.method === "string" && !["password", "private_key"].includes(value.method)) {
+    throw new Error("UNSUPPORTED_AUTH_METHOD");
+  }
+  const login = Object.fromEntries(["username", "method", "fingerprint", "password", "private_key", "passphrase"]
+    .map((key) => [key, value[key]]));
+  validateLogin(login);
+  return { ...target, ...login };
 }
 
 export async function requireUnrestrictedAdmin(authorization, { fetchImpl = fetch } = {}) {
@@ -212,6 +310,116 @@ export async function inspectTargetHostKey(raw, options = {}) {
   // The key belongs to this one probe only. Every future SSH authentication
   // must repeat host-key verification against the user's chosen fingerprint.
   return { ...key, scope: "entered_target", host: target.host, reverify_required: true };
+}
+
+function clearCredentials(value) {
+  if (!value || typeof value !== "object") return;
+  for (const key of ["password", "private_key", "passphrase"]) {
+    if (Object.hasOwn(value, key)) value[key] = "";
+  }
+}
+
+function targetStatusKind(output, code, signal) {
+  if (code !== 0 || signal) return "unknown";
+  const match = /^SG_STATUS_V1:(managed|agent_only|missing|conflict|unsupported|unknown)\n?$/.exec(
+    output.toString("utf8"));
+  return match?.[1] ?? "unknown";
+}
+
+export function probeTargetStatus(raw, { clientFactory = () => new Client(), timeoutMs = 20000 } = {}) {
+  let value;
+  try { value = validateTargetStatus(raw); }
+  catch (error) { clearCredentials(raw); throw error; }
+  return new Promise((resolve, reject) => {
+    const privateKey = value.method === "private_key" ? Buffer.from(value.private_key, "utf8") : null;
+    let client;
+    try { client = clientFactory(); }
+    catch {
+      privateKey?.fill(0);
+      clearCredentials(value);
+      clearCredentials(raw);
+      reject(new Error("SSH_UNAVAILABLE"));
+      return;
+    }
+    let settled = false;
+    let keyChanged = false;
+    let keyVerified = false;
+    let authenticated = false;
+    let stream;
+    const output = Buffer.alloc(MAX_STATUS_OUTPUT);
+    let outputBytes = 0;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { stream?.close?.(); } catch { /* Closing an already closed channel is harmless. */ }
+      try { client.end(); } catch { /* Other cleanup must still run. */ }
+      if (error) {
+        try { client.destroy?.(); } catch { /* A stalled socket must not block cleanup. */ }
+      }
+      privateKey?.fill(0);
+      output.fill(0);
+      clearCredentials(value);
+      clearCredentials(raw);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const timer = setTimeout(() => finish(new Error(authenticated ? "STATUS_UNAVAILABLE" : "SSH_UNAVAILABLE")), timeoutMs);
+    client.on("error", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
+      authenticated ? "STATUS_UNAVAILABLE" : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+    client.on("close", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
+      authenticated ? "STATUS_UNAVAILABLE" : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+    client.on("ready", () => {
+      authenticated = true;
+      try { client.exec(STATUS_COMMAND, { pty: false }, (error, channel) => {
+        if (settled) { channel?.close?.(); return; }
+        if (error || !channel) { finish(new Error("STATUS_UNAVAILABLE")); return; }
+        stream = channel;
+        let stderrBytes = 0;
+        stream.stderr.on("data", (chunk) => {
+          stderrBytes += Buffer.byteLength(chunk);
+          if (stderrBytes > 1024) finish(new Error("STATUS_UNAVAILABLE"));
+        });
+        stream.on("data", (chunk) => {
+          if (settled) return;
+          const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (outputBytes + piece.length > MAX_STATUS_OUTPUT) {
+            finish(new Error("STATUS_UNAVAILABLE"));
+          } else {
+            piece.copy(output, outputBytes);
+            outputBytes += piece.length;
+          }
+        });
+        stream.on("error", () => finish(new Error("STATUS_UNAVAILABLE")));
+        stream.on("close", (code, signal) => {
+          if (settled) return;
+          finish(null, { protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+            kind: targetStatusKind(output.subarray(0, outputBytes), code, signal),
+            host_key_fingerprint: value.fingerprint });
+        });
+        try { stream.end(STATUS_SCRIPT); }
+        catch { finish(new Error("STATUS_UNAVAILABLE")); }
+      }); }
+      catch { finish(new Error("STATUS_UNAVAILABLE")); }
+    });
+    try {
+      client.connect({ host: value.host, port: value.port, username: value.username,
+        readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: false,
+        ...(value.method === "password" ? { password: value.password } :
+          { privateKey, passphrase: value.passphrase || undefined }),
+        hostVerifier: (key) => {
+          try {
+            if (sameFingerprint(hostKey(key).fingerprint, value.fingerprint)) {
+              keyVerified = true;
+              return true;
+            }
+          } catch { /* Reject malformed host key. */ }
+          keyChanged = true;
+          return false;
+        },
+      });
+    } catch { finish(new Error("SSH_UNAVAILABLE")); }
+  });
 }
 
 export function issueGrant(raw, { clientFactory = () => new Client(), timeoutMs = 60000 } = {}) {
@@ -431,7 +639,7 @@ async function body(req) {
 }
 
 export function createHandler({ inspect = inspectHostKey, inspectTarget = inspectTargetHostKey,
-  login = issueGrant,
+  targetStatus = probeTargetStatus, login = issueGrant,
   preview = previewAmneziaSetup, admin = requireUnrestrictedAdmin } = {}) {
   const probes = new WindowLimit(20, 60);
   const attempts = new WindowLimit(5, 60);
@@ -447,9 +655,11 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const address = req.headers["x-sovagrid-client-ip"];
     const isPreview = req.url === "/api/v1/browser-ssh/vpn-setup/preview";
     const isTargetProbe = req.url === "/api/v1/browser-ssh/target-host-key";
-    const isAdminRoute = isPreview || isTargetProbe;
+    const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
+    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus;
     if (req.method !== "POST" || !["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
-        "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key"].includes(req.url) ||
+        "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key",
+        "/api/v1/browser-ssh/target-status"].includes(req.url) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -475,6 +685,10 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       try {
         if (isTargetProbe) {
           json(res, 200, await inspectTarget(validateTargetHostKey(value)));
+        } else if (isTargetStatus) {
+          const selected = validateTargetStatus(value);
+          try { json(res, 200, await targetStatus(selected)); }
+          finally { clearCredentials(selected); }
         } else if (isProbe) {
           if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length) {
             throw new Error("INVALID_INPUT");
@@ -486,18 +700,16 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           json(res, 200, await login(value));
         }
       } finally {
-        if (value && typeof value === "object") {
-          for (const key of ["password", "private_key", "passphrase"]) {
-            if (Object.hasOwn(value, key)) value[key] = "";
-          }
-        }
+        clearCredentials(value);
       }
     } catch (error) {
       if (res.destroyed) return;
       const code = ["INVALID_INPUT", "SSH_UNAVAILABLE", "HOST_KEY_CHANGED", "AUTH_FAILED",
         "GRANT_UNAVAILABLE", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE",
-        "SETUP_UNAVAILABLE"].includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
+        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD"]
+        .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
       json(res, code === "INVALID_INPUT" ? 400 : code === "HOST_KEY_CHANGED" ? 409 :
+        code === "UNSUPPORTED_AUTH_METHOD" ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
           code === "ADMIN_FORBIDDEN" ? 403 : 503, { error: code });
     } finally { clearTimeout(bodyTimer); active--; }

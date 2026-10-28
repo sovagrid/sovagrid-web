@@ -10,8 +10,8 @@ import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
 import { createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
-  previewAmneziaSetup, requireUnrestrictedAdmin, safeAmneziaPreview,
-  validateAmneziaPreview, validateLogin, validateTargetHostKey } from "../server.js";
+  previewAmneziaSetup, probeTargetStatus, requireUnrestrictedAdmin, safeAmneziaPreview,
+  validateAmneziaPreview, validateLogin, validateTargetHostKey, validateTargetStatus } from "../server.js";
 
 function wireKey() {
   const type = Buffer.from("ssh-ed25519");
@@ -39,12 +39,18 @@ function previewInput(overrides = {}) {
     password: "server-secret", private_key: "", passphrase: "", target: "awg2", ...overrides };
 }
 
+function statusInput(overrides = {}) {
+  return { host: "REMOTE.example", port: 22022, username: "root", method: "password",
+    fingerprint: FINGERPRINT, password: "server-secret", private_key: "", passphrase: "", ...overrides };
+}
+
 test("real SSH handshake checks the host key before any password is sent", async () => {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
     privateKeyEncoding: { type: "pkcs1", format: "pem" },
     publicKeyEncoding: { type: "spki", format: "pem" } });
   let passwordAuthentications = 0;
   let commands = 0;
+  let statusCommands = 0;
   const server = new ssh2.Server({ hostKeys: [privateKey] }, (client) => {
     client.on("error", () => {}); // A rejected host key closes KEX by design.
     client.on("authentication", (ctx) => {
@@ -55,13 +61,25 @@ test("real SSH handshake checks the host key before any password is sent", async
       client.on("session", (accept) => {
         const session = accept();
         session.on("exec", (accept, _reject, info) => {
-          commands++;
-          assert.match(info.command, / ssh-grant$/);
           const channel = accept();
-          channel.write(JSON.stringify({ protocol: 1, grant: GRANT,
-            expires_at: Math.floor(Date.now() / 1000) + 60, username: "admin" }));
-          channel.exit(0);
-          channel.end();
+          if (info.command.endsWith(" ssh-grant")) {
+            commands++;
+            channel.write(JSON.stringify({ protocol: 1, grant: GRANT,
+              expires_at: Math.floor(Date.now() / 1000) + 60, username: "admin" }));
+            channel.exit(0);
+            channel.end();
+          } else {
+            statusCommands++;
+            assert.match(info.command, /^sh -c '/);
+            let script = "";
+            channel.on("data", (chunk) => { script += chunk.toString("utf8"); });
+            channel.on("end", () => {
+              assert.match(script, /SOVAGRID_SSH_STATUS_V1/);
+              channel.write("SG_STATUS_V1:missing\n");
+              channel.exit(0);
+              channel.end();
+            });
+          }
         });
       });
     });
@@ -93,10 +111,19 @@ test("real SSH handshake checks the host key before any password is sent", async
       password: "secret", private_key: "", passphrase: "" };
     await assert.rejects(issueGrant(raw, { clientFactory }), /HOST_KEY_CHANGED/);
     assert.equal(passwordAuthentications, 0);
+    await assert.rejects(probeTargetStatus(statusInput({ fingerprint: raw.fingerprint,
+      password: "secret" }), { clientFactory }), /HOST_KEY_CHANGED/);
+    assert.equal(passwordAuthentications, 0);
+    assert.equal(statusCommands, 0);
     const result = await issueGrant({ ...raw, fingerprint: key.fingerprint }, { clientFactory });
     assert.equal(result.grant, GRANT);
-    assert.equal(passwordAuthentications, 1);
+    const status = await probeTargetStatus(statusInput({ fingerprint: key.fingerprint,
+      password: "secret" }), { clientFactory });
+    assert.equal(status.kind, "missing");
+    assert.equal(status.host_key_fingerprint, key.fingerprint);
+    assert.equal(passwordAuthentications, 2);
     assert.equal(commands, 1);
+    assert.equal(statusCommands, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -118,14 +145,16 @@ function fakeClient(operations, { key = KEY, output, code = 0 } = {}) {
     operations.options = options;
     const stream = new EventEmitter();
     stream.stderr = new EventEmitter();
-    callback(null, stream);
-    queueMicrotask(() => {
+    const send = () => {
       stream.emit("data", Buffer.from(output ?? JSON.stringify({
         protocol: 1, grant: GRANT, expires_at: Math.floor(Date.now() / 1000) + 60,
         username: "admin",
       })));
       stream.emit("close", code, null);
-    });
+    };
+    stream.end = (script) => { operations.script = script; queueMicrotask(send); };
+    callback(null, stream);
+    if (!command.startsWith("sh -c '")) queueMicrotask(send);
   };
   return client;
 }
@@ -186,6 +215,99 @@ test("entered target host-key probe times out without trying authentication", as
     { clientFactory: () => client, timeoutMs: 10 }), /SSH_UNAVAILABLE/);
   assert.equal(operations.config.password, undefined);
   assert.equal(operations.ended, true);
+});
+
+test("target status accepts only explicit SSH credentials and a pinned target", () => {
+  assert.deepEqual(validateTargetStatus(statusInput()), statusInput({ host: "remote.example" }));
+  for (const invalid of [
+    { host: "https://remote.example" }, { host: "user@remote.example" }, { port: "22" },
+    { username: "root; id" }, { fingerprint: "SHA256:invalid" },
+    { method: "password", password: "" }, { method: "private_key", private_key: "" },
+    { extra: "id" },
+  ]) assert.throws(() => validateTargetStatus(statusInput(invalid)), /INVALID_INPUT/);
+  assert.throws(() => validateTargetStatus(statusInput({ method: "keyboard_interactive" })),
+    /UNSUPPORTED_AUTH_METHOD/);
+  assert.throws(() => validateTargetStatus(statusInput({ method: "two_factor" })),
+    /UNSUPPORTED_AUTH_METHOD/);
+});
+
+test("target status runs only the fixed read-only inventory after host-key verification", async () => {
+  const operations = {};
+  const raw = statusInput();
+  const result = await probeTargetStatus(raw, { clientFactory: () => fakeClient(operations,
+    { output: "SG_STATUS_V1:agent_only\n" }) });
+  assert.deepEqual(result, { protocol: 1, scope: "entered_target", host: "remote.example",
+    port: 22022, kind: "agent_only", host_key_fingerprint: FINGERPRINT });
+  assert.equal(operations.config.host, "remote.example");
+  assert.equal(operations.config.port, 22022);
+  assert.equal(operations.config.password, "server-secret");
+  assert.equal(operations.config.tryKeyboard, false);
+  assert.match(operations.command, /^sh -c '/);
+  assert.doesNotMatch(operations.command, /remote\.example|server-secret|22022/);
+  assert.match(operations.script, /SOVAGRID_SSH_STATUS_V1/);
+  assert.match(operations.script, /'missing'/);
+  assert.deepEqual(operations.options, { pty: false });
+  assert.equal(raw.password, "");
+  assert.equal(operations.ended, true);
+
+  const keyOps = {};
+  const keyInput = statusInput({ method: "private_key", password: "",
+    private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n", passphrase: "phrase" });
+  await probeTargetStatus(keyInput, { clientFactory: () => fakeClient(keyOps,
+    { output: "SG_STATUS_V1:managed\n" }) });
+  assert.equal(keyOps.config.privateKey.every((byte) => byte === 0), true);
+  assert.equal(keyInput.private_key, "");
+  assert.equal(keyInput.passphrase, "");
+});
+
+test("target status maps untrusted output to a coarse kind and rejects a changed key", async () => {
+  for (const output of ["SG_STATUS_V1:missing\nextra", "root:x:0:0", "SG_STATUS_V1:missing\nSG_STATUS_V1:managed\n"]) {
+    const operations = {};
+    const result = await probeTargetStatus(statusInput(), { clientFactory: () => fakeClient(operations,
+      { output }) });
+    assert.equal(result.kind, "unknown");
+    assert.doesNotMatch(JSON.stringify(result), /root:x|extra/);
+  }
+  const failed = await probeTargetStatus(statusInput(), { clientFactory: () => fakeClient({},
+    { output: "SG_STATUS_V1:missing\n", code: 2 }) });
+  assert.equal(failed.kind, "unknown");
+  const tooLarge = {};
+  await assert.rejects(probeTargetStatus(statusInput(), { clientFactory: () => fakeClient(tooLarge,
+    { output: "x".repeat(513) }) }), /STATUS_UNAVAILABLE/);
+  assert.equal(tooLarge.ended, true);
+  const changed = {};
+  const raw = statusInput({ fingerprint: "SHA256:" + "B".repeat(43) });
+  await assert.rejects(probeTargetStatus(raw, { clientFactory: () => fakeClient(changed,
+    { output: "SG_STATUS_V1:missing\n" }) }), /HOST_KEY_CHANGED/);
+  assert.equal(changed.command, undefined);
+  assert.equal(changed.ended, true);
+  assert.equal(raw.password, "");
+});
+
+test("target status bounds a stalled SSH command and clears its credentials", async () => {
+  const operations = {};
+  const client = new EventEmitter();
+  client.connect = (config) => {
+    operations.config = config;
+    queueMicrotask(() => {
+      assert.equal(config.hostVerifier(KEY), true);
+      client.emit("ready");
+    });
+  };
+  client.exec = (_command, _options, callback) => {
+    const stream = new EventEmitter();
+    stream.stderr = new EventEmitter();
+    stream.end = () => {};
+    stream.close = () => { operations.channelClosed = true; };
+    callback(null, stream);
+  };
+  client.end = () => { operations.ended = true; };
+  const raw = statusInput();
+  await assert.rejects(probeTargetStatus(raw, { clientFactory: () => client, timeoutMs: 10 }),
+    /STATUS_UNAVAILABLE/);
+  assert.equal(operations.channelClosed, true);
+  assert.equal(operations.ended, true);
+  assert.equal(raw.password, "");
 });
 
 test("correctly pinned password SSH grants only the fixed local Hub command", async () => {
@@ -482,4 +604,61 @@ test("entered target host-key route requires unrestricted admin and a safe origi
   assert.equal(result.body.fingerprint, FINGERPRINT);
   assert.equal(result.body.reverify_required, true);
   assert.equal(inspected, 1);
+});
+
+test("target status route requires admin, a same-origin secure request and exact SSH input", async () => {
+  const path = "/api/v1/browser-ssh/target-status";
+  let checks = 0;
+  let probes = 0;
+  let parsed;
+  const handler = createHandler({ admin: async (authorization) => {
+    checks++;
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, targetStatus: async (value) => {
+    probes++;
+    parsed = value;
+    return { protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+      kind: "missing", host_key_fingerprint: value.fingerprint };
+  } });
+  const payload = statusInput();
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal((await call(handler, { path, payload, headers: {
+    host: "example.com", origin: "http://example.com", "x-forwarded-proto": "http",
+    authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal(checks, 0);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(probes, 0);
+  const restricted = createHandler({ admin: async () => { throw new Error("ADMIN_FORBIDDEN"); },
+    targetStatus: async () => { throw new Error("must not authenticate"); } });
+  assert.equal((await call(restricted, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+  assert.equal((await call(handler, { path, payload: statusInput({ method: "two_factor" }),
+    headers: { authorization: "Bearer " + TOKEN } })).status, 422);
+  assert.equal((await call(handler, { path, payload: statusInput({ host: "ssh://remote.example" }),
+    headers: { authorization: "Bearer " + TOKEN } })).status, 400);
+  assert.equal(probes, 0);
+  const success = await call(handler, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(success.status, 200);
+  assert.equal(success.body.kind, "missing");
+  assert.equal(success.body.host, "remote.example");
+  assert.equal(probes, 1);
+  assert.equal(parsed.password, "");
+
+  const changed = createHandler({ admin: async () => {},
+    targetStatus: async () => { throw new Error("HOST_KEY_CHANGED"); } });
+  const changedResponse = await call(changed, { path, payload: statusInput(),
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(changedResponse.status, 409);
+  assert.deepEqual(changedResponse.body, { error: "HOST_KEY_CHANGED" });
+
+  const loopback = await call(handler, { path, payload: statusInput(), headers: {
+    host: "127.0.0.1:8766", origin: "http://127.0.0.1:8766",
+    "x-forwarded-proto": "http", "x-sovagrid-client-ip": "127.0.0.1",
+    authorization: "Bearer " + TOKEN,
+  } });
+  assert.equal(loopback.status, 200);
 });
