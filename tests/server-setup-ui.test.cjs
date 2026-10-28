@@ -113,8 +113,10 @@ test('hiding the page clears typed SSH secrets while retaining the reviewed publ
 
 test('SSH status requires fingerprint consent and clears password before same-origin request', async () => {
   const h = harness();
+  assert.equal(h.element('serverSetupStatusForm').hidden, true);
   assert.equal(h.element('serverSetupStatusButton').disabled, true);
   await h.context.serverSetupInspect();
+  assert.equal(h.element('serverSetupStatusForm').hidden, false);
   assert.equal(h.calls[0].path, '/api/v1/browser-ssh/target-host-key');
   assert.deepEqual(JSON.parse(h.calls[0].options.body), { host: 'server.example', port: 22 });
   assert.equal(h.calls[0].options.credentials, 'omit');
@@ -137,6 +139,12 @@ test('SSH status requires fingerprint consent and clears password before same-or
   assert.match(h.element('serverSetupResultTitle').textContent, /не обнаружен/);
   assert.deepEqual([...h.storage.entries()],
     [[`sovagrid.target-ssh-host-key:${h.context.location.origin}:server.example:22`, FINGERPRINT]]);
+});
+
+test('SSH setup allows a directly opened Hub on IPv6 loopback', () => {
+  const h = harness({ page: 'http://[::1]:8766/sovagrid/monitoring/', base: 'http://[::1]:8766' });
+  assert.equal(h.context.serverSetupAllowed(), true);
+  assert.equal(h.element('serverSetupInspect').disabled, false);
 });
 
 test('private-key status clears file and passphrase and labels agent-only result', async () => {

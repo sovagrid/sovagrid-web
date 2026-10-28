@@ -2584,6 +2584,7 @@ function serverSetupRender() {
   $("serverSetupNotice").textContent = reason;
   $("serverSetupNotice").hidden = !reason;
   $("serverSetupReview").hidden = !serverSetup.reviewed;
+  $("serverSetupStatusForm").hidden = !ssh || !serverSetup.reviewed;
   $("serverSetupChangedKey").hidden = !serverSetup.changedPin;
   $("serverSetupReplaceKey").hidden = !serverSetup.changedPin;
   $("serverSetupKeyFields").hidden = !$("serverSetupAuthKey").checked;
