@@ -4,14 +4,16 @@
 "use strict";
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
 import { createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
-  previewAmneziaSetup, probeTargetStatus, requireUnrestrictedAdmin, safeAmneziaPreview,
-  validateAmneziaPreview, validateLogin, validateTargetHostKey, validateTargetStatus } from "../server.js";
+  previewAmneziaSetup, previewTargetInstall, probeTargetStatus, requireUnrestrictedAdmin,
+  safeAmneziaPreview, validateAmneziaPreview, validateLogin, validateTargetHostKey,
+  validateTargetInstallPreview, validateTargetStatus } from "../server.js";
 
 function wireKey() {
   const type = Buffer.from("ssh-ed25519");
@@ -129,6 +131,60 @@ test("real SSH handshake checks the host key before any password is sent", async
   }
 });
 
+test("target inventory supports one keyboard-interactive password after host-key verification", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } });
+  let challenges = 0;
+  const server = new ssh2.Server({ hostKeys: [privateKey] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (ctx) => {
+      if (ctx.method !== "keyboard-interactive") { ctx.reject(["keyboard-interactive"]); return; }
+      challenges++;
+      ctx.prompt([{ prompt: "Password: ", echo: false }], (answers) => {
+        if (ctx.username === "root" && answers.length === 1 && answers[0] === "secret") ctx.accept();
+        else ctx.reject();
+      });
+    }).on("ready", () => client.on("session", (accept) => {
+      const session = accept();
+      session.on("exec", (accept, _reject, info) => {
+        assert.match(info.command, /^sh -c '/);
+        const channel = accept();
+        channel.on("data", () => {});
+        channel.on("end", () => {
+          channel.write("SG_STATUS_V1:missing\n");
+          channel.exit(0);
+          channel.end();
+        });
+      });
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const clientFactory = () => {
+    const client = new ssh2.Client();
+    return {
+      on(event, callback) { client.on(event, callback); return this; },
+      end() { client.end(); },
+      exec(...args) { client.exec(...args); },
+      connect(options) { client.connect({ ...options, host: "127.0.0.1", port: server.address().port }); },
+    };
+  };
+  try {
+    const key = await inspectHostKey({ clientFactory });
+    assert.equal(challenges, 0);
+    await assert.rejects(probeTargetStatus(statusInput({ fingerprint: "SHA256:" + "B".repeat(43),
+      password: "secret" }), { clientFactory }), /HOST_KEY_CHANGED/);
+    assert.equal(challenges, 0);
+    const input = statusInput({ fingerprint: key.fingerprint, password: "secret" });
+    const result = await probeTargetStatus(input, { clientFactory });
+    assert.equal(result.kind, "missing");
+    assert.equal(challenges, 1);
+    assert.equal(input.password, "");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 function fakeClient(operations, { key = KEY, output, code = 0 } = {}) {
   const client = new EventEmitter();
   client.end = () => { operations.ended = true; };
@@ -241,7 +297,7 @@ test("target status runs only the fixed read-only inventory after host-key verif
   assert.equal(operations.config.host, "remote.example");
   assert.equal(operations.config.port, 22022);
   assert.equal(operations.config.password, "server-secret");
-  assert.equal(operations.config.tryKeyboard, false);
+  assert.equal(operations.config.tryKeyboard, true);
   assert.match(operations.command, /^sh -c '/);
   assert.doesNotMatch(operations.command, /remote\.example|server-secret|22022/);
   assert.match(operations.script, /SOVAGRID_SSH_STATUS_V1/);
@@ -307,6 +363,126 @@ test("target status bounds a stalled SSH command and clears its credentials", as
     /STATUS_UNAVAILABLE/);
   assert.equal(operations.channelClosed, true);
   assert.equal(operations.ended, true);
+  assert.equal(raw.password, "");
+});
+
+function installPreviewInput(overrides = {}) {
+  return { ...statusInput(), name: "Second Ubuntu", hub_host: "198.51.100.20",
+    hub_port: 22, local_port: 22023, ...overrides };
+}
+
+test("install preview accepts only a pinned target and a routable Hub IP", () => {
+  const value = validateTargetInstallPreview(installPreviewInput());
+  assert.equal(value.host, "remote.example");
+  assert.equal(value.name, "Second Ubuntu");
+  assert.deepEqual(value.hub_endpoint, { host: "198.51.100.20", port: 22, local_port: 22023 });
+  assert.equal(validateTargetInstallPreview(installPreviewInput({ hub_host: "2001:db8::2" }))
+    .hub_endpoint.host, "2001:db8::2");
+  for (const invalid of [
+    { hub_host: "localhost" }, { hub_host: "127.0.0.1" }, { hub_host: "0.0.0.0" },
+    { hub_host: "224.0.0.1" }, { hub_host: "::1" }, { hub_host: "::" },
+    { hub_host: "ff02::1" }, { hub_host: "::ffff:127.0.0.1" },
+    { hub_host: "fe80::1%eth0" }, { name: "\nNew" }, { name: " New" },
+    { name: "New\u00a0server" }, { name: "PRIVATE KEY" },
+    { name: "" }, { hub_port: 0 }, { local_port: 1023 }, { local_port: 65536 },
+    { extra: "unexpected" },
+  ]) assert.throws(() => validateTargetInstallPreview(installPreviewInput(invalid)), /INVALID_INPUT/);
+});
+
+test("install preview checks target ownership and Hub route with fixed read-only SSH commands", async () => {
+  const operations = [{}, {}];
+  let count = 0;
+  const raw = installPreviewInput();
+  const result = await previewTargetInstall(raw, { clientFactory: () => fakeClient(operations[count],
+    { output: count++ === 0 ? "SG_STATUS_V1:missing\n" : "SG_HUB_ROUTE_V1:reachable\n" }) });
+  assert.equal(result.action, "install_preview");
+  assert.equal(result.writes, false);
+  assert.equal(result.target_kind, "missing");
+  assert.equal(result.hub_route, "reachable");
+  assert.equal(result.preflight_passed, true);
+  assert.equal(result.source_verification_required, true);
+  assert.equal(result.reverify_required, true);
+  assert.equal(result.host_key_fingerprint, FINGERPRINT);
+  assert.equal(count, 2);
+  assert.match(operations[0].command, /^sh -c '/);
+  assert.match(operations[0].script, /SOVAGRID_SSH_STATUS_V1/);
+  assert.match(operations[1].command, /^python3 -I -c '/);
+  assert.doesNotMatch(operations[1].command, /198\.51\.100\.20|server-secret/);
+  assert.equal(operations[1].script, JSON.stringify({ host: "198.51.100.20", port: 22 }));
+  if (process.platform !== "win32") {
+    const local = spawnSync("sh", ["-c", operations[1].command], {
+      input: JSON.stringify({ host: "127.0.0.1", port: 1 }), timeout: 6000,
+      encoding: "utf8", maxBuffer: 1024,
+    });
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(local.stdout, "SG_HUB_ROUTE_V1:unreachable\n");
+  }
+  assert.equal(operations[0].config.hostVerifier(KEY), true);
+  assert.equal(operations[1].config.hostVerifier(KEY), true);
+  assert.equal(raw.password, "");
+  assert.equal(operations[0].ended, true);
+  assert.equal(operations[1].ended, true);
+
+  const blocked = installPreviewInput();
+  const conflict = await previewTargetInstall(blocked, { clientFactory: () => fakeClient({},
+    { output: "SG_STATUS_V1:conflict\n" }) });
+  assert.equal(conflict.preflight_passed, false);
+  assert.equal(conflict.hub_route, "not_checked");
+  assert.equal(blocked.password, "");
+  const unreachable = await previewTargetInstall(installPreviewInput(), { clientFactory: () =>
+    fakeClient({}, { output: count++ % 2 === 0 ? "SG_STATUS_V1:missing\n" :
+      "SG_HUB_ROUTE_V1:unreachable\n" }) });
+  assert.equal(unreachable.preflight_passed, false);
+  assert.equal(unreachable.hub_route, "unreachable");
+});
+
+test("install preview never answers repeated or multi-prompt SSH challenges", async () => {
+  const answers = [];
+  const client = new EventEmitter();
+  client.connect = (options) => {
+    assert.equal(options.tryKeyboard, true);
+    assert.equal(options.hostVerifier(KEY), true);
+    queueMicrotask(() => {
+      client.emit("keyboard-interactive", "", "", "", [{ prompt: "Verification code: ", echo: false }],
+        (value) => answers.push(value));
+      client.emit("keyboard-interactive", "", "", "", [{ prompt: "Пароль: ", echo: false }],
+        (value) => answers.push(value));
+      client.emit("keyboard-interactive", "", "", "", [{ prompt: "Password: ", echo: false }],
+        (value) => answers.push(value));
+      client.emit("keyboard-interactive", "", "", "", [{ prompt: "Password: ", echo: false },
+        { prompt: "OTP: ", echo: false }],
+        (value) => answers.push(value));
+      client.emit("ready");
+    });
+  };
+  client.exec = (_command, _options, callback) => {
+    const channel = new EventEmitter();
+    channel.stderr = new EventEmitter();
+    channel.end = () => queueMicrotask(() => {
+      channel.emit("data", Buffer.from("SG_STATUS_V1:conflict\n"));
+      channel.emit("close", 0, null);
+    });
+    callback(null, channel);
+  };
+  client.end = () => {};
+  const raw = installPreviewInput();
+  const result = await previewTargetInstall(raw, { clientFactory: () => client });
+  assert.equal(result.target_kind, "conflict");
+  assert.deepEqual(answers, [[], ["server-secret"], [], []]);
+  assert.equal(raw.password, "");
+});
+
+test("install preview fails closed if the SSH host key changes before the Hub route check", async () => {
+  let calls = 0;
+  const raw = installPreviewInput();
+  const changedKey = Buffer.from(KEY);
+  changedKey[changedKey.length - 1] ^= 1;
+  await assert.rejects(previewTargetInstall(raw, { clientFactory: () => {
+    const step = calls++;
+    return fakeClient({}, { key: step === 0 ? KEY : changedKey,
+      output: step === 0 ? "SG_STATUS_V1:missing\n" : "SG_HUB_ROUTE_V1:reachable\n" });
+  } }), /HOST_KEY_CHANGED/);
+  assert.equal(calls, 2);
   assert.equal(raw.password, "");
 });
 
@@ -658,6 +834,51 @@ test("target status route requires admin, a same-origin secure request and exact
   const loopback = await call(handler, { path, payload: statusInput(), headers: {
     host: "127.0.0.1:8766", origin: "http://127.0.0.1:8766",
     "x-forwarded-proto": "http", "x-sovagrid-client-ip": "127.0.0.1",
+    authorization: "Bearer " + TOKEN,
+  } });
+  assert.equal(loopback.status, 200);
+});
+
+test("install preview route requires unrestricted admin and clears every SSH secret", async () => {
+  const path = "/api/v1/browser-ssh/target-install-preview";
+  let checks = 0;
+  let previews = 0;
+  let passed;
+  const handler = createHandler({ admin: async (authorization) => {
+    checks++;
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, installPreview: async (value) => {
+    previews++;
+    passed = value;
+    assert.equal(value.password, "server-secret");
+    return { protocol: 1, action: "install_preview", writes: false, preflight_passed: true };
+  } });
+  const payload = installPreviewInput();
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal((await call(handler, { path, payload, headers: {
+    host: "example.com", origin: "http://example.com", "x-forwarded-proto": "http",
+    authorization: "Bearer " + TOKEN,
+  } })).status, 404);
+  assert.equal(checks, 0);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(previews, 0);
+  const restricted = createHandler({ admin: async () => { throw new Error("ADMIN_FORBIDDEN"); },
+    installPreview: async () => { throw new Error("must not reach SSH"); } });
+  assert.equal((await call(restricted, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+  const result = await call(handler, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.writes, false);
+  assert.equal(previews, 1);
+  assert.equal(passed.password, "");
+  assert.equal(passed.private_key, "");
+  assert.equal(passed.passphrase, "");
+  const loopback = await call(handler, { path, payload: installPreviewInput(), headers: {
+    host: "[::1]:8766", origin: "http://[::1]:8766",
+    "x-forwarded-proto": "http", "x-sovagrid-client-ip": "::1",
     authorization: "Bearer " + TOKEN,
   } });
   assert.equal(loopback.status, 200);

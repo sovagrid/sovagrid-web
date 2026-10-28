@@ -94,6 +94,19 @@ try:
 except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
     result('unknown')
 `;
+// A read-only route probe runs on the entered Ubuntu server. The destination is
+// JSON on stdin; it is never interpolated into a remote command or Python code.
+const HUB_ROUTE_COMMAND = String.raw`python3 -I -c 'import json, socket, sys
+try:
+    endpoint = json.load(sys.stdin)
+    if (type(endpoint) is not dict or set(endpoint) != {"host", "port"} or
+            type(endpoint["host"]) is not str or type(endpoint["port"]) is not int):
+        raise ValueError("bad endpoint")
+    with socket.create_connection((endpoint["host"], endpoint["port"]), timeout=4):
+        print("SG_HUB_ROUTE_V1:reachable")
+except (OSError, ValueError, TypeError):
+    print("SG_HUB_ROUTE_V1:unreachable")
+'`;
 const HUB_ACCESS_URL = "http://hub:8765/api/v1/session/access";
 const MAX_BODY = 70 * 1024;
 const MAX_OUTPUT = 4096;
@@ -202,6 +215,41 @@ export function validateTargetStatus(value) {
     .map((key) => [key, value[key]]));
   validateLogin(login);
   return { ...target, ...login };
+}
+
+export function validateTargetInstallPreview(value) {
+  const fields = ["host", "port", "username", "method", "fingerprint", "password",
+    "private_key", "passphrase", "name", "hub_host", "hub_port", "local_port"];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== fields.length || fields.some((key) => !Object.hasOwn(value, key))) {
+    throw new Error("INVALID_INPUT");
+  }
+  const target = validateTargetStatus(Object.fromEntries(fields.slice(0, 8).map((key) => [key, value[key]])));
+  if (typeof value.name !== "string" || value.name.length < 1 || value.name.length > 80 ||
+      value.name !== value.name.trim() || value.name.includes("PRIVATE KEY") ||
+      [...value.name].some((char) => char !== " " && /[\p{C}\p{Z}]/u.test(char))) {
+    throw new Error("INVALID_INPUT");
+  }
+  const hubHost = value.hub_host;
+  const version = typeof hubHost === "string" ? net.isIP(hubHost) : 0;
+  if (!version || hubHost !== hubHost.trim() || hubHost.includes("%") || hubHost.length > 45 ||
+      !Number.isSafeInteger(value.hub_port) || value.hub_port < 1 || value.hub_port > 65535 ||
+      !Number.isSafeInteger(value.local_port) || value.local_port < 1024 || value.local_port > 65535) {
+    throw new Error("INVALID_INPUT");
+  }
+  let normalizedHubHost = hubHost;
+  if (version === 4) {
+    const first = Number(hubHost.split(".")[0]);
+    if (first === 0 || first === 127 || first >= 224) throw new Error("INVALID_INPUT");
+  } else {
+    try { normalizedHubHost = new URL("http://[" + hubHost + "]/").hostname.slice(1, -1); }
+    catch { throw new Error("INVALID_INPUT"); }
+    if (normalizedHubHost === "::" || normalizedHubHost === "::1" ||
+        /^ff[0-9a-f]{2}(?=:|$)/.test(normalizedHubHost) ||
+        normalizedHubHost.startsWith("::ffff:")) throw new Error("INVALID_INPUT");
+  }
+  return { ...target, name: value.name,
+    hub_endpoint: { host: normalizedHubHost, port: value.hub_port, local_port: value.local_port } };
 }
 
 export async function requireUnrestrictedAdmin(authorization, { fetchImpl = fetch } = {}) {
@@ -319,6 +367,14 @@ function clearCredentials(value) {
   }
 }
 
+function passwordChallenge(prompt) {
+  if (typeof prompt !== "string" || prompt.length > 200 || /[\u0000-\u001f\u007f]/.test(prompt)) return false;
+  if (/(?:otp|one[- ]time|verification|security\s+code|2fa|two[- ]factor|authenticator|token|\bpin\b|passphrase|код|однораз|токен|пин)/iu.test(prompt)) {
+    return false;
+  }
+  return /\bpassword\b|пароль/iu.test(prompt);
+}
+
 function targetStatusKind(output, code, signal) {
   if (code !== 0 || signal) return "unknown";
   const match = /^SG_STATUS_V1:(managed|agent_only|missing|conflict|unsupported|unknown)\n?$/.exec(
@@ -326,7 +382,8 @@ function targetStatusKind(output, code, signal) {
   return match?.[1] ?? "unknown";
 }
 
-export function probeTargetStatus(raw, { clientFactory = () => new Client(), timeoutMs = 20000 } = {}) {
+function probeTargetReadOnly(raw, { clientFactory = () => new Client(), timeoutMs = 20000 } = {},
+  { command, input, failureCode, parse }) {
   let value;
   try { value = validateTargetStatus(raw); }
   catch (error) { clearCredentials(raw); throw error; }
@@ -345,6 +402,7 @@ export function probeTargetStatus(raw, { clientFactory = () => new Client(), tim
     let keyChanged = false;
     let keyVerified = false;
     let authenticated = false;
+    let keyboardAnswered = false;
     let stream;
     const output = Buffer.alloc(MAX_STATUS_OUTPUT);
     let outputBytes = 0;
@@ -364,47 +422,56 @@ export function probeTargetStatus(raw, { clientFactory = () => new Client(), tim
       if (error) reject(error);
       else resolve(result);
     };
-    const timer = setTimeout(() => finish(new Error(authenticated ? "STATUS_UNAVAILABLE" : "SSH_UNAVAILABLE")), timeoutMs);
+    const timer = setTimeout(() => finish(new Error(authenticated ? failureCode : "SSH_UNAVAILABLE")), timeoutMs);
     client.on("error", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
-      authenticated ? "STATUS_UNAVAILABLE" : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+      authenticated ? failureCode : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
     client.on("close", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
-      authenticated ? "STATUS_UNAVAILABLE" : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+      authenticated ? failureCode : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+    if (value.method === "password") {
+      client.on("keyboard-interactive", (_name, _instructions, _language, prompts, done) => {
+        // Some Ubuntu SSH servers offer password only through keyboard-interactive.
+        // Never answer a second-factor, echoed, or multi-question challenge.
+        const oneSecretPrompt = !keyboardAnswered && Array.isArray(prompts) && prompts.length === 1 &&
+          prompts[0]?.echo === false && passwordChallenge(prompts[0].prompt);
+        if (oneSecretPrompt) keyboardAnswered = true;
+        done(oneSecretPrompt ? [value.password] : []);
+      });
+    }
     client.on("ready", () => {
       authenticated = true;
-      try { client.exec(STATUS_COMMAND, { pty: false }, (error, channel) => {
+      try { client.exec(command, { pty: false }, (error, channel) => {
         if (settled) { channel?.close?.(); return; }
-        if (error || !channel) { finish(new Error("STATUS_UNAVAILABLE")); return; }
+        if (error || !channel) { finish(new Error(failureCode)); return; }
         stream = channel;
         let stderrBytes = 0;
         stream.stderr.on("data", (chunk) => {
           stderrBytes += Buffer.byteLength(chunk);
-          if (stderrBytes > 1024) finish(new Error("STATUS_UNAVAILABLE"));
+          if (stderrBytes > 1024) finish(new Error(failureCode));
         });
         stream.on("data", (chunk) => {
           if (settled) return;
           const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           if (outputBytes + piece.length > MAX_STATUS_OUTPUT) {
-            finish(new Error("STATUS_UNAVAILABLE"));
+            finish(new Error(failureCode));
           } else {
             piece.copy(output, outputBytes);
             outputBytes += piece.length;
           }
         });
-        stream.on("error", () => finish(new Error("STATUS_UNAVAILABLE")));
+        stream.on("error", () => finish(new Error(failureCode)));
         stream.on("close", (code, signal) => {
           if (settled) return;
-          finish(null, { protocol: 1, scope: "entered_target", host: value.host, port: value.port,
-            kind: targetStatusKind(output.subarray(0, outputBytes), code, signal),
-            host_key_fingerprint: value.fingerprint });
+          try { finish(null, parse(output.subarray(0, outputBytes), code, signal, value)); }
+          catch { finish(new Error(failureCode)); }
         });
-        try { stream.end(STATUS_SCRIPT); }
-        catch { finish(new Error("STATUS_UNAVAILABLE")); }
+        try { stream.end(input); }
+        catch { finish(new Error(failureCode)); }
       }); }
-      catch { finish(new Error("STATUS_UNAVAILABLE")); }
+      catch { finish(new Error(failureCode)); }
     });
     try {
       client.connect({ host: value.host, port: value.port, username: value.username,
-        readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: false,
+        readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: value.method === "password",
         ...(value.method === "password" ? { password: value.password } :
           { privateKey, passphrase: value.passphrase || undefined }),
         hostVerifier: (key) => {
@@ -420,6 +487,62 @@ export function probeTargetStatus(raw, { clientFactory = () => new Client(), tim
       });
     } catch { finish(new Error("SSH_UNAVAILABLE")); }
   });
+}
+
+export function probeTargetStatus(raw, options = {}) {
+  return probeTargetReadOnly(raw, options, { command: STATUS_COMMAND, input: STATUS_SCRIPT,
+    failureCode: "STATUS_UNAVAILABLE", parse: (output, code, signal, value) =>
+      ({ protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+        kind: targetStatusKind(output, code, signal), host_key_fingerprint: value.fingerprint }) });
+}
+
+function probeTargetHubRoute(raw, endpoint, options = {}) {
+  return probeTargetReadOnly(raw, options, { command: HUB_ROUTE_COMMAND,
+    input: JSON.stringify({ host: endpoint.host, port: endpoint.port }),
+    failureCode: "ROUTE_UNAVAILABLE", parse: (output, code, signal) => {
+      if (code !== 0 || signal) throw new Error("ROUTE_UNAVAILABLE");
+      const match = /^SG_HUB_ROUTE_V1:(reachable|unreachable)\n?$/.exec(output.toString("utf8"));
+      if (!match) throw new Error("ROUTE_UNAVAILABLE");
+      return match[1];
+    } });
+}
+
+export async function previewTargetInstall(raw, { status = probeTargetStatus,
+  route = probeTargetHubRoute, clientFactory = () => new Client(), timeoutMs = 20000 } = {}) {
+  let selected;
+  try { selected = validateTargetInstallPreview(raw); }
+  catch (error) { clearCredentials(raw); throw error; }
+  const target = Object.fromEntries(["host", "port", "username", "method", "fingerprint", "password",
+    "private_key", "passphrase"].map((key) => [key, selected[key]]));
+  const routeTarget = { ...target };
+  try {
+    const inventory = await status(target, { clientFactory, timeoutMs });
+    if (!inventory || inventory.protocol !== 1 || inventory.scope !== "entered_target" ||
+        inventory.host !== selected.host || inventory.port !== selected.port ||
+        inventory.host_key_fingerprint !== selected.fingerprint ||
+        !["managed", "agent_only", "missing", "conflict", "unsupported", "unknown"].includes(inventory.kind)) {
+      throw new Error("STATUS_UNAVAILABLE");
+    }
+    if (inventory.kind !== "missing") {
+      return { protocol: 1, action: "install_preview", writes: false, scope: "entered_target",
+        host: selected.host, port: selected.port, name: selected.name,
+        hub_endpoint: selected.hub_endpoint, target_kind: inventory.kind,
+        hub_route: "not_checked", preflight_passed: false,
+        source_verification_required: true, reverify_required: true,
+        host_key_fingerprint: selected.fingerprint };
+    }
+    const hubRoute = await route(routeTarget, selected.hub_endpoint,
+      { clientFactory, timeoutMs: Math.min(timeoutMs, 12000) });
+    if (!["reachable", "unreachable"].includes(hubRoute)) throw new Error("ROUTE_UNAVAILABLE");
+    return { protocol: 1, action: "install_preview", writes: false, scope: "entered_target",
+      host: selected.host, port: selected.port, name: selected.name,
+      hub_endpoint: selected.hub_endpoint, target_kind: inventory.kind,
+      hub_route: hubRoute, preflight_passed: hubRoute === "reachable",
+      source_verification_required: true, reverify_required: true,
+      host_key_fingerprint: selected.fingerprint };
+  } finally {
+    clearCredentials(target); clearCredentials(routeTarget); clearCredentials(selected); clearCredentials(raw);
+  }
 }
 
 export function issueGrant(raw, { clientFactory = () => new Client(), timeoutMs = 60000 } = {}) {
@@ -640,7 +763,8 @@ async function body(req) {
 
 export function createHandler({ inspect = inspectHostKey, inspectTarget = inspectTargetHostKey,
   targetStatus = probeTargetStatus, login = issueGrant,
-  preview = previewAmneziaSetup, admin = requireUnrestrictedAdmin } = {}) {
+  preview = previewAmneziaSetup, installPreview = previewTargetInstall,
+  admin = requireUnrestrictedAdmin } = {}) {
   const probes = new WindowLimit(20, 60);
   const attempts = new WindowLimit(5, 60);
   let active = 0;
@@ -656,10 +780,11 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const isPreview = req.url === "/api/v1/browser-ssh/vpn-setup/preview";
     const isTargetProbe = req.url === "/api/v1/browser-ssh/target-host-key";
     const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
-    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus;
+    const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
+    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus || isInstallPreview;
     if (req.method !== "POST" || !["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key",
-        "/api/v1/browser-ssh/target-status"].includes(req.url) ||
+        "/api/v1/browser-ssh/target-status", "/api/v1/browser-ssh/target-install-preview"].includes(req.url) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -689,6 +814,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           const selected = validateTargetStatus(value);
           try { json(res, 200, await targetStatus(selected)); }
           finally { clearCredentials(selected); }
+        } else if (isInstallPreview) {
+          json(res, 200, await installPreview(value));
         } else if (isProbe) {
           if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length) {
             throw new Error("INVALID_INPUT");
@@ -706,7 +833,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       if (res.destroyed) return;
       const code = ["INVALID_INPUT", "SSH_UNAVAILABLE", "HOST_KEY_CHANGED", "AUTH_FAILED",
         "GRANT_UNAVAILABLE", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE",
-        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD"]
+        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD"]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
       json(res, code === "INVALID_INPUT" ? 400 : code === "HOST_KEY_CHANGED" ? 409 :
         code === "UNSUPPORTED_AUTH_METHOD" ? 422 :
