@@ -386,6 +386,7 @@ async function changeAdminPassword(event) {
 function logout(revoke = true) {
   const oldToken = state.token;
   const oldBase = state.base;
+  serverSetupReset();
   resetAllTerminals(true);
   globalThis.filesReset?.();
   globalThis.amneziaReset?.();
@@ -2534,7 +2535,273 @@ async function addServer(event) {
   finally { $("confirmAddButton").disabled = false; }
 }
 
-function openAddServer() { clearError($("addServerError")); $("addServerDialog").showModal(); $("newServerName").focus(); }
+const serverSetup = { seq: 0, busy: false, phase: null, controller: null, mode: "ssh", reviewed: null, changedPin: false };
+const serverSetupFingerprintPattern = /^SHA256:[A-Za-z0-9+/]{43}$/;
+const serverSetupUsernamePattern = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
+const serverSetupKinds = {
+  missing: ["SovaGrid не обнаружен", "Ubuntu доступна. Проверка ничего не установила и не добавила в панель. Автоматическая установка здесь пока недоступна."],
+  managed: ["Найдена управляемая установка", "На Ubuntu обнаружена установка SovaGrid. Проверьте её принадлежность и подключение отдельно; этот запрос не добавил сервер в панель."],
+  agent_only: ["Найден отдельный Agent", "На Ubuntu обнаружен Agent без полной установки Hub. Для подключения к этой панели потребуется отдельная регистрация."],
+  conflict: ["Обнаружена конфликтующая установка", "На сервере есть неполные или несовместимые признаки SovaGrid. Ничего не изменено; проверьте его вручную."],
+  unsupported: ["Система не поддерживается", "Удалённая система не распознана как поддерживаемая Ubuntu. Установка здесь не предлагается."],
+  unknown: ["Состояние не удалось определить", "Данных недостаточно для надёжного вывода. Возможно, у SSH-пользователя нет root или sudo без запроса пароля. Ничего не изменено."],
+};
+function serverSetupAllowed() {
+  return Boolean(state.token && state.user?.role === "admin" && state.access?.unrestricted_admin === true &&
+    state.base === location.origin && (location.protocol === "https:" ||
+      (location.protocol === "http:" && ["127.0.0.1", "localhost"].includes(location.hostname))));
+}
+function serverSetupReason() {
+  if (!state.token || state.user?.role !== "admin" || state.access?.unrestricted_admin !== true)
+    return "Для SSH-проверки войдите администратором с доступом ко всем серверам.";
+  if (state.base !== location.origin)
+    return "Откройте панель напрямую на HTTPS-адресе этого Hub: SSH-данные нельзя передать через другой адрес Hub.";
+  if (!serverSetupAllowed())
+    return "Откройте панель по HTTPS или через локальный SSH-туннель. На обычном HTTP SSH-пароль и ключ передавать нельзя.";
+  return "";
+}
+function serverSetupPinName(host, port) { return `sovagrid.target-ssh-host-key:${location.origin}:${host}:${port}`; }
+function serverSetupPin(host, port) {
+  try { return localStorage.getItem(serverSetupPinName(host, port)); } catch { return null; }
+}
+function serverSetupSavePin(host, port, fingerprint) {
+  try { localStorage.setItem(serverSetupPinName(host, port), fingerprint); } catch { /* Private browsing may disable storage. */ }
+}
+function serverSetupClearSecrets() {
+  $("serverSetupPassword").value = "";
+  $("serverSetupPrivateKey").value = "";
+  $("serverSetupPassphrase").value = "";
+}
+function serverSetupClearError() { $("serverSetupError").textContent = ""; $("serverSetupError").hidden = true; }
+function serverSetupError(message) { $("serverSetupError").textContent = message; $("serverSetupError").hidden = false; }
+function serverSetupRender() {
+  const ssh = serverSetup.mode === "ssh";
+  $("serverSetupSshPanel").hidden = !ssh;
+  $("serverSetupAgentPanel").hidden = ssh;
+  $("serverSetupSshTab").setAttribute("aria-selected", String(ssh));
+  $("serverSetupAgentTab").setAttribute("aria-selected", String(!ssh));
+  const reason = serverSetupReason();
+  $("serverSetupNotice").textContent = reason;
+  $("serverSetupNotice").hidden = !reason;
+  $("serverSetupReview").hidden = !serverSetup.reviewed;
+  $("serverSetupChangedKey").hidden = !serverSetup.changedPin;
+  $("serverSetupReplaceKey").hidden = !serverSetup.changedPin;
+  $("serverSetupKeyFields").hidden = !$("serverSetupAuthKey").checked;
+  $("serverSetupPasswordFields").hidden = $("serverSetupAuthKey").checked;
+  $("serverSetupInspect").disabled = serverSetup.busy || !serverSetupAllowed();
+  $("serverSetupInspect").textContent = serverSetup.phase === "inspect" ? "Проверяем SSH-ключ…" : "1. Проверить SSH-ключ";
+  $("serverSetupStatusButton").disabled = serverSetup.busy || !serverSetupAllowed() ||
+    !serverSetup.reviewed || serverSetup.changedPin || !$("serverSetupTrust").checked;
+  $("serverSetupStatusButton").textContent = serverSetup.phase === "status" ?
+    "Проверяем состояние…" : "2. Проверить состояние без изменений";
+  for (const id of ["serverSetupHost", "serverSetupPort", "serverSetupUsername", "serverSetupAuthPassword",
+    "serverSetupAuthKey", "serverSetupPassword", "serverSetupPrivateKey", "serverSetupPassphrase"]) {
+    $(id).disabled = serverSetup.busy;
+  }
+}
+function serverSetupInvalidate() {
+  serverSetup.seq++;
+  serverSetup.controller?.abort();
+  serverSetup.controller = null;
+  serverSetup.busy = false;
+  serverSetup.phase = null;
+  serverSetup.reviewed = null;
+  serverSetup.changedPin = false;
+  $("serverSetupTrust").checked = false;
+  $("serverSetupResult").hidden = true;
+  serverSetupClearSecrets();
+  serverSetupClearError();
+  serverSetupRender();
+}
+function serverSetupReset() {
+  serverSetupInvalidate();
+  serverSetup.mode = "ssh";
+  $("serverSetupHost").value = "";
+  $("serverSetupPort").value = "22";
+  $("serverSetupUsername").value = "";
+  $("serverSetupAuthPassword").checked = true;
+  $("serverSetupAuthKey").checked = false;
+  serverSetupRender();
+}
+function serverSetupMode(mode) {
+  if (serverSetup.busy) return;
+  serverSetupInvalidate();
+  serverSetup.mode = mode;
+  serverSetupRender();
+  (mode === "ssh" ? $("serverSetupHost") : $("newServerName")).focus?.();
+}
+function serverSetupTarget() {
+  const host = $("serverSetupHost").value.trim();
+  const rawPort = $("serverSetupPort").value;
+  if (!host || host.length > 253 || !/^[A-Za-z0-9.:-]+$/.test(host) || host.includes("..") ||
+      !/^[0-9]{1,5}$/.test(rawPort)) throw new Error("Укажите корректный адрес и порт SSH (1–65535). Для IPv6 не добавляйте скобки.");
+  const port = Number(rawPort);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Порт SSH должен быть от 1 до 65535.");
+  return { host: host.toLowerCase(), port };
+}
+function serverSetupExplain(error) {
+  const code = error?.message;
+  if (code === "AUTH_FAILED") return "SSH не принял пароль или ключ. Проверьте данные и попробуйте снова.";
+  if (code === "AUTH_REQUIRED") return "Сеанс панели истёк. Войдите заново и повторите проверку.";
+  if (code === "ADMIN_FORBIDDEN") return "Нужен администратор панели с доступом ко всем серверам.";
+  if (code === "HOST_KEY_CHANGED") return "Ключ SSH изменился после сверки. Не повторяйте вход, пока не проверите новый отпечаток независимо.";
+  if (code === "UNSUPPORTED_AUTH_METHOD") return "Этот способ SSH-входа, включая двухфакторный запрос, пока не поддерживается.";
+  if (code === "INVALID_INPUT") return "Проверьте адрес, порт, пользователя и способ SSH-входа.";
+  if (code === "RATE_LIMIT") return "Слишком много попыток. Подождите минуту.";
+  if (code === "BUSY") return "SSH-шлюз занят. Попробуйте позже.";
+  if (code === "STATUS_UNAVAILABLE") return "SSH-вход выполнен, но прочитать состояние Ubuntu не удалось.";
+  if (code === "SSH_UNAVAILABLE") return "SSH-сервер не ответил. Проверьте адрес, порт и доступность из сети Hub.";
+  if (error?.status === 404 || error?.status === 502) return "Проверка второго сервера ещё не включена на этом Hub. Обновите серверную часть.";
+  if (code === "SSH_TIMEOUT") return "SSH-сервер не ответил вовремя.";
+  return "Не удалось проверить сервер. Ничего не изменено.";
+}
+async function serverSetupApi(path, value, timeoutMs, seq) {
+  if (!serverSetupAllowed() || !$("addServerDialog").open || seq !== serverSetup.seq) throw new Error("STALE_REQUEST");
+  const controller = new AbortController();
+  serverSetup.controller = controller;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const body = JSON.stringify(value);
+  for (const key of ["password", "private_key", "passphrase"]) if (Object.hasOwn(value, key)) value[key] = "";
+  try {
+    const response = await fetch(path, { method: "POST", credentials: "omit", cache: "no-store",
+      redirect: "error", referrerPolicy: "no-referrer",
+      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${state.token}` },
+      body, signal: controller.signal });
+    let payload;
+    try { payload = await response.json(); } catch { throw new Error("INVALID_RESPONSE"); }
+    if (!response.ok) {
+      const failure = new Error(typeof payload?.error === "string" ? payload.error : "SSH_UNAVAILABLE");
+      failure.status = response.status;
+      throw failure;
+    }
+    return payload;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("SSH_TIMEOUT");
+    throw error;
+  } finally { clearTimeout(timer); if (serverSetup.controller === controller) serverSetup.controller = null; }
+}
+async function serverSetupInspect() {
+  if (serverSetup.busy) return;
+  if (!serverSetupAllowed()) { serverSetupError(serverSetupReason()); return; }
+  let target;
+  try { target = serverSetupTarget(); } catch (error) { serverSetupError(error.message); return; }
+  serverSetupInvalidate();
+  const seq = serverSetup.seq;
+  const token = state.token;
+  serverSetup.busy = true;
+  serverSetup.phase = "inspect";
+  serverSetupRender();
+  try {
+    const reply = await serverSetupApi("/api/v1/browser-ssh/target-host-key", target, 12000, seq);
+    if (seq !== serverSetup.seq || !$("addServerDialog").open || !serverSetupAllowed() || state.token !== token) return;
+    if (reply?.protocol !== 1 || reply.scope !== "entered_target" || reply.reverify_required !== true ||
+        reply.host !== target.host || reply.port !== target.port ||
+        typeof reply.key_type !== "string" || !/^[A-Za-z0-9@._-]{4,96}$/.test(reply.key_type) ||
+        typeof reply.fingerprint !== "string" || !serverSetupFingerprintPattern.test(reply.fingerprint)) {
+      throw new Error("INVALID_RESPONSE");
+    }
+    serverSetup.reviewed = { ...target, fingerprint: reply.fingerprint };
+    $("serverSetupReviewedHost").textContent = target.host.includes(":") ?
+      `[${target.host}]:${target.port}` : `${target.host}:${target.port}`;
+    $("serverSetupFingerprint").textContent = reply.fingerprint;
+    $("serverSetupKeyType").textContent = `Алгоритм: ${reply.key_type}`;
+    serverSetup.changedPin = Boolean(serverSetupPin(target.host, target.port) &&
+      serverSetupPin(target.host, target.port) !== reply.fingerprint);
+    if (serverSetup.changedPin) serverSetupError("Закреплённый SSH-ключ изменился. Сверьте новый отпечаток независимо.");
+  } catch (error) {
+    if (seq === serverSetup.seq) serverSetupError(serverSetupExplain(error));
+  } finally {
+    if (seq === serverSetup.seq) { serverSetup.busy = false; serverSetup.phase = null; serverSetupRender(); }
+  }
+}
+function serverSetupCredentialsChanged(clearOther = false) {
+  $("serverSetupResult").hidden = true;
+  if (serverSetup.busy) { serverSetupInvalidate(); return; }
+  if (clearOther) serverSetupClearSecrets();
+  serverSetupRender();
+}
+async function serverSetupStatus(event) {
+  event.preventDefault();
+  if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed || serverSetup.changedPin ||
+      !$("serverSetupTrust").checked || !$("addServerDialog").open) return;
+  const reviewed = { ...serverSetup.reviewed };
+  let target;
+  try { target = serverSetupTarget(); } catch (error) { serverSetupError(error.message); return; }
+  if (target.host !== reviewed.host || target.port !== reviewed.port) {
+    serverSetupInvalidate(); serverSetupError("Адрес или порт изменились. Сверьте SSH-ключ заново."); return;
+  }
+  const username = $("serverSetupUsername").value.trim();
+  const method = $("serverSetupAuthKey").checked ? "private_key" : "password";
+  if (!serverSetupUsernamePattern.test(username)) {
+    serverSetupError("Введите имя пользователя SSH без пробелов и специальных символов."); return;
+  }
+  const file = method === "private_key" ? $("serverSetupPrivateKey").files?.[0] : null;
+  if (method === "private_key" && (!file || file.size < 1 || file.size > 65536)) {
+    serverSetupError("Выберите файл приватного ключа размером до 64 КиБ."); return;
+  }
+  const priorPin = serverSetupPin(reviewed.host, reviewed.port);
+  const seq = ++serverSetup.seq;
+  const token = state.token;
+  serverSetup.busy = true;
+  serverSetup.phase = "status";
+  serverSetupClearError();
+  $("serverSetupResult").hidden = true;
+  serverSetupRender();
+  let password = "", private_key = "", passphrase = "";
+  try {
+    if (method === "private_key") {
+      try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
+      passphrase = $("serverSetupPassphrase").value;
+    } else password = $("serverSetupPassword").value;
+    if (seq !== serverSetup.seq || !serverSetupAllowed() || !$("addServerDialog").open ||
+        state.token !== token || serverSetupPin(reviewed.host, reviewed.port) !== priorPin ||
+        !$("serverSetupTrust").checked || serverSetup.changedPin ||
+        $("serverSetupUsername").value.trim() !== username ||
+        (($("serverSetupAuthKey").checked ? "private_key" : "password") !== method) ||
+        (method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file)) {
+      throw new Error("STALE_REQUEST");
+    }
+    if (method === "password" && (!password || password.length > 1024)) {
+      throw new Error("PASSWORD_INVALID");
+    }
+    if (passphrase.length > 1024) throw new Error("PASSPHRASE_INVALID");
+    serverSetupClearSecrets();
+    const payload = { host: reviewed.host, port: reviewed.port, username, method,
+      fingerprint: reviewed.fingerprint, password, private_key, passphrase };
+    password = private_key = passphrase = "";
+    const reply = await serverSetupApi("/api/v1/browser-ssh/target-status", payload, 30000, seq);
+    if (seq !== serverSetup.seq || !$("addServerDialog").open || !serverSetupAllowed() ||
+        state.token !== token || serverSetupPin(reviewed.host, reviewed.port) !== priorPin) return;
+    if (reply?.protocol !== 1 || reply.scope !== "entered_target" || reply.host !== reviewed.host ||
+        reply.port !== reviewed.port || reply.host_key_fingerprint !== reviewed.fingerprint ||
+        !Object.hasOwn(serverSetupKinds, reply.kind)) throw new Error("INVALID_RESPONSE");
+    serverSetupSavePin(reviewed.host, reviewed.port, reviewed.fingerprint);
+    $("serverSetupResultTitle").textContent = serverSetupKinds[reply.kind][0];
+    $("serverSetupResultText").textContent = serverSetupKinds[reply.kind][1];
+    $("serverSetupResult").hidden = false;
+  } catch (error) {
+    if (seq === serverSetup.seq) {
+      if (error.message === "HOST_KEY_CHANGED") serverSetupInvalidate();
+      serverSetupError(
+        error.message === "FILE_READ_FAILED" ? "Не удалось прочитать файл приватного ключа." :
+        error.message === "PASSWORD_INVALID" ? "Введите пароль SSH длиной до 1024 символов." :
+        error.message === "PASSPHRASE_INVALID" ? "Парольная фраза ключа слишком длинная." :
+        error.message === "STALE_REQUEST" ? "Параметры проверки изменились. Сверьте SSH-ключ и попробуйте снова." :
+        serverSetupExplain(error));
+    }
+  } finally {
+    password = private_key = passphrase = "";
+    if (seq === serverSetup.seq) {
+      serverSetupClearSecrets(); serverSetup.busy = false; serverSetup.phase = null; serverSetupRender();
+    }
+  }
+}
+function openAddServer() {
+  clearError($("addServerError"));
+  $("addServerDialog").showModal();
+  serverSetupReset();
+  $("serverSetupHost").focus?.();
+}
 
 $("loginForm").addEventListener("submit", login);
 $("changePasswordForm").addEventListener("submit", changeAdminPassword);
@@ -2554,6 +2821,28 @@ document.querySelectorAll("[data-start-action]").forEach((button) => button.addE
   else setView(button.dataset.startAction);
 }));
 $("cancelAddButton").addEventListener("click", () => $("addServerDialog").close());
+$("addServerDialog").addEventListener("close", serverSetupReset);
+$("serverSetupSshTab").addEventListener("click", () => serverSetupMode("ssh"));
+$("serverSetupAgentTab").addEventListener("click", () => serverSetupMode("agent"));
+$("serverSetupHost").addEventListener("input", serverSetupInvalidate);
+$("serverSetupPort").addEventListener("input", serverSetupInvalidate);
+$("serverSetupInspect").addEventListener("click", () => { void serverSetupInspect(); });
+$("serverSetupTrust").addEventListener("change", serverSetupRender);
+$("serverSetupReplaceKey").addEventListener("click", () => {
+  if (!serverSetup.reviewed || !serverSetup.changedPin || !globalThis.confirm?.(
+    "Вы независимо сверили новый SSH-отпечаток этого сервера? Старый закреплённый ключ будет заменён только после успешной проверки.")) return;
+  serverSetup.changedPin = false;
+  $("serverSetupTrust").checked = false;
+  serverSetupClearError();
+  serverSetupRender();
+});
+$("serverSetupUsername").addEventListener("input", () => serverSetupCredentialsChanged());
+$("serverSetupAuthPassword").addEventListener("change", () => serverSetupCredentialsChanged(true));
+$("serverSetupAuthKey").addEventListener("change", () => serverSetupCredentialsChanged(true));
+$("serverSetupPassword").addEventListener("input", () => serverSetupCredentialsChanged());
+$("serverSetupPrivateKey").addEventListener("change", () => serverSetupCredentialsChanged());
+$("serverSetupPassphrase").addEventListener("input", () => serverSetupCredentialsChanged());
+$("serverSetupStatusForm").addEventListener("submit", (event) => { void serverSetupStatus(event); });
 $("addServerForm").addEventListener("submit", addServer);
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => { setView("commands"); $("commandInput").value = button.dataset.command; $("commandInput").focus(); }));
@@ -2571,6 +2860,7 @@ $("terminalInputVisibility").addEventListener("click", toggleTerminalLineVisibil
 $("terminalInput").addEventListener("paste", rejectMultilineTerminalPaste);
 globalThis.addEventListener?.("resize", fitTerminal);
 globalThis.addEventListener?.("pagehide", () => {
+  serverSetupReset();
   for (const terminal of terminalTabs.items) {
     if (terminal.sessionId) bestEffortDeleteTerminalSession(terminal.base, terminal.token, terminal.serverId, terminal.sessionId);
   }
@@ -2603,7 +2893,12 @@ $("copyTokenButton").addEventListener("click", async () => {
 });
 $("closeTokenButton").addEventListener("click", () => { $("tokenDialog").close(); $("agentToken").textContent = ""; $("copyTokenButton").textContent = "Копировать токен"; });
 $("tokenDialog").addEventListener("close", () => { $("agentToken").textContent = ""; $("copyTokenButton").textContent = "Копировать токен"; });
-document.addEventListener("visibilitychange", () => { if (!document.hidden && state.token) refresh(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (serverSetup.busy) serverSetupInvalidate();
+    else serverSetupClearSecrets();
+  } else if (state.token) refresh();
+});
 const savedHub = localStorage.getItem("sovagrid.hub");
 $("hubUrl").value = preferredHub(savedHub, location);
 const sshBootstrapPending = trySSHBootstrap(sshBootstrapPort);

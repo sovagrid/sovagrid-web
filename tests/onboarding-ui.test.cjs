@@ -56,7 +56,7 @@ test('new Hub opens a first-run guide and checks Telegram without storing creden
 test('guide describes Hub command permission without promising local Agent access', async () => {
   const h = harness([{ id: 'srv1', name: 'Ubuntu', online: true, last_seen: 1710000000,
     remote_commands_enabled: true, latest: { cpu_percent: 21 } },
-  { id: 'srv2', name: 'Home', online: false, last_seen: 1710000000,
+  { id: 'srv2', name: 'Target', online: false, last_seen: 1710000000,
     remote_commands_enabled: false, latest: {} }],
   { configured: true, connected: true, polling: true });
   h.state.view = 'start';
@@ -69,15 +69,15 @@ test('guide describes Hub command permission without promising local Agent acces
   assert.equal(h.element('startPrimaryButton').dataset.startAction, 'settings');
 });
 
-test('SSH landing selects an enrolled Home server and its existing RBAC terminal view', async () => {
+test('SSH landing selects an enrolled target server and its existing RBAC terminal view', async () => {
   const h = harness([
-    { id: 'vps', name: 'VPS', online: true, latest: {} },
-    { id: 'home-id', name: 'Home', online: true, latest: {}, remote_commands_enabled: true },
+    { id: 'relay', name: 'Relay', online: true, latest: {} },
+    { id: 'target-id', name: 'Target', online: true, latest: {}, remote_commands_enabled: true },
   ], { configured: false, connected: false, polling: false });
   h.context.location = new URL('https://hub.example/');
   h.state.token = '';
-  await h.context.sovagridRedeemBrowserSSHGrant('c'.repeat(43), { server: 'Home', commands: true });
-  assert.equal(h.state.selectedId, 'home-id');
+  await h.context.sovagridRedeemBrowserSSHGrant('c'.repeat(43), { server: 'Target', commands: true });
+  assert.equal(h.state.selectedId, 'target-id');
   assert.equal(h.state.view, 'commands');
   assert.equal(h.element('sshLandingNotice').textContent, '');
   assert.ok(h.calls.includes('https://hub.example/api/v1/session/ssh-grant'));
@@ -85,13 +85,13 @@ test('SSH landing selects an enrolled Home server and its existing RBAC terminal
 
 test('unknown or inaccessible SSH landing falls back to an authorized server', async () => {
   const h = harness([
-    { id: 'vps', name: 'VPS', online: true, latest: {} },
+    { id: 'relay', name: 'Relay', online: true, latest: {} },
   ], { configured: false, connected: false, polling: false });
-  vm.runInContext('browserSSHLanding = { server: "private-home", commands: true }', h.context);
+  vm.runInContext('browserSSHLanding = { server: "private-target", commands: true }', h.context);
   await h.context.refresh();
-  assert.equal(h.state.selectedId, 'vps');
+  assert.equal(h.state.selectedId, 'relay');
   assert.equal(h.state.view, 'overview');
   assert.equal(h.element('sshLandingNotice').hidden, false);
   assert.match(h.element('sshLandingNotice').textContent, /не найден среди доступных/);
-  assert.ok(h.calls.every((url) => !url.includes('private-home')));
+  assert.ok(h.calls.every((url) => !url.includes('private-target')));
 });
