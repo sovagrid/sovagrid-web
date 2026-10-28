@@ -106,17 +106,17 @@ test('password login requires inspected host key and stores only the public fing
   assert.deepEqual([...h.storage.entries()], [[`sovagrid.ssh-host-key:https://relay.example`, FINGERPRINT]]);
 });
 
-test('Home landing is selected only after a VPS SSH grant and is never a gateway destination', async () => {
+test('Target landing is selected only after a relay SSH grant and is never a gateway destination', async () => {
   const h = harness();
   h.element('sshUsername').value = 'root';
-  h.element('sshOpenServer').value = ' Home ';
+  h.element('sshOpenServer').value = ' Target ';
   h.element('sshOpenCommands').checked = true;
   await h.dispatch('sshInspectHost', 'click');
   h.element('sshTrustHost').checked = true;
   h.element('sshPassword').value = 'secret';
   await h.dispatch('browserSshForm', 'submit');
   assert.deepEqual(h.redeemed, [GRANT]);
-  assert.equal(h.landings[0].server, 'Home');
+  assert.equal(h.landings[0].server, 'Target');
   assert.equal(h.landings[0].commands, true);
   assert.equal(Object.hasOwn(JSON.parse(h.calls[1].options.body), 'server'), false);
   assert.equal(h.calls[1].path, '/api/v1/browser-ssh/login');

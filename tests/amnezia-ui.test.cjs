@@ -664,8 +664,8 @@ test('uncertain POST retains the same Amnezia payload and idempotency key', asyn
 
 test('container image includes Amnezia script and service worker caches its version', () => {
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY index\.html app\.js browser-ssh\.js files\.js amnezia\.js/);
-  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=6/);
-  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=6/);
+  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=7/);
+  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=7/);
 });
 
 test('WireGuard container selection binds status, action, and profile AAD to target', async () => {
