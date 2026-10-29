@@ -1350,6 +1350,12 @@ async function amneziaSetupAction(action) {
   const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
   const reviewed = action === "enroll" ? amneziaSetup.enrollment : amneziaSetup.setup;
   if ((action === "enroll" && !reviewed) || (action !== "enroll-preview" && !reviewed)) return;
+  if (action === "enroll-preview") {
+    amneziaSetup.enrollment = null;
+    $("amneziaSetupEnrollment").hidden = true;
+    $("amneziaSetupEnrollmentSummary").textContent = "";
+    $("amneziaSetupEnrollmentPins").textContent = "";
+  }
   amneziaSetup.busy = true;
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
