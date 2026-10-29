@@ -260,3 +260,6 @@
 #containerAlertDialog{width:min(460px,calc(100vw - 28px))}#containerAlertDialog .container-alert-actions{justify-content:flex-end}
 @media(max-width:520px){#containerAlertDialog .container-alert-actions button{flex:1}}
 @media(max-width:760px){#containerActionPanel .vpn-control-form{grid-template-columns:minmax(0,1fr)}#containerActionPanel .vpn-control-form .secondary-button{width:100%}}
+
+#amneziaSetupEnrollment[hidden],#amneziaSetupEnrollPreview[hidden],#amneziaSetupInstall[hidden],#amneziaSetupArm[hidden],#amneziaSetupMaintenanceLabel[hidden]{display:none}#amneziaSetupEnrollmentPins{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.73rem;line-height:1.5;color:var(--sg-muted)}
+#amneziaSetupMaintenanceLabel{display:flex;align-items:center;gap:10px;margin:12px 0;color:var(--sg-text)}#amneziaSetupMaintenance{width:20px;min-height:20px;flex:none;margin:0;accent-color:var(--sg-accent)}

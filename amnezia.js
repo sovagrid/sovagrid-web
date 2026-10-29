@@ -15,7 +15,13 @@ const amneziaClient = {
   profile: null, downloadUrls: new Set(),
 };
 const amneziaSetup = { generation: 0, busy: false, fingerprint: null, changedPin: false,
-  controller: null };
+  controller: null, setup: null, enrollment: null, identity: null, pendingAction: null };
+const AMNEZIA_ENROLL_FIELDS = ["protocol", "action", "writes", "target", "container_id", "image_id",
+  "config_sha256", "table_sha256", "configured_clients", "vpn_protocol", "interface", "listen_port",
+  "server_subnet", "host_key_fingerprint", "reverify_required"].sort();
+const AMNEZIA_SETUP_CONFIRM = { enroll: "ENROLL_EXISTING_CONTAINER", install: "INSTALL_AMNEZIA_BROKER",
+  awg2: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_AWG2",
+  wireguard: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_WIREGUARD" };
 const AMNEZIA_CLIENT_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const AMNEZIA_TERMINAL_STATES = new Set(["succeeded", "failed", "timed_out", "output_limited", "cancelled"]);
 const AMNEZIA_TARGETS = { awg2: { label: "AmneziaWG", format: "awg3-conf" },
@@ -241,7 +247,7 @@ function renderAmneziaControl() {
       !server.remote_commands_enabled ? `Разрешите команды для этого сервера в Hub перед проверкой ${label}.` :
         control?.recovery_required ? "Локальный брокер требует восстановления. Обратитесь к администратору сервера; операции заблокированы." :
           ready ? `Локальный брокер ${label} доступен. Операции касаются только клиентов, добавленных SovaGrid на выбранном сервере.` :
-            `Локальный брокер ${label} выключен или ещё не проверен. Настройка доступна администратору в SovaGrid Connect, в разделе «Управление Amnezia».`;
+            `Локальный брокер ${label} выключен или ещё не проверен. Для хоста панели используйте мастер выше; для другого сервера — SovaGrid Connect.`;
   $("amneziaObserved").textContent = control?.observed_at ? `Проверено: ${timestamp(control.observed_at)}` : "Состояние не проверено";
   const jobRunning = amneziaClient.jobId && !AMNEZIA_TERMINAL_STATES.has(amneziaClient.job?.state);
   const profileBusy = ["pending", "decrypting"].includes(amneziaClient.profile?.status);
@@ -1047,16 +1053,72 @@ function amneziaSetupSavePin(fingerprint) {
 function amneziaSetupClearSecrets() {
   for (const id of ["amneziaSetupPassword", "amneziaSetupPrivateKey", "amneziaSetupPassphrase"]) $(id).value = "";
 }
+function amneziaSetupPendingKey() { return `sovagrid.amnezia-setup-pending:${location.origin}`; }
+function amneziaSetupPending() {
+  try { return sessionStorage.getItem(amneziaSetupPendingKey()) === "1"; } catch { return false; }
+}
+function amneziaSetupMarkPending(pending) {
+  try {
+    if (pending) sessionStorage.setItem(amneziaSetupPendingKey(), "1");
+    else sessionStorage.removeItem(amneziaSetupPendingKey());
+  } catch { /* Private browsing may disable storage. */ }
+}
+function amneziaSetupIdentity() {
+  return { target: $("amneziaSetupTarget").value, username: $("amneziaSetupUsername").value.trim(),
+    method: $("amneziaSetupAuthKey").checked ? "private_key" : "password",
+    fingerprint: amneziaSetup.fingerprint };
+}
+function amneziaSetupSameIdentity() {
+  const current = amneziaSetupIdentity(), reviewed = amneziaSetup.identity;
+  return reviewed && Object.keys(current).every((key) => current[key] === reviewed[key]);
+}
+function amneziaSetupDiscardReview() {
+  amneziaSetup.setup = null;
+  amneziaSetup.enrollment = null;
+  amneziaSetup.identity = null;
+  $("amneziaSetupResult").hidden = true;
+  $("amneziaSetupEnrollment").hidden = true;
+}
+function amneziaSetupShowStatus(result) {
+  if (!amneziaSetupValidResult(result, $("amneziaSetupTarget").value)) throw new Error("INVALID_RESPONSE");
+  amneziaSetup.setup = result;
+  amneziaSetup.enrollment = null;
+  amneziaSetup.identity = amneziaSetupIdentity();
+  $("amneziaSetupEnrollment").hidden = true;
+  $("amneziaSetupSummary").textContent = result.marker === "unsafe" || result.other_marker === "unsafe"
+    ? "Найдены конфликтующие или небезопасные данные подключения. Изменений не выполнено."
+    : result.enrolled
+      ? `Брокер ${result.target === "awg2" ? "AmneziaWG" : "WireGuard"} подключён. Клиентов: ${result.configured_clients}, из них добавлены SovaGrid: ${result.owned_clients}.`
+      : "Брокер ещё не подключён. Можно проверить существующий VPN-контейнер на этом хосте. Изменений не выполнено.";
+  $("amneziaSetupDetails").textContent = `Служба: ${result.service_active ? "работает" : "не запущена"}. Сокет: ${result.socket_active ? "работает" : "не запущен"}. Установщик: ${result.installer_ready ? "готов" : "недоступен"}.`;
+  $("amneziaSetupNext").textContent = "Для каждого следующего шага снова введите пароль или выберите ключ SSH. Данные входа не сохраняются.";
+  $("amneziaSetupResult").hidden = false;
+  amneziaSetupRender();
+}
 function amneziaSetupRender() {
   $("amneziaSetupHost").textContent = location.hostname || "этот хост";
   const allowed = amneziaSetupAllowed();
   $("amneziaSetupAvailability").textContent = !state.user ? "Войдите как администратор этого Hub." :
     !hubCanGlobalAdmin() ? "Для проверки нужен администратор со свободным доступом ко всем серверам Hub." :
       !allowed ? "Откройте этот Hub по HTTPS или через локальный SSH-туннель и войдите в него напрямую." :
-        "Сначала проверьте SSH-ключ, затем выберите способ входа. Пароль и файл ключа не сохраняются.";
+        amneziaSetupPending() ? "Предыдущее действие могло продолжиться после потери связи. Проверьте состояние заново перед следующим шагом." :
+          "Сначала проверьте SSH-ключ, затем выберите способ входа. Пароль и файл ключа не сохраняются.";
   $("amneziaSetupInspect").disabled = !allowed || amneziaSetup.busy;
   $("amneziaSetupSubmit").disabled = !allowed || amneziaSetup.busy || !amneziaSetup.fingerprint ||
     amneziaSetup.changedPin || !$("amneziaSetupTrust").checked;
+  for (const id of ["amneziaSetupTarget", "amneziaSetupUsername", "amneziaSetupAuthPassword",
+    "amneziaSetupAuthKey", "amneziaSetupPassword", "amneziaSetupPrivateKey", "amneziaSetupPassphrase",
+    "amneziaSetupTrust"]) $(id).disabled = amneziaSetup.busy;
+  const setup = amneziaSetup.setup, exact = amneziaSetupSameIdentity();
+  const safe = allowed && exact && !amneziaSetup.busy && !amneziaSetup.changedPin &&
+    $("amneziaSetupTrust").checked && setup?.marker !== "unsafe" && setup?.other_marker !== "unsafe";
+  $("amneziaSetupEnrollPreview").hidden = !safe || setup?.enrolled !== false;
+  $("amneziaSetupInstall").hidden = !safe || setup?.enrolled !== true || !setup?.installer_ready ||
+    setup?.installed_current || setup?.marker !== "absent" || setup?.other_marker !== "absent" ||
+    setup?.socket_active || setup?.service_active;
+  $("amneziaSetupArm").hidden = !safe || setup?.enrolled !== true || !setup?.installed_current ||
+    !setup?.can_arm || setup?.marker !== "absent";
+  $("amneziaSetupEnroll").disabled = !safe || !amneziaSetup.enrollment || amneziaSetup.busy;
 }
 function amneziaSetupReset() {
   amneziaSetup.generation++;
@@ -1065,10 +1127,13 @@ function amneziaSetupReset() {
   amneziaSetup.busy = false;
   amneziaSetup.fingerprint = null;
   amneziaSetup.changedPin = false;
+  amneziaSetup.pendingAction = null;
+  if ($("amneziaSetupDialog").open) $("amneziaSetupDialog").close();
+  $("amneziaSetupMaintenance").checked = false;
   $("amneziaSetupTrust").checked = false;
   $("amneziaSetupHostKeyReview").hidden = true;
   $("amneziaSetupReplaceKey").hidden = true;
-  $("amneziaSetupResult").hidden = true;
+  amneziaSetupDiscardReview();
   $("amneziaSetupSummary").textContent = "";
   $("amneziaSetupDetails").textContent = "";
   $("amneziaSetupUsername").value = "";
@@ -1081,6 +1146,8 @@ function amneziaSetupMethodChanged() {
   $("amneziaSetupKeyFields").hidden = !key;
   $("amneziaSetupPasswordFields").hidden = key;
   amneziaSetupClearSecrets();
+  amneziaSetupDiscardReview();
+  amneziaSetupRender();
 }
 function amneziaSetupCurrent(generation, token, base, origin) {
   return amneziaSetup.generation === generation && state.token === token && state.base === base &&
@@ -1119,6 +1186,8 @@ function amneziaSetupExplain(failure) {
   if (failure.message === "AUTH_REQUIRED") return "Сеанс Hub завершился. Войдите в панель заново.";
   if (failure.message === "ADMIN_FORBIDDEN") return "Для проверки нужен администратор Hub с полным доступом.";
   if (failure.message === "SETUP_UNAVAILABLE") return "Предпросмотр на этом хосте недоступен. Проверьте серверный пакет и права SSH-пользователя.";
+  if (failure.message === "SETUP_CHANGED") return "Состояние контейнера изменилось. Проверьте его заново и повторите действие.";
+  if (failure.message === "SETUP_UNCERTAIN") return "Связь прервалась или ответ не подтверждён. Действие могло выполниться: проверьте состояние перед повтором.";
   if (failure.message === "RATE_LIMIT") return "Слишком много попыток. Подождите минуту.";
   if (failure.message === "BUSY") return "SSH-шлюз занят. Повторите позже.";
   if (failure.message === "SSH_TIMEOUT") return "SSH-хост не ответил вовремя.";
@@ -1134,7 +1203,7 @@ async function amneziaSetupInspect() {
   $("amneziaSetupTrust").checked = false;
   $("amneziaSetupHostKeyReview").hidden = true;
   $("amneziaSetupReplaceKey").hidden = true;
-  $("amneziaSetupResult").hidden = true;
+  amneziaSetupDiscardReview();
   amneziaSetupClearSecrets();
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
@@ -1194,7 +1263,7 @@ async function amneziaSetupPreview(event) {
   }
   amneziaSetup.busy = true;
   clearError($("amneziaSetupError"));
-  $("amneziaSetupResult").hidden = true;
+  amneziaSetupDiscardReview();
   amneziaSetupRender();
   let password = "", private_key = "", passphrase = "";
   try {
@@ -1220,14 +1289,8 @@ async function amneziaSetupPreview(event) {
     if (!amneziaSetupCurrent(generation, token, base, origin)) return;
     if (!amneziaSetupValidResult(result, target)) throw new Error("INVALID_RESPONSE");
     amneziaSetupSavePin(fingerprint);
-    $("amneziaSetupSummary").textContent = result.marker === "unsafe" || result.other_marker === "unsafe"
-      ? "Найдены конфликтующие или небезопасные данные подключения. Изменений не выполнено."
-      : result.enrolled
-        ? `Брокер ${target === "awg2" ? "AmneziaWG" : "WireGuard"} уже подключён на этом хосте. Клиентов: ${result.configured_clients}, из них добавлены SovaGrid: ${result.owned_clients}.`
-        : result.can_arm ? "Хост готов к отдельному подключению брокера. Сейчас выполнена только проверка без изменений."
-          : "Брокер ещё не подключён или подготовка не завершена. Изменений не выполнено.";
-    $("amneziaSetupDetails").textContent = `Служба: ${result.service_active ? "работает" : "не запущена"}. Сокет: ${result.socket_active ? "работает" : "не запущен"}. Установщик: ${result.installer_ready ? "готов" : "недоступен"}.`;
-    $("amneziaSetupResult").hidden = false;
+    amneziaSetupMarkPending(false);
+    amneziaSetupShowStatus(result);
   } catch (failure) {
     if (amneziaSetupCurrent(generation, token, base, origin)) showError($("amneziaSetupError"),
       failure.message === "KEY_READ_FAILED" ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
@@ -1239,12 +1302,148 @@ async function amneziaSetupPreview(event) {
   }
 }
 
+function amneziaSetupValidEnrollment(result, target, fingerprint) {
+  if (!result || typeof result !== "object" || Array.isArray(result) ||
+      JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(AMNEZIA_ENROLL_FIELDS) ||
+      result.protocol !== 1 || result.action !== "enroll_preview" || result.writes !== false ||
+      result.reverify_required !== true || result.target !== target ||
+      result.host_key_fingerprint !== fingerprint ||
+      result.vpn_protocol !== (target === "awg2" ? "amneziawg" : "wireguard") ||
+      result.interface !== (target === "awg2" ? "awg0" : "wg0") ||
+      !Number.isSafeInteger(result.configured_clients) || result.configured_clients < 0 ||
+      !Number.isSafeInteger(result.listen_port) || result.listen_port < 1 || result.listen_port > 65535 ||
+      !/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(result.server_subnet)) return false;
+  return ["container_id", "config_sha256", "table_sha256"].every((key) =>
+    typeof result[key] === "string" && /^[0-9a-f]{64}$/.test(result[key])) &&
+    typeof result.image_id === "string" && /^sha256:[0-9a-f]{64}$/.test(result.image_id);
+}
+
+async function amneziaSetupCredentials() {
+  const identity = amneziaSetupIdentity();
+  const file = identity.method === "private_key" ? $("amneziaSetupPrivateKey").files?.[0] : null;
+  const passphrase = identity.method === "private_key" ? $("amneziaSetupPassphrase").value : "";
+  if (!["awg2", "wireguard"].includes(identity.target) ||
+      !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(identity.username) ||
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(identity.fingerprint || "") ||
+      (identity.method === "private_key" && (!file || file.size < 1 || file.size > 65536))) {
+    throw new Error("INVALID_INPUT");
+  }
+  let password = "", private_key = "";
+  if (identity.method === "private_key") {
+    try { private_key = await file.text(); } catch { throw new Error("KEY_READ_FAILED"); }
+  } else password = $("amneziaSetupPassword").value;
+  if (!amneziaSetupSameIdentity() ||
+      (identity.method === "private_key" && (file !== $("amneziaSetupPrivateKey").files?.[0] ||
+        passphrase !== $("amneziaSetupPassphrase").value)) ||
+      (identity.method === "password" && password !== $("amneziaSetupPassword").value) ||
+      (identity.method === "password" && (!password || password.length > 1024)) ||
+      (identity.method === "private_key" && (!private_key || new TextEncoder().encode(private_key).length > 65536)) ||
+      passphrase.length > 1024) throw new Error("INVALID_INPUT");
+  return { username: identity.username, method: identity.method, fingerprint: identity.fingerprint,
+    password, private_key, passphrase, target: identity.target };
+}
+
+async function amneziaSetupAction(action) {
+  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupSameIdentity() ||
+      !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
+      !["enroll-preview", "enroll", "install", "arm"].includes(action)) return;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  const reviewed = action === "enroll" ? amneziaSetup.enrollment : amneziaSetup.setup;
+  if ((action === "enroll" && !reviewed) || (action !== "enroll-preview" && !reviewed)) return;
+  amneziaSetup.busy = true;
+  clearError($("amneziaSetupError"));
+  amneziaSetupRender();
+  let payload;
+  try {
+    payload = await amneziaSetupCredentials();
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameIdentity() ||
+        amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
+    if (action !== "enroll-preview") {
+      payload.reviewed = reviewed;
+      payload.confirm = action === "arm" ? AMNEZIA_SETUP_CONFIRM[payload.target] : AMNEZIA_SETUP_CONFIRM[action];
+    }
+    amneziaSetupClearSecrets();
+    if (action !== "enroll-preview") amneziaSetupMarkPending(true);
+    const result = await amneziaSetupApi(`/api/v1/browser-ssh/vpn-setup/${action}`,
+      payload, token, action === "enroll-preview" ? 75000 : 170000);
+    if (!amneziaSetupCurrent(generation, token, base, origin)) return;
+    if (action === "enroll-preview") {
+      if (!amneziaSetupValidEnrollment(result, payload.target, payload.fingerprint)) throw new Error("INVALID_RESPONSE");
+      amneziaSetup.enrollment = result;
+      $("amneziaSetupEnrollmentSummary").textContent =
+        `${result.vpn_protocol === "amneziawg" ? "AmneziaWG" : "WireGuard"} · ${result.server_subnet} · UDP ${result.listen_port} · клиентов: ${result.configured_clients}.`;
+      $("amneziaSetupEnrollmentPins").textContent =
+        `Контейнер ${result.container_id}\nОбраз ${result.image_id}\nКонфигурация ${result.config_sha256}\nТаблица клиентов ${result.table_sha256}`;
+      $("amneziaSetupEnrollment").hidden = false;
+    } else {
+      if (result?.protocol !== 1 || result.target !== payload.target ||
+          result.action !== ({ enroll: "enrolled", install: "installed", arm: "armed" })[action]) {
+        throw new Error("SETUP_UNCERTAIN");
+      }
+      amneziaSetupShowStatus(result.setup);
+      amneziaSetupMarkPending(false);
+    }
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      if (action !== "enroll-preview") amneziaSetupDiscardReview();
+      if (failure.message === "SETUP_CHANGED" || failure.message === "INVALID_INPUT" ||
+          failure.message === "AUTH_FAILED" || failure.message === "HOST_KEY_CHANGED") amneziaSetupMarkPending(false);
+      showError($("amneziaSetupError"), failure.message === "KEY_READ_FAILED"
+        ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
+    }
+  } finally {
+    payload = null;
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+
+function amneziaSetupConfirm(action) {
+  if (amneziaSetup.busy || !amneziaSetupSameIdentity() || !amneziaSetupAllowed() ||
+      !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
+  const setup = amneziaSetup.setup;
+  if (action === "enroll" && !amneziaSetup.enrollment ||
+      action === "install" && (!setup?.enrolled || !setup.installer_ready || setup.installed_current) ||
+      action === "arm" && (!setup?.can_arm || !setup.installed_current)) return;
+  const labels = { enroll: "Подключить существующий контейнер", install: "Установить брокер управления",
+    arm: "Включить управление VPN" };
+  $("amneziaSetupDialogTitle").textContent = labels[action];
+  $("amneziaSetupDialogSummary").textContent = action === "enroll"
+    ? `SovaGrid подключит существующий контейнер ${amneziaSetup.enrollment.vpn_protocol} на ${location.hostname}. Клиентов: ${amneziaSetup.enrollment.configured_clients}.`
+    : action === "install" ? `Установить локальный брокер на ${location.hostname}. VPN-контейнер не будет перезапущен.`
+      : `Включить брокер для ${setup.target === "awg2" ? "AmneziaWG" : "WireGuard"} на ${location.hostname}. Клиентские подключения могут прерваться.`;
+  $("amneziaSetupMaintenanceLabel").hidden = action !== "arm";
+  $("amneziaSetupMaintenance").checked = false;
+  amneziaSetup.pendingAction = action;
+  $("amneziaSetupDialog").showModal();
+}
+
 $("amneziaSetupInspect").addEventListener("click", () => { void amneziaSetupInspect(); });
 $("amneziaSetupForm").addEventListener("submit", (event) => { void amneziaSetupPreview(event); });
+$("amneziaSetupEnrollPreview").addEventListener("click", () => { void amneziaSetupAction("enroll-preview"); });
+$("amneziaSetupEnroll").addEventListener("click", () => amneziaSetupConfirm("enroll"));
+$("amneziaSetupInstall").addEventListener("click", () => amneziaSetupConfirm("install"));
+$("amneziaSetupArm").addEventListener("click", () => amneziaSetupConfirm("arm"));
+$("amneziaSetupDialogCancel").addEventListener("click", () => $("amneziaSetupDialog").close());
+$("amneziaSetupDialog").addEventListener("close", () => { amneziaSetup.pendingAction = null; });
+$("amneziaSetupDialogConfirm").addEventListener("click", () => {
+  const action = amneziaSetup.pendingAction;
+  if (!action || (action === "arm" && !$("amneziaSetupMaintenance").checked)) return;
+  $("amneziaSetupDialog").close();
+  void amneziaSetupAction(action);
+});
 $("amneziaSetupTarget").addEventListener("change", amneziaSetupReset);
 $("amneziaSetupAuthPassword").addEventListener("change", amneziaSetupMethodChanged);
 $("amneziaSetupAuthKey").addEventListener("change", amneziaSetupMethodChanged);
-$("amneziaSetupTrust").addEventListener("change", amneziaSetupRender);
+$("amneziaSetupUsername").addEventListener("input", () => {
+  amneziaSetupDiscardReview();
+  amneziaSetupRender();
+});
+$("amneziaSetupTrust").addEventListener("change", () => {
+  if (!$("amneziaSetupTrust").checked) amneziaSetupDiscardReview();
+  amneziaSetupRender();
+});
 $("amneziaSetupReplaceKey").addEventListener("click", () => {
   if (!globalThis.confirm?.("Заменить закреплённый SSH-ключ после независимой сверки нового отпечатка?")) return;
   amneziaSetup.changedPin = false;
