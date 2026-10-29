@@ -15,7 +15,7 @@ const preview = () => ({ protocol: 1, target: 'awg2', enrolled: false,
   installer_ready: true, installed_current: false, can_arm: true, reason: 'NOT_ENROLLED' });
 
 function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = 'https://panel.example',
-  fingerprint = FINGERPRINT, savedPin = null, previewReply = preview() } = {}) {
+  fingerprint = FINGERPRINT, savedPin = null, previewReply = preview(), replies = {} } = {}) {
   const elements = new Map(), calls = [], storage = new Map();
   const location = new URL(page);
   if (savedPin) storage.set(`sovagrid.ssh-host-key:${location.origin}`, savedPin);
@@ -41,7 +41,9 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
       setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     fetch: async (path, options) => {
       calls.push({ path, options });
-      const reply = path.endsWith('/host-key')
+      const reply = Object.hasOwn(replies, path)
+        ? typeof replies[path] === 'function' ? replies[path](options) : replies[path]
+        : path.endsWith('/host-key')
         ? { protocol: 1, port: 22, key_type: 'ssh-ed25519', fingerprint }
         : typeof previewReply === 'function' ? previewReply(path) : previewReply;
       return { ok: !reply.__httpStatus, status: reply.__httpStatus || 200,
@@ -60,7 +62,7 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
   return { context, state, element, calls, storage };
 }
 
-test('VPN panel includes local-only read-only SSH preview and fresh PWA assets', () => {
+test('VPN panel includes local and entered-host SSH setup with fresh PWA assets', () => {
   const html = fs.readFileSync('index.html', 'utf8');
   const styles = fs.readFileSync('styles.css', 'utf8');
   const shell = fs.readFileSync('sw.js', 'utf8');
@@ -68,13 +70,84 @@ test('VPN panel includes local-only read-only SSH preview and fresh PWA assets',
   assert.match(html, /id="amneziaSetupInspect"/);
   assert.match(html, /id="amneziaSetupTrust"/);
   assert.match(html, /id="amneziaSetupPrivateKey"/);
+  assert.match(html, /id="amneziaSetupScopeRemote"/);
+  assert.match(html, /id="amneziaSetupRemoteHost"/);
+  assert.match(html, /id="amneziaSetupRemotePort"/);
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=8/);
-  assert.match(shell, /amnezia\.js\?v=8/);
-  assert.match(html, /styles\.css\?v=39/);
-  assert.match(shell, /styles\.css\?v=39/);
+  assert.match(html, /amnezia\.js\?v=9/);
+  assert.match(shell, /amnezia\.js\?v=9/);
+  assert.match(html, /styles\.css\?v=40/);
+  assert.match(shell, /styles\.css\?v=40/);
+});
+
+test('entered Ubuntu host needs its own pinned SSH key and status before VPN preview', async () => {
+  const host = 'vpn.example', port = 2202;
+  const scoped = { scope: 'entered_target', host, port, host_key_fingerprint: FINGERPRINT };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { protocol: 1, scope: 'entered_target',
+      host, port, key_type: 'ssh-ed25519', fingerprint: FINGERPRINT,
+      reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { protocol: 1, ...scoped, kind: 'managed' },
+    '/api/v1/browser-ssh/vpn-setup/preview': { ...preview(), ...scoped },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = 'VPN.Example';
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  assert.equal(h.calls[0].path, '/api/v1/browser-ssh/target-host-key');
+  assert.deepEqual(JSON.parse(h.calls[0].options.body), { host, port });
+  assert.equal(h.calls[0].options.headers.Authorization, `Bearer ${TOKEN}`);
+  assert.equal(h.element('amneziaSetupKeyHost').textContent, host);
+  assert.equal(h.element('amneziaSetupSubmit').disabled, true);
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'temporary-remote-password';
+  await h.context.amneziaSetupPreview({ preventDefault() {} });
+  assert.equal(h.calls[1].path, '/api/v1/browser-ssh/target-status');
+  assert.equal(h.calls[2].path, '/api/v1/browser-ssh/vpn-setup/preview');
+  assert.deepEqual(JSON.parse(h.calls[1].options.body), { host, port, username: 'root',
+    method: 'password', fingerprint: FINGERPRINT, password: 'temporary-remote-password',
+    private_key: '', passphrase: '' });
+  assert.equal(JSON.parse(h.calls[2].options.body).host, host);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.equal(h.element('amneziaSetupResult').hidden, false);
+  assert.equal(h.storage.get(`sovagrid.target-ssh-host-key:${h.context.location.origin}:${host}:${port}`),
+    FINGERPRINT);
+  h.element('amneziaSetupRemoteHost').value = 'other.example';
+  h.element('amneziaSetupRemoteHost').listeners.get('input')();
+  assert.equal(h.element('amneziaSetupResult').hidden, true);
+  assert.equal(h.element('amneziaSetupSubmit').disabled, true);
+  assert.equal(h.element('amneziaSetupHostKeyReview').hidden, true);
+  assert.equal(h.calls.length, 3);
+});
+
+test('entered host without SovaGrid Agent cannot reach VPN preview or save a pin', async () => {
+  const host = 'bare.example', port = 22;
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { protocol: 1, scope: 'entered_target',
+      host, port, key_type: 'ssh-ed25519', fingerprint: FINGERPRINT,
+      reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { protocol: 1, scope: 'entered_target',
+      host, port, host_key_fingerprint: FINGERPRINT, kind: 'missing' },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'temporary-remote-password';
+  await h.context.amneziaSetupPreview({ preventDefault() {} });
+  assert.deepEqual(h.calls.map(({ path }) => path.split('/').at(-1)), ['target-host-key', 'target-status']);
+  assert.equal(h.element('amneziaSetupResult').hidden, true);
+  assert.equal(h.storage.size, 0);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
 });
 
 test('preview requires reviewed host key and clears SSH password before same-origin request', async () => {

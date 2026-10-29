@@ -131,3 +131,97 @@ test('Amnezia setup reviews and confirms each stage without storing SSH credenti
     session: { ...sessionStorage } }))).not.toContain(secret);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('Amnezia setup on an entered Ubuntu host pins its own key and binds every stage', async ({ page }) => {
+  const requests = [];
+  const host = 'vpn.example', port = 2202;
+  const scope = { scope: 'entered_target', host, port, host_key_fingerprint: fingerprint };
+  let setup = { ...missing, ...scope };
+  await page.route('**/api/v1/browser-ssh/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON();
+    let reply;
+    if (path.endsWith('/agent/list')) reply = [];
+    else if (path.endsWith('/target-host-key')) reply = { protocol: 1, scope: 'entered_target',
+      host, port, key_type: 'ssh-ed25519', fingerprint, reverify_required: true };
+    else if (path.endsWith('/target-status')) reply = { protocol: 1, ...scope, kind: 'managed' };
+    else if (path.endsWith('/vpn-setup/preview')) reply = setup;
+    else if (path.endsWith('/vpn-setup/enroll-preview')) reply = { ...enrollment, ...scope };
+    else if (path.endsWith('/vpn-setup/enroll')) {
+      setup = { ...enrolled, ...scope };
+      reply = { protocol: 1, action: 'enrolled', target: 'awg2', enrolled: true,
+        container_id: containerId, configured_clients: 2, setup, ...scope };
+    } else if (path.endsWith('/vpn-setup/install')) {
+      setup = { ...installed, ...scope };
+      reply = { protocol: 1, action: 'installed', target: 'awg2', setup, ...scope };
+    } else if (path.endsWith('/vpn-setup/arm')) {
+      setup = { ...armed, ...scope };
+      reply = { protocol: 1, action: 'armed', target: 'awg2', setup, ...scope };
+    } else throw new Error(`Unexpected gateway route: ${path}`);
+    requests.push({ path, body });
+    await route.fulfill({ status: 200, contentType: 'application/json',
+      headers: { 'Cache-Control': 'no-store' }, body: JSON.stringify(reply) });
+  });
+
+  await page.goto('/');
+  await page.locator('#hubLoginMode').click();
+  await page.locator('#hubUrl').fill('http://127.0.0.1:8900');
+  await page.locator('#username').fill('owner');
+  await page.locator('#password').fill('fixture-owner-passphrase');
+  await page.locator('#loginButton').click();
+  await expect(page.locator('#appView')).toBeVisible();
+  await page.locator('[data-view="vpn"]').click();
+  await expect(page.locator('#amneziaSetupPanel')).toBeVisible();
+  await page.locator('#amneziaSetupScopeRemote').check();
+  await expect(page.locator('#amneziaSetupRemoteFields')).toBeVisible();
+  await page.locator('#amneziaSetupRemoteHost').fill('VPN.Example');
+  await page.locator('#amneziaSetupRemotePort').fill(String(port));
+  await page.locator('#amneziaSetupInspect').click();
+  await expect(page.locator('#amneziaSetupKeyHost')).toHaveText(host);
+  await expect(page.locator('#amneziaSetupFingerprint')).toHaveText(fingerprint);
+  await page.locator('#amneziaSetupTrust').check();
+  await page.locator('#amneziaSetupUsername').fill('root');
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupSubmit').click();
+  await expect(page.locator('#amneziaSetupEnrollPreview')).toBeVisible();
+
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupEnrollPreview').click();
+  await expect(page.locator('#amneziaSetupEnrollment')).toBeVisible();
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupEnroll').click();
+  await page.locator('#amneziaSetupDialogConfirm').click();
+  await expect(page.locator('#amneziaSetupInstall')).toBeVisible();
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupInstall').click();
+  await page.locator('#amneziaSetupDialogConfirm').click();
+  await expect(page.locator('#amneziaSetupArm')).toBeVisible();
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupArm').click();
+  await page.locator('#amneziaSetupMaintenance').check();
+  await page.locator('#amneziaSetupDialogConfirm').click();
+  await expect(page.locator('#amneziaSetupDetails')).toContainText('Сокет: работает');
+
+  expect(requests.map(({ path }) => path.split('/').at(-1))).toEqual([
+    'target-host-key', 'target-status', 'preview', 'enroll-preview', 'enroll', 'install', 'arm',
+  ]);
+  expect(requests[0].body).toEqual({ host, port });
+  for (const { body } of requests.slice(1)) {
+    expect(body.host).toBe(host);
+    expect(body.port).toBe(port);
+    expect(body.fingerprint).toBe(fingerprint);
+    expect(body.password).toBe(secret);
+  }
+  expect(requests[4].body.reviewed).toEqual({ ...enrollment, ...scope });
+  expect(requests[5].body.reviewed).toEqual({ ...enrolled, ...scope });
+  expect(requests[6].body.reviewed).toEqual({ ...installed, ...scope });
+  expect(await page.evaluate(({ host, port }) => localStorage.getItem(
+    `sovagrid.target-ssh-host-key:${location.origin}:${host}:${port}`), { host, port })).toBe(fingerprint);
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage },
+    session: { ...sessionStorage } }))).not.toContain(secret);
+  await page.locator('#amneziaSetupRemoteHost').fill('other.example');
+  await expect(page.locator('#amneziaSetupHostKeyReview')).toBeHidden();
+  await expect(page.locator('#amneziaSetupResult')).toBeHidden();
+  await expect(page.locator('#amneziaSetupSubmit')).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
