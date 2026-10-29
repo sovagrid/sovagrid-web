@@ -68,10 +68,10 @@ test('VPN panel includes local-only read-only SSH preview and fresh PWA assets',
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=7/);
-  assert.match(shell, /amnezia\.js\?v=7/);
-  assert.match(html, /styles\.css\?v=38/);
-  assert.match(shell, /styles\.css\?v=38/);
+  assert.match(html, /amnezia\.js\?v=8/);
+  assert.match(shell, /amnezia\.js\?v=8/);
+  assert.match(html, /styles\.css\?v=39/);
+  assert.match(shell, /styles\.css\?v=39/);
 });
 
 test('preview requires reviewed host key and clears SSH password before same-origin request', async () => {
@@ -94,7 +94,7 @@ test('preview requires reviewed host key and clears SSH password before same-ori
     fingerprint: FINGERPRINT, password: 'private SSH password', private_key: '', passphrase: '', target: 'awg2' });
   assert.equal(h.element('amneziaSetupPassword').value, '');
   assert.equal(h.element('amneziaSetupResult').hidden, false);
-  assert.match(h.element('amneziaSetupSummary').textContent, /без изменений/);
+  assert.match(h.element('amneziaSetupSummary').textContent, /Изменений не выполнено/);
   assert.deepEqual([...h.storage.entries()], [[`sovagrid.ssh-host-key:${h.context.location.origin}`, FINGERPRINT]]);
 });
 
