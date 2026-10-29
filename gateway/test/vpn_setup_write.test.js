@@ -9,8 +9,9 @@ import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { createHandler, enrollAmneziaSetup, mutateAmneziaSetup,
-  previewAmneziaEnrollment, safeAmneziaEnrollmentPreview, safeAmneziaPreview,
-  validateAmneziaEnrollment, validateAmneziaSetupAction } from "../server.js";
+  previewAmneziaEnrollment, previewAmneziaSetup, safeAmneziaEnrollmentPreview,
+  safeAmneziaPreview, validateAmneziaEnrollment, validateAmneziaPreview,
+  validateAmneziaSetupAction } from "../server.js";
 
 function wireKey() {
   const type = Buffer.from("ssh-ed25519");
@@ -216,6 +217,94 @@ test("WireGuard enrollment accepts its own exact protocol and sudo command", asy
   assert.equal(result.vpn_protocol, "wireguard");
   assert.equal(commands[1].command,
     "cd /opt/sovagrid-vpn && /usr/bin/sudo -n -- /usr/bin/python3 -B -E -S -m sovagrid_vpn.amnezia_admin enroll-preview wireguard");
+});
+
+test("remote Amnezia preview pins a separate entered SSH host and preserves local requests", async () => {
+  const remote = credentials({ host: "VPN.Example", port: 2202 });
+  assert.equal(validateAmneziaPreview(remote).endpoint.host, "vpn.example");
+  assert.throws(() => validateAmneziaPreview(credentials({ host: "vpn.example" })), /INVALID_INPUT/);
+  assert.throws(() => validateAmneziaPreview(credentials({ host: "https:\/\/vpn.example", port: 22 })),
+    /INVALID_INPUT/);
+  const commands = [];
+  const result = await previewAmneziaSetup(remote,
+    { clientFactory: clients([SETUP_RAW], commands) });
+  assert.deepEqual({ scope: result.scope, host: result.host, port: result.port,
+    fingerprint: result.host_key_fingerprint },
+  { scope: "entered_target", host: "vpn.example", port: 2202, fingerprint: FINGERPRINT });
+  assert.equal(commands[0].host, "vpn.example");
+  assert.equal(commands[0].port, 2202);
+  assert.equal(commands[1].command,
+    "/usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py preview --target awg2");
+  assert.equal(remote.password, "");
+
+  const mismatchCommands = [];
+  const mismatched = credentials({ host: "vpn.example", port: 2202,
+    fingerprint: "SHA256:" + "B".repeat(43) });
+  await assert.rejects(previewAmneziaSetup(mismatched,
+    { clientFactory: clients([], mismatchCommands) }), /HOST_KEY_CHANGED/);
+  assert.equal(mismatched.password, "");
+  assert.equal(mismatchCommands.some((item) => item.kind === "exec"), false);
+  const local = await previewAmneziaSetup(credentials(),
+    { clientFactory: clients([SETUP_RAW], []) });
+  assert.equal(Object.hasOwn(local, "host"), false);
+  assert.equal(Object.hasOwn(local, "scope"), false);
+});
+
+test("remote enrollment and broker mutation bind reviewed host, port and key across all SSH steps", async () => {
+  const endpoint = { host: "vpn.example", port: 2202 };
+  const reviewInput = credentials({ ...endpoint });
+  const reviewedCommands = [];
+  const reviewed = await previewAmneziaEnrollment(reviewInput,
+    { clientFactory: clients([ENROLL_RAW], reviewedCommands) });
+  assert.equal(reviewed.scope, "entered_target");
+  assert.equal(reviewed.host, endpoint.host);
+  assert.equal(reviewed.port, endpoint.port);
+  assert.equal(reviewed.host_key_fingerprint, FINGERPRINT);
+  assert.equal(reviewInput.password, "");
+  assert.throws(() => validateAmneziaEnrollment({ ...credentials({ host: "other.example", port: 2202 }),
+    reviewed, confirm: "ENROLL_EXISTING_CONTAINER" }), /INVALID_INPUT/);
+  assert.throws(() => validateAmneziaEnrollment({ ...credentials({ host: endpoint.host, port: 2203 }),
+    reviewed, confirm: "ENROLL_EXISTING_CONTAINER" }), /INVALID_INPUT/);
+  assert.throws(() => validateAmneziaEnrollment({ ...credentials(endpoint),
+    reviewed: { ...reviewed, host_key_fingerprint: "SHA256:" + "B".repeat(43) },
+    confirm: "ENROLL_EXISTING_CONTAINER" }), /INVALID_INPUT/);
+  const enrollCommands = [];
+  const enrolled = await enrollAmneziaSetup({ ...credentials(endpoint), reviewed,
+    confirm: "ENROLL_EXISTING_CONTAINER" }, {
+    clientFactory: clients([ENROLL_RAW,
+      { target: "awg2", enrolled: true, configured_clients: 2 }, SETUP_RAW], enrollCommands),
+  });
+  assert.equal(enrolled.setup.host, endpoint.host);
+  assert.equal(enrolled.setup.port, endpoint.port);
+  assert.equal(enrollCommands.filter((item) => item.kind === "connect").length, 3);
+  assert.equal(enrollCommands.filter((item) => item.kind === "connect")
+    .every((item) => item.host === endpoint.host && item.port === endpoint.port), true);
+
+  const setup = enrolled.setup;
+  assert.throws(() => validateAmneziaSetupAction({ ...credentials({ host: "other.example", port: 2202 }),
+    reviewed: setup, confirm: "INSTALL_AMNEZIA_BROKER" }, "install"), /INVALID_INPUT/);
+  const installedRaw = { ...SETUP_RAW, installed_current: true, can_arm: true };
+  const installCommands = [];
+  const installed = await mutateAmneziaSetup({ ...credentials(endpoint), reviewed: setup,
+    confirm: "INSTALL_AMNEZIA_BROKER" }, "install", {
+    clientFactory: clients([SETUP_RAW,
+      { action: "installed", socket_active: false, marker: "absent", target_changed: false },
+      installedRaw], installCommands),
+  });
+  assert.equal(installed.setup.scope, "entered_target");
+  assert.equal(installCommands.filter((item) => item.kind === "connect")
+    .every((item) => item.host === endpoint.host && item.port === endpoint.port), true);
+  const armedRaw = { ...installedRaw, marker: "valid", socket_active: true, can_arm: false };
+  const armCommands = [];
+  const armed = await mutateAmneziaSetup({ ...credentials(endpoint), reviewed: installed.setup,
+    confirm: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_AWG2" }, "arm", {
+    clientFactory: clients([installedRaw,
+      { action: "armed", socket_active: true, marker: "valid", selected_target: "awg2",
+        target_changed: false }, armedRaw], armCommands),
+  });
+  assert.equal(armed.setup.host, endpoint.host);
+  assert.equal(armCommands.filter((item) => item.kind === "connect")
+    .every((item) => item.host === endpoint.host && item.port === endpoint.port), true);
 });
 
 async function call(handler, path, payload, headers = {}) {

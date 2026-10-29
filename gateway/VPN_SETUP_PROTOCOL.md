@@ -1,10 +1,12 @@
-# Web Amnezia setup on the Hub host
+# Web Amnezia setup on the Hub host or another Ubuntu host
 
-The browser SSH gateway manages only the Ubuntu host running this Hub. It never
-accepts a destination host or a shell command. Every request uses `POST`, JSON,
-a same-origin HTTPS request (or loopback HTTP), a fresh unrestricted Hub admin
-session, and SSH credentials pinned to the Hub host key. No SSH credential or
-Amnezia key is stored by the gateway.
+The browser SSH gateway can manage the Ubuntu host running this Hub or an
+entered Ubuntu host reachable from the gateway container over SSH. Every
+request uses `POST`, JSON, a same-origin HTTPS request (or loopback HTTP), a
+fresh unrestricted Hub admin session, and SSH credentials pinned to the
+selected host key. No SSH credential or Amnezia key is stored by the gateway.
+The command is always selected by the gateway; the browser never supplies a
+shell command.
 
 The existing `/api/v1/browser-ssh/vpn-setup/preview` reads broker state. The
 additional paths are:
@@ -18,6 +20,15 @@ additional paths are:
 
 The seven SSH fields are exactly `username`, `method`, `fingerprint`, `password`,
 `private_key`, `passphrase`, and `target` (`awg2` or `wireguard`).
+For an entered host, add exactly `host` (IP address or DNS name) and `port`
+(1–65535) to those seven fields on every request. First call
+`/api/v1/browser-ssh/target-host-key` with `host` and `port`, independently
+verify its fingerprint, then submit it as `fingerprint`. Every SSH connection
+rechecks that host key. The entered host's responses and `reviewed` snapshots
+also contain `scope: "entered_target"`, normalized `host`, `port`, and
+`host_key_fingerprint`. The gateway refuses a `reviewed` object from another
+host, port or SSH key before any write. The existing seven-field Hub-host
+requests and responses retain their original shape.
 
 `enroll-preview` returns `protocol: 1`, `action: "enroll_preview"`,
 `writes: false`, `target`, `container_id`, `image_id`, `config_sha256`,
@@ -44,3 +55,10 @@ do not provide an atomic multi-command transaction.
 The root `enroll-preview` command may initialize its private lock directory on
 first use. Its `writes: false` flag means it does not change the VPN container,
 client table, broker, or enrollment record.
+
+The entered host must already have the compatible `sovagrid-vpn` source and
+root or passwordless sudo access to its fixed Amnezia installer. This API does
+not transfer source files, create a VPN container, or create a jump tunnel.
+An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
+from the gateway container by this route; a separately configured reachable
+SSH endpoint is needed.
