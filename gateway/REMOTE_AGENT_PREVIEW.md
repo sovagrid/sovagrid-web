@@ -36,22 +36,44 @@ passed as JSON on stdin. The gateway does not persist SSH secrets. The password
 path supports one recognized non-echoed password prompt. OTP and verification
 code prompts, multiple questions, and repeated prompts receive no secret.
 
-## Requirements for an apply endpoint
+## Reviewed Agent enrollment gateway
 
-The existing `sovagrid_connect.agent_enrollment.AgentEnrollment` and
-`sovagrid-blueprint/deploy/remote_agent.py` own the reviewed, recoverable
-enrollment protocol. Applying it from Web requires a dedicated Python worker
-with OpenSSH, the verified pinned server-source archive, and a durable private
-enrollment journal. The current gateway image is an unprivileged, read-only
-Node container without those components. Browser-supplied SSH credentials must
-remain transient; after an interruption, the administrator must enter them
-again to resume the journaled operation.
+The same SSH gateway now accepts these `POST` routes after a fresh unrestricted
+Hub administrator check, same-origin enforcement and HTTPS (or local loopback
+HTTP) enforcement:
 
-The Hub already accepts the browser bearer token on
-`/api/v1/agent-enrollments/{id}` and its cancellation route, with a fresh
-unrestricted-admin check. A worker adapter can use that bearer and verify
-`/api/v1/session` and `/api/v1/session/access` instead of asking the user for a
-second Hub password. The Hub-side `hub-*` RPC still needs a narrowly scoped
-host-side privileged bridge to manage its tunnel account and authorized key.
-No Web apply endpoint should be advertised until those pieces and a two-server
-integration test are in place.
+| Route suffix under `/api/v1/browser-ssh/agent/` | JSON body |
+| --- | --- |
+| `prepare` | The exact 12 fields of `target-install-preview` above. |
+| `resume` | `request_id` plus the 8 SSH target fields (`host`, `port`, `username`, `method`, `fingerprint`, `password`, `private_key`, `passphrase`). |
+| `apply`, `cleanup` | `request_id`, `expected_revision`. |
+| `status` | `request_id`. |
+| `list` | `{}`. |
+| `interrupt` | `{}` or `request_id`. |
+
+`request_id` is a canonical UUID. The browser supplies its current Hub bearer
+session in the `Authorization` header; SSH secrets are only in the JSON body of
+`prepare` and `resume`. The gateway checks every field, then sends one bounded
+JSON line to the fixed `/run/sovagrid-web-agent/control.sock` Unix socket:
+`{"action":"prepare","session_token":"…","payload":{…}}`. The worker replies
+with one bounded line, either `{"ok":true,"result":{…}}` or
+`{"ok":false,"error":"CODE","request_id":"…"}`. `list` returns an array.
+The gateway copies only documented public record fields from a successful
+reply and discards any unexpected private fields. The worker must independently
+recheck the session and bind the reviewed target host-key fingerprint before
+any SSH authentication or write. The browser cannot choose the socket path,
+remote command, archive, or worker action outside this list.
+
+The existing Connect `AgentEnrollment` protocol owns prepare, apply, resume,
+cleanup and its private durable journal. `prepare` checks both hosts, writes a
+private recovery journal and stages a verified temporary archive on the target;
+its response says `writes: true, activation_writes: false`. It does not create
+or start the Agent. `apply` needs the `request_id` and exact revision returned
+by `prepare`. A failed or
+interrupted apply reports an uncertainty code plus the durable request ID. The
+administrator must enter SSH credentials again to resume. The gateway stores
+neither SSH secrets nor the borrowed Hub session. The host-side worker and its
+socket are installed separately from this unprivileged container; when absent,
+these routes return `INSTALLER_UNAVAILABLE`. The UI should advertise applying
+an Agent only when the host worker is installed and its end-to-end integration
+has passed.

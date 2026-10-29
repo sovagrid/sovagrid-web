@@ -108,7 +108,9 @@ except (OSError, ValueError, TypeError):
     print("SG_HUB_ROUTE_V1:unreachable")
 '`;
 const HUB_ACCESS_URL = "http://hub:8765/api/v1/session/access";
+const AGENT_SOCKET = "/run/sovagrid-web-agent/control.sock";
 const MAX_BODY = 70 * 1024;
+const MAX_AGENT_REPLY = 32 * 1024;
 const MAX_OUTPUT = 4096;
 const MAX_STATUS_OUTPUT = 512;
 // The installer can list 128 owned clients, each with a 32-character name.
@@ -117,6 +119,14 @@ const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const USERNAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const GRANT = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list"]);
+const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "BUSY", "INVALID_REQUEST_ID",
+  "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH", "NOT_FOUND",
+  "STALE_REVISION", "RESUME_REQUIRED", "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED",
+  "PREPARE_UNCERTAIN", "APPLY_UNCERTAIN", "RESUME_UNCERTAIN", "CLEANUP_UNCERTAIN",
+  "SSH_UNAVAILABLE", "SOURCE_UNTRUSTED", "RUNTIME_UNAVAILABLE", "INVALID_JOURNAL",
+  "INSTALLER_UNAVAILABLE"]);
 
 if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("Invalid fixed host SSH port");
@@ -250,6 +260,171 @@ export function validateTargetInstallPreview(value) {
   }
   return { ...target, name: value.name,
     hub_endpoint: { host: normalizedHubHost, port: value.hub_port, local_port: value.local_port } };
+}
+
+function exactFields(value, fields) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key));
+}
+
+export function validateAgentPayload(action, value) {
+  if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  if (action === "prepare") {
+    const selected = validateTargetInstallPreview(value);
+    return { host: selected.host, port: selected.port, username: selected.username,
+      method: selected.method, fingerprint: selected.fingerprint,
+      password: selected.password, private_key: selected.private_key, passphrase: selected.passphrase,
+      name: selected.name, hub_host: selected.hub_endpoint.host,
+      hub_port: selected.hub_endpoint.port, local_port: selected.hub_endpoint.local_port };
+  }
+  if (action === "resume") {
+    const fields = ["request_id", "host", "port", "username", "method", "fingerprint",
+      "password", "private_key", "passphrase"];
+    if (!exactFields(value, fields) || typeof value.request_id !== "string" ||
+        !UUID.test(value.request_id)) throw new Error("INVALID_INPUT");
+    const target = validateTargetStatus(Object.fromEntries(fields.slice(1).map((key) => [key, value[key]])));
+    return { request_id: value.request_id, ...target };
+  }
+  if (action === "apply" || action === "cleanup") {
+    if (!exactFields(value, ["request_id", "expected_revision"]) ||
+        typeof value.request_id !== "string" || !UUID.test(value.request_id) ||
+        !Number.isSafeInteger(value.expected_revision) || value.expected_revision < 1) {
+      throw new Error("INVALID_INPUT");
+    }
+    return { request_id: value.request_id, expected_revision: value.expected_revision };
+  }
+  if (action === "status" || action === "interrupt") {
+    if (action === "interrupt" && exactFields(value, [])) return {};
+    if (!exactFields(value, ["request_id"]) ||
+        typeof value.request_id !== "string" || !UUID.test(value.request_id)) {
+      throw new Error("INVALID_INPUT");
+    }
+    return { request_id: value.request_id };
+  }
+  if (!exactFields(value, [])) throw new Error("INVALID_INPUT");
+  return {};
+}
+
+function safeAgentRecord(value) {
+  const phases = ["prepared", "transport_ready", "registered", "active"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.protocol !== 1 ||
+      typeof value.request_id !== "string" || !UUID.test(value.request_id) ||
+      typeof value.name !== "string" || !value.name || value.name.length > 80 ||
+      !phases.includes(value.phase) || !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+      !Number.isSafeInteger(value.created_at) || value.created_at < 1 ||
+      !Number.isSafeInteger(value.updated_at) || value.updated_at < value.created_at ||
+      typeof value.cleanup_required !== "boolean" || typeof value.recoverable !== "boolean" ||
+      value.server_id !== null && (typeof value.server_id !== "string" || !UUID.test(value.server_id)) ||
+      value.registration_state !== null && !["pending", "active", "cancelled"].includes(value.registration_state)) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  return { protocol: 1, request_id: value.request_id, name: value.name, phase: value.phase,
+    revision: value.revision, created_at: value.created_at, updated_at: value.updated_at,
+    cleanup_required: value.cleanup_required, server_id: value.server_id,
+    registration_state: value.registration_state, recoverable: value.recoverable };
+}
+
+export function safeAgentResult(action, value) {
+  if (action === "list") {
+    if (!Array.isArray(value) || value.length > 256) throw new Error("INSTALLER_UNAVAILABLE");
+    return value.map(safeAgentRecord);
+  }
+  if (action === "interrupt") {
+    if (!value || value.protocol !== 1 || value.cancel_requested !== true ||
+        value.request_id !== null && (typeof value.request_id !== "string" || !UUID.test(value.request_id))) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    return { protocol: 1, request_id: value.request_id, cancel_requested: true };
+  }
+  if (action === "cleanup" && value?.removed === true) {
+    if (value.protocol !== 1 || typeof value.request_id !== "string" || !UUID.test(value.request_id) ||
+        value.active !== false) throw new Error("INSTALLER_UNAVAILABLE");
+    return { protocol: 1, request_id: value.request_id, removed: true, active: false };
+  }
+  const record = safeAgentRecord(value);
+  if (action === "prepare" || action === "resume") {
+    if (value.writes !== true || value.activation_writes !== false ||
+        typeof value.hub_fingerprint !== "string" ||
+        !FINGERPRINT.test(value.hub_fingerprint) || !value.platform ||
+        typeof value.platform !== "object" || Array.isArray(value.platform) ||
+        !["ubuntu_version", "python_version", "systemd_version"].every((key) =>
+          typeof value.platform[key] === "string" && value.platform[key].length <= 64) ||
+        !value.source_commits || typeof value.source_commits !== "object" ||
+        Array.isArray(value.source_commits)) throw new Error("INSTALLER_UNAVAILABLE");
+    const components = ["sovagrid-blueprint", "sovagrid-hub", "sovagrid-web",
+      "sovagrid-agent", "sovagrid-vpn"];
+    if (Object.keys(value.source_commits).length !== components.length ||
+        components.some((key) => !/^[0-9a-f]{40}$/.test(value.source_commits[key]))) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    return { ...record, writes: true, activation_writes: false,
+      hub_fingerprint: value.hub_fingerprint,
+      platform: Object.fromEntries(["ubuntu_version", "python_version", "systemd_version"]
+        .map((key) => [key, value.platform[key]])),
+      source_commits: Object.fromEntries(components.map((key) => [key, value.source_commits[key]])) };
+  }
+  if (action === "cleanup") {
+    if (value.removed !== false || value.active !== true) throw new Error("INSTALLER_UNAVAILABLE");
+    return { ...record, removed: false, active: true };
+  }
+  return record;
+}
+
+export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
+  timeoutMs = ["status", "list", "interrupt"].includes(action) ? 10000 : 720000 } = {}) {
+  if (!AGENT_ACTIONS.has(action) || typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw new Error("AUTH_REQUIRED");
+  }
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    const request = Buffer.from(JSON.stringify({ action, session_token: token, payload }) + "\n", "utf8");
+    let output = Buffer.alloc(0);
+    let settled = false;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      request.fill(0);
+      output.fill(0);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(result);
+    };
+    socket.setTimeout(timeoutMs, () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("error", () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("close", () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("connect", () => socket.end(request));
+    socket.on("data", (chunk) => {
+      if (settled) return;
+      if (output.length + chunk.length > MAX_AGENT_REPLY) {
+        finish(new Error("INSTALLER_UNAVAILABLE"));
+        return;
+      }
+      output = Buffer.concat([output, chunk]);
+      const newline = output.indexOf(0x0a);
+      if (newline === -1) return;
+      if (newline !== output.length - 1) {
+        finish(new Error("INSTALLER_UNAVAILABLE"));
+        return;
+      }
+      try {
+        const response = JSON.parse(output.subarray(0, newline).toString("utf8"));
+        if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error();
+        if (response.ok === true && Object.keys(response).length === 2 && Object.hasOwn(response, "result")) {
+          finish(null, safeAgentResult(action, response.result));
+        } else if (response.ok === false && typeof response.error === "string" &&
+                   AGENT_ERRORS.has(response.error) &&
+                   Object.keys(response).every((key) => ["ok", "error", "request_id"].includes(key)) &&
+                   (response.request_id === undefined ||
+                     typeof response.request_id === "string" && UUID.test(response.request_id))) {
+          const error = new Error(response.error);
+          if (response.request_id !== undefined) error.requestId = response.request_id;
+          finish(error);
+        } else throw new Error();
+      } catch (error) {
+        finish(error?.message === "INSTALLER_UNAVAILABLE" ? error : new Error("INSTALLER_UNAVAILABLE"));
+      }
+    });
+  });
 }
 
 export async function requireUnrestrictedAdmin(authorization, { fetchImpl = fetch } = {}) {
@@ -764,8 +939,9 @@ async function body(req) {
 export function createHandler({ inspect = inspectHostKey, inspectTarget = inspectTargetHostKey,
   targetStatus = probeTargetStatus, login = issueGrant,
   preview = previewAmneziaSetup, installPreview = previewTargetInstall,
-  admin = requireUnrestrictedAdmin } = {}) {
+  agent = proxyAgent, admin = requireUnrestrictedAdmin } = {}) {
   const probes = new WindowLimit(20, 60);
+  const reads = new WindowLimit(60, 60);
   const attempts = new WindowLimit(5, 60);
   let active = 0;
   return async (req, res) => {
@@ -781,10 +957,11 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const isTargetProbe = req.url === "/api/v1/browser-ssh/target-host-key";
     const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
     const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
-    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus || isInstallPreview;
-    if (req.method !== "POST" || !["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
+    const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
+    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction);
+    if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key",
-        "/api/v1/browser-ssh/target-status", "/api/v1/browser-ssh/target-install-preview"].includes(req.url) ||
+        "/api/v1/browser-ssh/target-status", "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -793,7 +970,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       return;
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
-    if (!(isProbe ? probes : attempts).take(address)) {
+    const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
+    if (!(isProbe ? probes : isAgentRead ? reads : attempts).take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
       return;
     }
@@ -808,7 +986,13 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (isTargetProbe) {
+        if (agentAction) {
+          const token = BEARER.exec(req.headers.authorization || "")?.[1];
+          if (!token) throw new Error("AUTH_REQUIRED");
+          const selected = validateAgentPayload(agentAction, value);
+          try { json(res, 200, await agent(agentAction, selected, token)); }
+          finally { clearCredentials(selected); }
+        } else if (isTargetProbe) {
           json(res, 200, await inspectTarget(validateTargetHostKey(value)));
         } else if (isTargetStatus) {
           const selected = validateTargetStatus(value);
@@ -833,12 +1017,18 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       if (res.destroyed) return;
       const code = ["INVALID_INPUT", "SSH_UNAVAILABLE", "HOST_KEY_CHANGED", "AUTH_FAILED",
         "GRANT_UNAVAILABLE", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE",
-        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD"]
+        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD",
+        ...AGENT_ERRORS]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
-      json(res, code === "INVALID_INPUT" ? 400 : code === "HOST_KEY_CHANGED" ? 409 :
+      const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") ? 400 :
+        ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "STALE_REVISION", "RESUME_REQUIRED",
+          "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY"].includes(code) ? 409 :
+        code === "NOT_FOUND" ? 404 :
         code === "UNSUPPORTED_AUTH_METHOD" ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
-          code === "ADMIN_FORBIDDEN" ? 403 : 503, { error: code });
+          code === "ADMIN_FORBIDDEN" ? 403 : 503;
+      json(res, status, error?.requestId && UUID.test(error.requestId) ?
+        { error: code, request_id: error.requestId } : { error: code });
     } finally { clearTimeout(bodyTimer); active--; }
   };
 }

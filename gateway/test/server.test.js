@@ -7,11 +7,16 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
 import { createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
-  previewAmneziaSetup, previewTargetInstall, probeTargetStatus, requireUnrestrictedAdmin,
+  previewAmneziaSetup, previewTargetInstall, probeTargetStatus, proxyAgent, requireUnrestrictedAdmin,
+  safeAgentResult, validateAgentPayload,
   safeAmneziaPreview, validateAmneziaPreview, validateLogin, validateTargetHostKey,
   validateTargetInstallPreview, validateTargetStatus } from "../server.js";
 
@@ -882,4 +887,127 @@ test("install preview route requires unrestricted admin and clears every SSH sec
     authorization: "Bearer " + TOKEN,
   } });
   assert.equal(loopback.status, 200);
+});
+
+const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
+const SOURCE_COMMITS = Object.fromEntries(["sovagrid-blueprint", "sovagrid-hub", "sovagrid-web",
+  "sovagrid-agent", "sovagrid-vpn"].map((name) => [name, "a".repeat(40)]));
+const AGENT_RECORD = { protocol: 1, request_id: REQUEST_ID, name: "Second Ubuntu",
+  phase: "prepared", revision: 1, created_at: 1793000000, updated_at: 1793000000,
+  cleanup_required: false, server_id: null, registration_state: null, recoverable: true };
+
+test("Agent enrollment validates each exact action body and strips private worker fields", () => {
+  const prepare = validateAgentPayload("prepare", installPreviewInput());
+  assert.deepEqual(prepare, { ...installPreviewInput(), host: "remote.example" });
+  assert.deepEqual(validateAgentPayload("resume", { ...statusInput(), request_id: REQUEST_ID }),
+    { ...statusInput(), host: "remote.example", request_id: REQUEST_ID });
+  assert.deepEqual(validateAgentPayload("apply", { request_id: REQUEST_ID, expected_revision: 2 }),
+    { request_id: REQUEST_ID, expected_revision: 2 });
+  assert.deepEqual(validateAgentPayload("interrupt", {}), {});
+  assert.deepEqual(validateAgentPayload("list", {}), {});
+  for (const [action, body] of [
+    ["prepare", { ...installPreviewInput(), command: "id" }],
+    ["prepare", installPreviewInput({ hub_host: "127.0.0.1" })],
+    ["resume", { ...statusInput(), request_id: REQUEST_ID, name: "unexpected" }],
+    ["apply", { request_id: REQUEST_ID, expected_revision: "2" }],
+    ["cleanup", { request_id: "../secret", expected_revision: 1 }],
+    ["status", { request_id: REQUEST_ID, token: "secret" }],
+    ["list", { host: "example.org" }],
+  ]) assert.throws(() => validateAgentPayload(action, body), /INVALID_INPUT/);
+  const reviewed = safeAgentResult("prepare", { ...AGENT_RECORD, writes: true,
+    activation_writes: false,
+    hub_fingerprint: FINGERPRINT,
+    platform: { ubuntu_version: "24.04", python_version: "3.12", systemd_version: "255",
+      private_key: "never-return" }, source_commits: SOURCE_COMMITS,
+    secret: "never-return" });
+  assert.equal(reviewed.request_id, REQUEST_ID);
+  assert.equal(reviewed.writes, true);
+  assert.equal(reviewed.activation_writes, false);
+  assert.doesNotMatch(JSON.stringify(reviewed), /never-return|private_key|secret/);
+  assert.deepEqual(safeAgentResult("list", [{ ...AGENT_RECORD, password: "never-return" }]), [AGENT_RECORD]);
+  assert.throws(() => safeAgentResult("prepare", { ...AGENT_RECORD, writes: false,
+    activation_writes: false,
+    hub_fingerprint: FINGERPRINT, platform: {}, source_commits: SOURCE_COMMITS }), /INSTALLER_UNAVAILABLE/);
+});
+
+test("Agent HTTP routes require a fresh unrestricted session and never expose submitted secrets", async () => {
+  const path = "/api/v1/browser-ssh/agent/prepare";
+  let checked = 0;
+  let forwarded = 0;
+  let selected;
+  const handler = createHandler({ admin: async (authorization) => {
+    checked++;
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, agent: async (action, payload, token) => {
+    forwarded++;
+    assert.equal(action, "prepare");
+    assert.equal(token, TOKEN);
+    assert.equal(payload.password, "server-secret");
+    selected = payload;
+    return AGENT_RECORD;
+  } });
+  assert.equal((await call(handler, { path, payload: installPreviewInput(), headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal(checked, 0);
+  assert.equal((await call(handler, { path, payload: installPreviewInput() })).status, 401);
+  assert.equal(forwarded, 0);
+  const result = await call(handler, { path, payload: installPreviewInput(),
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.request_id, REQUEST_ID);
+  assert.equal(forwarded, 1);
+  assert.equal(selected.password, "");
+  assert.equal(selected.private_key, "");
+  assert.equal(selected.passphrase, "");
+  const read = await call(createHandler({ admin: async () => {},
+    agent: async (action, payload, token) => {
+      assert.equal(action, "list");
+      assert.deepEqual(payload, {});
+      assert.equal(token, TOKEN);
+      return [AGENT_RECORD];
+    } }), { path: "/api/v1/browser-ssh/agent/list", payload: {},
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.body, [AGENT_RECORD]);
+  const uncertain = new Error("PREPARE_UNCERTAIN");
+  uncertain.requestId = REQUEST_ID;
+  const error = await call(createHandler({ admin: async () => {}, agent: async () => { throw uncertain; } }),
+    { path, payload: installPreviewInput(), headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(error.status, 503);
+  assert.deepEqual(error.body, { error: "PREPARE_UNCERTAIN", request_id: REQUEST_ID });
+});
+
+test("Agent socket proxy sends one bounded request and accepts only a safe reply", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "sovagrid-agent-proxy-"));
+  const socketPath = join(directory, "control.sock");
+  const seen = [];
+  const server = net.createServer((socket) => {
+    let raw = "";
+    socket.on("data", (chunk) => { raw += chunk.toString("utf8"); });
+    socket.on("end", () => {
+      const request = JSON.parse(raw.trim());
+      seen.push(request);
+      socket.end(JSON.stringify(request.action === "apply" ?
+        { ok: false, error: "APPLY_UNCERTAIN", request_id: REQUEST_ID } :
+        { ok: true, result: { ...AGENT_RECORD, private_key: "must-not-appear" } }) + "\n");
+    });
+  });
+  try {
+    await new Promise((resolve) => server.listen(socketPath, resolve));
+    const result = await proxyAgent("status", { request_id: REQUEST_ID }, TOKEN,
+      { socketPath, timeoutMs: 1000 });
+    assert.deepEqual(result, AGENT_RECORD);
+    assert.deepEqual(seen, [{ action: "status", session_token: TOKEN,
+      payload: { request_id: REQUEST_ID } }]);
+    assert.doesNotMatch(JSON.stringify(result), /must-not-appear/);
+    await assert.rejects(proxyAgent("apply", { request_id: REQUEST_ID,
+      expected_revision: 1 }, TOKEN, { socketPath, timeoutMs: 1000 }), (error) => {
+      assert.equal(error.message, "APPLY_UNCERTAIN");
+      assert.equal(error.requestId, REQUEST_ID);
+      return true;
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
