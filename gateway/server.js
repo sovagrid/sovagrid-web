@@ -14,6 +14,10 @@ const TARGET = "172.30.253.1"; // Fixed Docker bridge gateway: this Ubuntu host 
 const PORT = Number(process.env.SOVAGRID_HOST_SSH_PORT || "22");
 const GRANT_COMMAND = "/usr/bin/docker compose --env-file /etc/sovagrid/deploy.env -f /opt/sovagrid-src/sovagrid-blueprint/deploy/compose.yaml run --rm --no-deps -T --entrypoint python3 hub -m sovagrid_hub --db /data/hub.sqlite ssh-grant";
 const AMNEZIA_PREVIEW_COMMAND = "/usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py preview --target ";
+const AMNEZIA_CONTROL_COMMAND = "/usr/bin/python3 -I /opt/sovagrid-src/sovagrid-vpn/deploy/install-amnezia-control.py ";
+const AMNEZIA_ADMIN_COMMAND = "/usr/bin/python3 -B -E -S -m sovagrid_vpn.amnezia_admin ";
+const AMNEZIA_CONFIRM = Object.freeze({ awg2: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_AWG2",
+  wireguard: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_WIREGUARD" });
 // Fixed, read-only inventory. No user input is interpolated into the command or script.
 // Keep the classification in step with sovagrid-connect/server_status.py.
 const STATUS_COMMAND = "sh -c 'if ! command -v python3 >/dev/null 2>&1; then printf \"SG_STATUS_V1:unsupported\\n\"; exit 0; fi; if [ \"$(id -u)\" = 0 ]; then exec python3 -I -; fi; if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then exec sudo -n python3 -I -; fi; printf \"SG_STATUS_V1:unknown\\n\"'";
@@ -116,6 +120,8 @@ const MAX_STATUS_OUTPUT = 512;
 // The installer can list 128 owned clients, each with a 32-character name.
 const MAX_AMNEZIA_PREVIEW_OUTPUT = 16 * 1024;
 const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
+const HEX_SHA = /^[0-9a-f]{64}$/;
+const IMAGE_SHA = /^sha256:[0-9a-f]{64}$/;
 const USERNAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const GRANT = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
@@ -185,6 +191,73 @@ export function validateAmneziaPreview(value) {
     .map((key) => [key, value[key]]));
   validateLogin(login);
   return { login, target: value.target };
+}
+
+function canonicalSubnet(value) {
+  if (typeof value !== "string" || value.length > 32) return false;
+  const match = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d|[12]\d|3[0-2])$/.exec(value);
+  if (!match || net.isIP(match[1]) !== 4 || match[1].split(".").some((part) =>
+    String(Number(part)) !== part)) return false;
+  const prefix = Number(match[2]);
+  const address = match[1].split(".").reduce((number, octet) => (number * 256 + Number(octet)) >>> 0, 0);
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (address & mask) >>> 0 === address;
+}
+
+const ENROLL_PREVIEW_FIELDS = ["protocol", "action", "writes", "target", "container_id",
+  "image_id", "config_sha256", "table_sha256", "configured_clients", "vpn_protocol",
+  "interface", "listen_port", "server_subnet", "host_key_fingerprint", "reverify_required"];
+
+export function safeAmneziaEnrollmentPreview(raw, target, fingerprint) {
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new Error("SETUP_UNAVAILABLE"); }
+  const identity = target === "awg2" ? ["amneziawg", "awg0"] : ["wireguard", "wg0"];
+  const fields = ["target", "container_id", "image_id", "config_sha256", "table_sha256",
+    "configured_clients", "protocol", "interface", "listen_port", "server_subnet"];
+  if (!exactFields(value, fields) || value.target !== target || !HEX_SHA.test(value.container_id) ||
+      !IMAGE_SHA.test(value.image_id) || !HEX_SHA.test(value.config_sha256) ||
+      !HEX_SHA.test(value.table_sha256) || !Number.isSafeInteger(value.configured_clients) ||
+      value.configured_clients < 0 || value.configured_clients > 4096 ||
+      value.protocol !== identity[0] || value.interface !== identity[1] ||
+      !Number.isSafeInteger(value.listen_port) || value.listen_port < 1 ||
+      value.listen_port > 65535 || !canonicalSubnet(value.server_subnet) ||
+      !FINGERPRINT.test(fingerprint)) throw new Error("SETUP_UNAVAILABLE");
+  return { protocol: 1, action: "enroll_preview", writes: false, target,
+    container_id: value.container_id, image_id: value.image_id,
+    config_sha256: value.config_sha256, table_sha256: value.table_sha256,
+    configured_clients: value.configured_clients, vpn_protocol: value.protocol,
+    interface: value.interface, listen_port: value.listen_port,
+    server_subnet: value.server_subnet, host_key_fingerprint: fingerprint,
+    reverify_required: true };
+}
+
+function validateEnrollmentReview(value, target, fingerprint) {
+  if (!exactFields(value, ENROLL_PREVIEW_FIELDS) || value.protocol !== 1 ||
+      value.action !== "enroll_preview" || value.writes !== false ||
+      value.reverify_required !== true || value.target !== target ||
+      value.host_key_fingerprint !== fingerprint || !HEX_SHA.test(value.container_id) ||
+      !IMAGE_SHA.test(value.image_id) || !HEX_SHA.test(value.config_sha256) ||
+      !HEX_SHA.test(value.table_sha256) || !Number.isSafeInteger(value.configured_clients) ||
+      value.configured_clients < 0 || value.configured_clients > 4096 ||
+      value.vpn_protocol !== (target === "awg2" ? "amneziawg" : "wireguard") ||
+      value.interface !== (target === "awg2" ? "awg0" : "wg0") ||
+      !Number.isSafeInteger(value.listen_port) || value.listen_port < 1 ||
+      value.listen_port > 65535 || !canonicalSubnet(value.server_subnet)) {
+    throw new Error("INVALID_INPUT");
+  }
+  return value;
+}
+
+export function validateAmneziaEnrollment(value) {
+  const fields = ["username", "method", "fingerprint", "password", "private_key", "passphrase",
+    "target", "reviewed", "confirm"];
+  if (!exactFields(value, fields) || value.confirm !== "ENROLL_EXISTING_CONTAINER") {
+    throw new Error("INVALID_INPUT");
+  }
+  const selected = validateAmneziaPreview(Object.fromEntries(fields.slice(0, 7)
+    .map((key) => [key, value[key]])));
+  return { ...selected, reviewed: validateEnrollmentReview(value.reviewed, selected.target,
+    selected.login.fingerprint) };
 }
 
 export function validateTargetHostKey(value) {
@@ -805,78 +878,273 @@ export function issueGrant(raw, { clientFactory = () => new Client(), timeoutMs 
   });
 }
 
-export function previewAmneziaSetup(raw, { clientFactory = () => new Client(), timeoutMs = 60000 } = {}) {
-  const { login: value, target } = validateAmneziaPreview(raw);
+export async function previewAmneziaSetup(raw, options = {}) {
+  let selected;
+  try {
+    selected = validateAmneziaPreview(raw);
+    const login = { ...selected.login };
+    const exact = (login.username === "root" ? "" : "/usr/bin/sudo -n -- ") +
+      AMNEZIA_PREVIEW_COMMAND + selected.target;
+    return await executeFixedAmnezia(login, exact,
+      (output) => safeAmneziaPreview(output, selected.target), options);
+  } finally {
+    clearCredentials(selected?.login); clearCredentials(raw);
+  }
+}
+
+function executeFixedAmnezia(login, exact, parse, { clientFactory = () => new Client(),
+  timeoutMs = 60000, mutation = false } = {}) {
+  validateLogin(login);
   return new Promise((resolve, reject) => {
-    const client = clientFactory();
-    const privateKey = value.method === "private_key" ? Buffer.from(value.private_key, "utf8") : null;
+    const privateKey = login.method === "private_key" ? Buffer.from(login.private_key, "utf8") : null;
+    let client;
+    try { client = clientFactory(); }
+    catch {
+      privateKey?.fill(0); clearCredentials(login);
+      reject(new Error("SSH_UNAVAILABLE")); return;
+    }
+    const output = Buffer.alloc(MAX_AMNEZIA_PREVIEW_OUTPUT);
+    let bytes = 0;
     let settled = false;
     let keyChanged = false;
+    let keyVerified = false;
+    let authenticated = false;
+    let commandStarted = false;
+    let keyboardAnswered = false;
+    let stream;
+    const failure = () => commandStarted && mutation ? "SETUP_UNCERTAIN" :
+      authenticated ? "SETUP_UNAVAILABLE" : keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE";
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      client.end();
-      privateKey?.fill(0);
-      value.password = "";
-      value.private_key = "";
-      value.passphrase = "";
-      if (error) reject(error);
-      else resolve(result);
+      try { stream?.close?.(); } catch { /* The channel may already have closed. */ }
+      try { client.end(); } catch { /* A broken SSH socket must not retain secrets. */ }
+      if (error) try { client.destroy?.(); } catch { /* Best effort. */ }
+      privateKey?.fill(0); output.fill(0); clearCredentials(login);
+      if (error) reject(error); else resolve(result);
     };
-    const timer = setTimeout(() => finish(new Error("SSH_UNAVAILABLE")), timeoutMs);
-    client.on("error", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" : "AUTH_FAILED")));
-    client.on("close", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" : "AUTH_FAILED")));
-    if (value.method === "password") {
+    const timer = setTimeout(() => finish(new Error(failure())), timeoutMs);
+    client.on("error", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" : failure())));
+    client.on("close", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" : failure())));
+    if (login.method === "password") {
       client.on("keyboard-interactive", (_name, _instructions, _language, prompts, done) => {
-        done(prompts.length === 1 && prompts[0].echo === false ? [value.password] : []);
+        const accepted = !keyboardAnswered && Array.isArray(prompts) && prompts.length === 1 &&
+          prompts[0]?.echo === false && passwordChallenge(prompts[0].prompt);
+        if (accepted) keyboardAnswered = true;
+        done(accepted ? [login.password] : []);
       });
     }
     client.on("ready", () => {
-      const exact = AMNEZIA_PREVIEW_COMMAND + target;
-      const command = value.username === "root" ? exact : "/usr/bin/sudo -n -- " + exact;
-      client.exec(command, { pty: false }, (error, stream) => {
-        if (settled) { stream?.close?.(); return; }
-        if (error) { finish(new Error("SETUP_UNAVAILABLE")); return; }
-        let output = Buffer.alloc(0);
+      authenticated = true;
+      try { client.exec(exact, { pty: false }, (error, channel) => {
+        if (settled) { channel?.close?.(); return; }
+        if (error || !channel) { finish(new Error("SETUP_UNAVAILABLE")); return; }
+        stream = channel;
+        commandStarted = true;
         let stderrBytes = 0;
         stream.stderr.on("data", (chunk) => {
-          stderrBytes += chunk.length;
-          if (stderrBytes > 1024) {
-            stream.close?.();
-            finish(new Error("SETUP_UNAVAILABLE"));
-          }
+          stderrBytes += Buffer.byteLength(chunk);
+          if (stderrBytes > 1024) finish(new Error(failure()));
         });
         stream.on("data", (chunk) => {
           if (settled) return;
-          if (output.length + chunk.length > MAX_AMNEZIA_PREVIEW_OUTPUT) {
-            stream.close?.();
-            finish(new Error("SETUP_UNAVAILABLE"));
-          } else output = Buffer.concat([output, chunk]);
+          const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (bytes + piece.length > output.length) finish(new Error(failure()));
+          else { piece.copy(output, bytes); bytes += piece.length; }
         });
+        stream.on("error", () => finish(new Error(failure())));
         stream.on("close", (code, signal) => {
           if (settled) return;
-          if (code !== 0 || signal) { finish(new Error("SETUP_UNAVAILABLE")); return; }
-          try { finish(null, safeAmneziaPreview(output.toString("utf8"), target)); }
-          catch { finish(new Error("SETUP_UNAVAILABLE")); }
+          if (code !== 0 || signal) { finish(new Error(failure())); return; }
+          try { finish(null, parse(output.subarray(0, bytes).toString("utf8"))); }
+          catch { finish(new Error(failure())); }
         });
-      });
+      }); } catch { finish(new Error("SETUP_UNAVAILABLE")); }
     });
     try {
-      client.connect({ host: TARGET, port: PORT, username: value.username,
-        readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: value.method === "password",
-        ...(value.method === "password" ? { password: value.password } :
-          { privateKey, passphrase: value.passphrase || undefined }),
+      client.connect({ host: TARGET, port: PORT, username: login.username,
+        readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: login.method === "password",
+        ...(login.method === "password" ? { password: login.password } :
+          { privateKey, passphrase: login.passphrase || undefined }),
         hostVerifier: (key) => {
           try {
-            if (sameFingerprint(hostKey(key).fingerprint, value.fingerprint)) return true;
+            if (sameFingerprint(hostKey(key).fingerprint, login.fingerprint)) {
+              keyVerified = true; return true;
+            }
           } catch { /* Reject malformed host key. */ }
-          keyChanged = true;
-          return false;
+          keyChanged = true; return false;
         },
       });
     } catch { finish(new Error("SSH_UNAVAILABLE")); }
   });
+}
+
+function amneziaLogin(selected) {
+  return { ...selected.login };
+}
+
+function adminCommand(username, action, target, pins = null) {
+  // Every interpolated byte is validated as an enum or lowercase SHA-256 hex.
+  const prefix = "cd /opt/sovagrid-vpn && " +
+    (username === "root" ? "" : "/usr/bin/sudo -n -- ") + AMNEZIA_ADMIN_COMMAND;
+  if (action === "enroll-preview") return prefix + "enroll-preview " + target;
+  if (action === "enroll") return prefix + "enroll " + target +
+    " --confirm-container-id " + pins.container_id +
+    " --confirm-image-id " + pins.image_id +
+    " --confirm-config-sha256 " + pins.config_sha256 +
+    " --confirm-table-sha256 " + pins.table_sha256;
+  throw new Error("INVALID_INPUT");
+}
+
+async function enrollmentPreview(selected, options) {
+  // adminCommand includes its own fixed sudo prefix after the fixed cd.
+  const login = amneziaLogin(selected);
+  return executeFixedAmnezia(login, adminCommand(login.username, "enroll-preview", selected.target),
+    (raw) => safeAmneziaEnrollmentPreview(raw, selected.target, login.fingerprint), options);
+}
+
+export async function previewAmneziaEnrollment(raw, options = {}) {
+  let selected;
+  try {
+    selected = validateAmneziaPreview(raw);
+    return await enrollmentPreview(selected, options);
+  } finally {
+    clearCredentials(selected?.login); clearCredentials(raw);
+  }
+}
+
+function safeEnrollmentResult(raw, reviewed) {
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new Error("SETUP_UNCERTAIN"); }
+  if (!exactFields(value, ["target", "enrolled", "configured_clients"]) ||
+      value.target !== reviewed.target || value.enrolled !== true ||
+      value.configured_clients !== reviewed.configured_clients) throw new Error("SETUP_UNCERTAIN");
+  return value;
+}
+
+export async function enrollAmneziaSetup(raw, { recheckAdmin = async () => {}, ...options } = {}) {
+  let selected;
+  try {
+    selected = validateAmneziaEnrollment(raw);
+    const fresh = await enrollmentPreview(selected, options);
+    if (ENROLL_PREVIEW_FIELDS.some((key) => fresh[key] !== selected.reviewed[key])) {
+      throw new Error("SETUP_CHANGED");
+    }
+    await recheckAdmin();
+    const login = amneziaLogin(selected);
+    await executeFixedAmnezia(login, adminCommand(login.username, "enroll", selected.target,
+      selected.reviewed), (output) => safeEnrollmentResult(output, selected.reviewed),
+    { ...options, timeoutMs: options.timeoutMs ?? 120000, mutation: true });
+    const statusInput = { ...selected.login, target: selected.target };
+    let after;
+    try { after = await previewAmneziaSetup(statusInput, options); }
+    catch { throw new Error("SETUP_UNCERTAIN"); }
+    finally { clearCredentials(statusInput); }
+    if (!after.enrolled || after.container_id !== selected.reviewed.container_id) {
+      throw new Error("SETUP_UNCERTAIN");
+    }
+    return { protocol: 1, action: "enrolled", target: selected.target, enrolled: true,
+      container_id: after.container_id, configured_clients: after.configured_clients,
+      setup: after };
+  } finally {
+    clearCredentials(selected?.login); clearCredentials(raw);
+  }
+}
+
+const SETUP_REVIEW_FIELDS = ["protocol", "target", "enrolled", "marker", "other_marker",
+  "socket_active", "service_active", "installer_ready", "installed_current", "can_arm",
+  "container_id", "configured_clients", "owned_clients"];
+
+export function validateAmneziaSetupAction(raw, action) {
+  const fields = ["username", "method", "fingerprint", "password", "private_key", "passphrase",
+    "target", "reviewed", "confirm"];
+  if (!["install", "arm"].includes(action) || !exactFields(raw, fields)) {
+    throw new Error("INVALID_INPUT");
+  }
+  const selected = validateAmneziaPreview(Object.fromEntries(fields.slice(0, 7)
+    .map((key) => [key, raw[key]])));
+  const value = raw.reviewed;
+  if (raw.confirm !== (action === "install" ? "INSTALL_AMNEZIA_BROKER" :
+      AMNEZIA_CONFIRM[selected.target]) || !exactFields(value, SETUP_REVIEW_FIELDS) ||
+      value.protocol !== 1 || value.target !== selected.target || value.enrolled !== true ||
+      !HEX_SHA.test(value.container_id) || !["absent", "valid", "unsafe"].includes(value.marker) ||
+      !["absent", "valid", "unsafe"].includes(value.other_marker) ||
+      ["socket_active", "service_active", "installer_ready", "installed_current", "can_arm"]
+        .some((key) => typeof value[key] !== "boolean") ||
+      !Number.isSafeInteger(value.configured_clients) || value.configured_clients < 0 ||
+      value.configured_clients > 100000 || !Number.isSafeInteger(value.owned_clients) ||
+      value.owned_clients < 0 || value.owned_clients > value.configured_clients ||
+      (action === "install" && (!value.installer_ready || value.installed_current ||
+        value.marker !== "absent" || value.other_marker !== "absent" ||
+        value.socket_active || value.service_active)) ||
+      (action === "arm" && (!value.can_arm || !value.installed_current ||
+        value.marker !== "absent"))) {
+    throw new Error("INVALID_INPUT");
+  }
+  return { ...selected, reviewed: value };
+}
+
+function setupReadInput(selected) {
+  return { ...selected.login, target: selected.target };
+}
+
+async function setupPreview(selected, options) {
+  const input = setupReadInput(selected);
+  try { return await previewAmneziaSetup(input, options); }
+  finally { clearCredentials(input); }
+}
+
+function sameSetupReview(current, reviewed) {
+  return SETUP_REVIEW_FIELDS.every((key) => current[key] === reviewed[key]);
+}
+
+function safeControlResult(raw, action, target) {
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new Error("SETUP_UNCERTAIN"); }
+  if (action === "install" && exactFields(value,
+    ["action", "socket_active", "marker", "target_changed"]) &&
+      value.action === "installed" && value.socket_active === false &&
+      value.marker === "absent" && value.target_changed === false) return value;
+  if (action === "arm" && exactFields(value,
+    ["action", "socket_active", "marker", "selected_target", "target_changed"]) &&
+      value.action === "armed" && value.socket_active === true &&
+      value.marker === "valid" && value.selected_target === target &&
+      value.target_changed === false) return value;
+  throw new Error("SETUP_UNCERTAIN");
+}
+
+export async function mutateAmneziaSetup(raw, action,
+  { recheckAdmin = async () => {}, ...options } = {}) {
+  let selected;
+  try {
+    selected = validateAmneziaSetupAction(raw, action);
+    const fresh = await setupPreview(selected, options);
+    if (!sameSetupReview(fresh, selected.reviewed)) throw new Error("SETUP_CHANGED");
+    await recheckAdmin();
+    const suffix = action === "install" ? "install" : "arm --target " + selected.target +
+      " --confirm-container-id " + selected.reviewed.container_id +
+      " --confirm-maintenance-window " + AMNEZIA_CONFIRM[selected.target];
+    const login = amneziaLogin(selected);
+    const exact = (login.username === "root" ? "" : "/usr/bin/sudo -n -- ") +
+      AMNEZIA_CONTROL_COMMAND + suffix;
+    await executeFixedAmnezia(login, exact,
+      (output) => safeControlResult(output, action, selected.target),
+      { ...options, timeoutMs: options.timeoutMs ?? 150000, mutation: true });
+    let after;
+    try { after = await setupPreview(selected, options); }
+    catch { throw new Error("SETUP_UNCERTAIN"); }
+    if (after.container_id !== selected.reviewed.container_id ||
+        (action === "install" && !after.installed_current) ||
+        (action === "arm" && (after.marker !== "valid" || !after.socket_active ||
+          !after.enrolled))) {
+      throw new Error("SETUP_UNCERTAIN");
+    }
+    return { protocol: 1, action: action === "install" ? "installed" : "armed",
+      target: selected.target, setup: after };
+  } finally {
+    clearCredentials(selected?.login); clearCredentials(raw);
+  }
 }
 
 class WindowLimit {
@@ -939,7 +1207,9 @@ async function body(req) {
 
 export function createHandler({ inspect = inspectHostKey, inspectTarget = inspectTargetHostKey,
   targetStatus = probeTargetStatus, login = issueGrant,
-  preview = previewAmneziaSetup, installPreview = previewTargetInstall,
+  preview = previewAmneziaSetup, enrollPreview = previewAmneziaEnrollment,
+  enroll = enrollAmneziaSetup, vpnMutate = mutateAmneziaSetup,
+  installPreview = previewTargetInstall,
   agent = proxyAgent, admin = requireUnrestrictedAdmin } = {}) {
   const probes = new WindowLimit(20, 60);
   const reads = new WindowLimit(60, 60);
@@ -954,15 +1224,15 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const host = req.headers.host;
     const proto = req.headers["x-forwarded-proto"];
     const address = req.headers["x-sovagrid-client-ip"];
-    const isPreview = req.url === "/api/v1/browser-ssh/vpn-setup/preview";
+    const vpnAction = /^\/api\/v1\/browser-ssh\/vpn-setup\/(preview|enroll-preview|enroll|install|arm)$/.exec(req.url || "")?.[1];
     const isTargetProbe = req.url === "/api/v1/browser-ssh/target-host-key";
     const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
     const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
     const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
-    const isAdminRoute = isPreview || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction);
+    const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
-        "/api/v1/browser-ssh/vpn-setup/preview", "/api/v1/browser-ssh/target-host-key",
-        "/api/v1/browser-ssh/target-status", "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction) ||
+        "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -972,7 +1242,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : isAgentRead ? reads : attempts).take(address)) {
+    if (!(isProbe ? probes : isAgentRead || ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
+      .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
       return;
     }
@@ -1006,8 +1277,16 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
             throw new Error("INVALID_INPUT");
           }
           json(res, 200, await inspect());
-        } else if (isPreview) {
+        } else if (vpnAction === "preview") {
           json(res, 200, await preview(value));
+        } else if (vpnAction === "enroll-preview") {
+          json(res, 200, await enrollPreview(value));
+        } else if (vpnAction === "enroll") {
+          json(res, 200, await enroll(value,
+            { recheckAdmin: () => admin(req.headers.authorization) }));
+        } else if (vpnAction === "install" || vpnAction === "arm") {
+          json(res, 200, await vpnMutate(value, vpnAction,
+            { recheckAdmin: () => admin(req.headers.authorization) }));
         } else {
           json(res, 200, await login(value));
         }
@@ -1018,11 +1297,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       if (res.destroyed) return;
       const code = ["INVALID_INPUT", "SSH_UNAVAILABLE", "HOST_KEY_CHANGED", "AUTH_FAILED",
         "GRANT_UNAVAILABLE", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE",
-        "SETUP_UNAVAILABLE", "STATUS_UNAVAILABLE", "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD",
+        "SETUP_UNAVAILABLE", "SETUP_CHANGED", "SETUP_UNCERTAIN", "STATUS_UNAVAILABLE",
+        "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD",
         ...AGENT_ERRORS]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
       const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") ? 400 :
-        ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "STALE_REVISION", "RESUME_REQUIRED",
+        ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "SETUP_CHANGED", "STALE_REVISION", "RESUME_REQUIRED",
           "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY"].includes(code) ? 409 :
         code === "NOT_FOUND" ? 404 :
         code === "UNSUPPORTED_AUTH_METHOD" ? 422 :
