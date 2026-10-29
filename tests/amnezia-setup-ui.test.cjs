@@ -41,8 +41,11 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
       setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     fetch: async (path, options) => {
       calls.push({ path, options });
-      return { ok: true, status: 200, json: async () => path.endsWith('/host-key')
-        ? { protocol: 1, port: 22, key_type: 'ssh-ed25519', fingerprint } : previewReply };
+      const reply = path.endsWith('/host-key')
+        ? { protocol: 1, port: 22, key_type: 'ssh-ed25519', fingerprint }
+        : typeof previewReply === 'function' ? previewReply(path) : previewReply;
+      return { ok: !reply.__httpStatus, status: reply.__httpStatus || 200,
+        json: async () => reply.__httpStatus ? reply.body : reply };
     },
   });
   vm.runInContext(fs.readFileSync('app.js', 'utf8'), context);
@@ -185,4 +188,41 @@ test('malformed gateway preview is rejected without saving its fingerprint', asy
   assert.equal(h.element('amneziaSetupResult').hidden, true);
   assert.equal(h.storage.size, 0);
   assert.equal(h.element('amneziaSetupPassword').value, '');
+});
+
+test('failed or malformed repeat enrollment preview invalidates the earlier action card', async () => {
+  const enrollment = { protocol: 1, action: 'enroll_preview', writes: false,
+    target: 'awg2', container_id: 'a'.repeat(64), image_id: `sha256:${'b'.repeat(64)}`,
+    config_sha256: 'c'.repeat(64), table_sha256: 'd'.repeat(64),
+    configured_clients: 2, vpn_protocol: 'amneziawg', interface: 'awg0',
+    listen_port: 51820, server_subnet: '10.0.0.0/24',
+    host_key_fingerprint: FINGERPRINT, reverify_required: true };
+  for (const failure of [{ protocol: 1, action: 'enroll_preview' },
+    { __httpStatus: 503, body: { error: 'SETUP_UNAVAILABLE' } }]) {
+    let previews = 0;
+    const h = harness({ previewReply: (path) => {
+      if (path.endsWith('/vpn-setup/preview')) return preview();
+      if (path.endsWith('/vpn-setup/enroll-preview')) return ++previews === 1 ? enrollment : failure;
+      throw new Error(`Unexpected test request: ${path}`);
+    } });
+    await h.context.amneziaSetupInspect();
+    h.element('amneziaSetupTrust').checked = true;
+    h.element('amneziaSetupUsername').value = 'root';
+    h.element('amneziaSetupPassword').value = 'temporary-ssh-secret';
+    await h.context.amneziaSetupPreview({ preventDefault() {} });
+    h.element('amneziaSetupPassword').value = 'temporary-ssh-secret';
+    await h.context.amneziaSetupAction('enroll-preview');
+    assert.equal(h.element('amneziaSetupEnrollment').hidden, false);
+    assert.equal(h.element('amneziaSetupEnroll').disabled, false);
+    h.element('amneziaSetupPassword').value = 'temporary-ssh-secret';
+    await h.context.amneziaSetupAction('enroll-preview');
+    assert.equal(previews, 2);
+    assert.equal(h.element('amneziaSetupEnrollment').hidden, true);
+    assert.equal(h.element('amneziaSetupEnroll').disabled, true);
+    assert.equal(h.element('amneziaSetupEnrollmentSummary').textContent, '');
+    assert.equal(h.element('amneziaSetupEnrollmentPins').textContent, '');
+    assert.equal(h.element('amneziaSetupPassword').value, '');
+    assert.equal(h.calls.filter(({ path }) => path.endsWith('/vpn-setup/enroll')).length, 0);
+    assert.doesNotMatch(JSON.stringify([...h.storage.entries()]), /temporary-ssh-secret/);
+  }
 });
