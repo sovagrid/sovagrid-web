@@ -2535,11 +2535,12 @@ async function addServer(event) {
   finally { $("confirmAddButton").disabled = false; }
 }
 
-const serverSetup = { seq: 0, busy: false, phase: null, controller: null, mode: "ssh", reviewed: null, changedPin: false };
+const serverSetup = { seq: 0, busy: false, phase: null, controllers: new Set(), mode: "ssh",
+  reviewed: null, changedPin: false, kind: null, jobs: [], recovery: null, job: null, pollTimer: null };
 const serverSetupFingerprintPattern = /^SHA256:[A-Za-z0-9+/]{43}$/;
 const serverSetupUsernamePattern = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const serverSetupKinds = {
-  missing: ["SovaGrid не обнаружен", "Ubuntu доступна. Проверка ничего не установила и не добавила в панель. Автоматическая установка здесь пока недоступна."],
+  missing: ["SovaGrid не обнаружен", "Ubuntu доступна. Проверка ничего не установила и не добавила в панель. Ниже можно подготовить Agent."],
   managed: ["Найдена управляемая установка", "На Ubuntu обнаружена установка SovaGrid. Проверьте её принадлежность и подключение отдельно; этот запрос не добавил сервер в панель."],
   agent_only: ["Найден отдельный Agent", "На Ubuntu обнаружен Agent без полной установки Hub. Для подключения к этой панели потребуется отдельная регистрация."],
   conflict: ["Обнаружена конфликтующая установка", "На сервере есть неполные или несовместимые признаки SovaGrid. Ничего не изменено; проверьте его вручную."],
@@ -2574,6 +2575,57 @@ function serverSetupClearSecrets() {
 }
 function serverSetupClearError() { $("serverSetupError").textContent = ""; $("serverSetupError").hidden = true; }
 function serverSetupError(message) { $("serverSetupError").textContent = message; $("serverSetupError").hidden = false; }
+function serverSetupPhaseName(phase) {
+  return ({ prepared: "Пакет подготовлен", transport_ready: "Настроен защищённый канал",
+    registered: "Сервер зарегистрирован", active: "Agent запущен" })[phase] || "Проверяем состояние";
+}
+function serverSetupRenderJobs() {
+  const pending = serverSetup.jobs.filter((row) => row?.recoverable === true);
+  const select = $("serverSetupRecoverySelect");
+  const previous = serverSetup.recovery?.request_id || "";
+  if (!pending.length) {
+    select.replaceChildren?.();
+    select.value = "";
+    serverSetup.recovery = null;
+    $("serverSetupRecovery").hidden = true;
+    $("serverSetupRecoveryChoice").textContent = "";
+    return;
+  }
+  const prompt = document.createElement("option");
+  prompt.value = "";
+  prompt.textContent = "Выберите установку";
+  const options = pending.map((row) => {
+    const option = document.createElement("option");
+    option.value = row.request_id;
+    option.textContent = `${row.name} · ${serverSetupPhaseName(row.phase)} · ${row.request_id.slice(0, 8)}`;
+    return option;
+  });
+  select.replaceChildren(prompt, ...options);
+  if (pending.some((row) => row.request_id === previous)) select.value = previous;
+  else { select.value = ""; serverSetup.recovery = null; }
+  $("serverSetupRecovery").hidden = pending.length === 0;
+  $("serverSetupRecoveryChoice").textContent = serverSetup.recovery ?
+    `Выбрана «${serverSetup.recovery.name}». Введите тот же адрес и SSH-пользователя, затем сверьте ключ.` : "";
+}
+function serverSetupRenderJob() {
+  const job = serverSetup.job;
+  $("serverSetupJobReview").hidden = !job;
+  if (!job) return;
+  $("serverSetupJobName").textContent = job.name || "—";
+  $("serverSetupJobUbuntu").textContent = job.platform?.ubuntu_version || "—";
+  $("serverSetupJobHubFingerprint").textContent = job.hub_fingerprint || "—";
+  $("serverSetupJobSource").textContent = job.source_commits?.["sovagrid-agent"]?.slice(0, 12) || "—";
+  $("serverSetupJobId").textContent = job.request_id;
+  $("serverSetupJobStatus").textContent = job.phase === "active" ?
+    "Agent установлен и подключён. Сервер появится в списке после обновления панели." :
+    job.cleanup_required ? "Установка требует проверки и очистки перед повторной попыткой." :
+    `${serverSetupPhaseName(job.phase)}. Временный пакет на сервере уже записан; подтвердите запуск Agent или очистите подготовку.`;
+  $("serverSetupApplyConfirm").disabled = serverSetup.busy || job.phase === "active" || job.cleanup_required;
+  $("serverSetupApplyButton").disabled = serverSetup.busy || job.phase === "active" ||
+    job.cleanup_required || !$("serverSetupApplyConfirm").checked;
+  $("serverSetupApplyButton").textContent = serverSetup.phase === "apply" ? "Устанавливаем Agent…" : "4. Установить и подключить Agent";
+  $("serverSetupCleanupButton").disabled = serverSetup.busy || job.phase === "active";
+}
 function serverSetupRender() {
   const ssh = serverSetup.mode === "ssh";
   $("serverSetupSshPanel").hidden = !ssh;
@@ -2584,30 +2636,52 @@ function serverSetupRender() {
   $("serverSetupNotice").textContent = reason;
   $("serverSetupNotice").hidden = !reason;
   $("serverSetupReview").hidden = !serverSetup.reviewed;
-  $("serverSetupStatusForm").hidden = !ssh || !serverSetup.reviewed;
+  $("serverSetupStatusForm").hidden = !ssh || !serverSetup.reviewed || Boolean(serverSetup.job);
   $("serverSetupChangedKey").hidden = !serverSetup.changedPin;
   $("serverSetupReplaceKey").hidden = !serverSetup.changedPin;
   $("serverSetupKeyFields").hidden = !$("serverSetupAuthKey").checked;
   $("serverSetupPasswordFields").hidden = $("serverSetupAuthKey").checked;
-  $("serverSetupInspect").disabled = serverSetup.busy || !serverSetupAllowed();
+  $("serverSetupInspect").disabled = serverSetup.busy || Boolean(serverSetup.job) || !serverSetupAllowed();
   $("serverSetupInspect").textContent = serverSetup.phase === "inspect" ? "Проверяем SSH-ключ…" : "1. Проверить SSH-ключ";
-  $("serverSetupStatusButton").disabled = serverSetup.busy || !serverSetupAllowed() ||
+  $("serverSetupStatusButton").disabled = serverSetup.busy || Boolean(serverSetup.job) || !serverSetupAllowed() ||
     !serverSetup.reviewed || serverSetup.changedPin || !$("serverSetupTrust").checked;
   $("serverSetupStatusButton").textContent = serverSetup.phase === "status" ?
     "Проверяем состояние…" : "2. Проверить состояние без изменений";
+  $("serverSetupInstallPanel").hidden = !ssh || !serverSetup.reviewed || serverSetup.changedPin ||
+    !$("serverSetupTrust").checked || (!serverSetup.recovery && serverSetup.kind !== "missing") || Boolean(serverSetup.job);
+  $("serverSetupInstallFields").hidden = Boolean(serverSetup.recovery);
+  $("serverSetupInstallHeading").textContent = serverSetup.recovery ? "Возобновить установку" : "Установить Agent на этот сервер";
+  $("serverSetupInstallIntro").textContent = serverSetup.recovery ?
+    "Введите SSH-данные заново. Будет проверена прежняя запись, ключ сервера и временный пакет. Agent не запустится до отдельного подтверждения." :
+    "Для установки снова введите SSH-пароль или выберите ключ выше. Сначала проверим связь без изменений, затем запишем временный пакет для отдельного подтверждения.";
+  $("serverSetupPrepareButton").disabled = serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed ||
+    serverSetup.changedPin || !$("serverSetupTrust").checked;
+  $("serverSetupPrepareButton").textContent = serverSetup.phase === "prepare" || serverSetup.phase === "resume" ?
+    "Подготавливаем установку…" : serverSetup.recovery ? "Проверить и восстановить" : "3. Проверить связь и подготовить установку";
+  $("serverSetupReloadJobs").disabled = serverSetup.busy;
+  $("serverSetupRecoverySelect").disabled = serverSetup.busy || Boolean(serverSetup.job);
+  $("serverSetupInterruptButton").hidden = !["prepare", "resume", "apply", "cleanup"].includes(serverSetup.phase);
+  serverSetupRenderJob();
   for (const id of ["serverSetupHost", "serverSetupPort", "serverSetupUsername", "serverSetupAuthPassword",
     "serverSetupAuthKey", "serverSetupPassword", "serverSetupPrivateKey", "serverSetupPassphrase"]) {
-    $(id).disabled = serverSetup.busy;
+    $(id).disabled = serverSetup.busy || Boolean(serverSetup.job);
   }
+  for (const id of ["serverSetupInstallName", "serverSetupHubHost", "serverSetupHubPort", "serverSetupLocalPort"])
+    $(id).disabled = serverSetup.busy;
 }
 function serverSetupInvalidate() {
   serverSetup.seq++;
-  serverSetup.controller?.abort();
-  serverSetup.controller = null;
+  for (const controller of serverSetup.controllers) controller.abort();
+  serverSetup.controllers.clear();
+  if (serverSetup.pollTimer) clearInterval(serverSetup.pollTimer);
+  serverSetup.pollTimer = null;
   serverSetup.busy = false;
   serverSetup.phase = null;
   serverSetup.reviewed = null;
   serverSetup.changedPin = false;
+  serverSetup.kind = null;
+  serverSetup.job = null;
+  $("serverSetupApplyConfirm").checked = false;
   $("serverSetupTrust").checked = false;
   $("serverSetupResult").hidden = true;
   serverSetupClearSecrets();
@@ -2617,11 +2691,18 @@ function serverSetupInvalidate() {
 function serverSetupReset() {
   serverSetupInvalidate();
   serverSetup.mode = "ssh";
+  serverSetup.jobs = [];
+  serverSetup.recovery = null;
+  serverSetupRenderJobs();
   $("serverSetupHost").value = "";
   $("serverSetupPort").value = "22";
   $("serverSetupUsername").value = "";
   $("serverSetupAuthPassword").checked = true;
   $("serverSetupAuthKey").checked = false;
+  $("serverSetupInstallName").value = "";
+  $("serverSetupHubHost").value = /^(?:[0-9.]+|[0-9a-f:]+)$/i.test(location.hostname) && !isLoopback(location) ? location.hostname : "";
+  $("serverSetupHubPort").value = "22";
+  $("serverSetupLocalPort").value = "18767";
   serverSetupRender();
 }
 function serverSetupMode(mode) {
@@ -2652,14 +2733,24 @@ function serverSetupExplain(error) {
   if (code === "BUSY") return "SSH-шлюз занят. Попробуйте позже.";
   if (code === "STATUS_UNAVAILABLE") return "SSH-вход выполнен, но прочитать состояние Ubuntu не удалось.";
   if (code === "SSH_UNAVAILABLE") return "SSH-сервер не ответил. Проверьте адрес, порт и доступность из сети Hub.";
+  if (code === "INSTALLER_UNAVAILABLE") return "Установщик Agent на этом Hub пока недоступен. Обновите серверную часть и повторите запрос.";
+  if (code === "ROUTE_UNAVAILABLE") return "Не удалось проверить путь от нового сервера до SSH-порта Hub.";
+  if (code === "RECOVERY_REQUIRED") return "Есть незавершённая установка. Выберите её в списке выше, восстановите или очистите.";
+  if (code === "RESUME_REQUIRED") return "Нужен повторный SSH-вход для этой установки. Выберите запись выше и введите данные заново.";
+  if (code === "HOST_KEY_MISMATCH" || code === "TARGET_CHANGED") return "Сервер или его SSH-ключ не совпал с исходной установкой. Проверьте выбранную запись и адрес.";
+  if (code === "STALE_REVISION") return "Состояние установки изменилось. Обновите запись перед следующим действием.";
+  if (code === "PREPARE_UNCERTAIN" || code === "APPLY_UNCERTAIN" ||
+      code === "RESUME_UNCERTAIN" || code === "CLEANUP_UNCERTAIN")
+    return "Связь прервалась, состояние установки неясно. Обновите список и восстановите запись по ID; не начинайте новую установку.";
+  if (code === "SOURCE_UNTRUSTED") return "Проверенный пакет на Hub недоступен или изменился. Обновите серверную часть.";
   if (error?.status === 404 || error?.status === 502) return "Проверка второго сервера ещё не включена на этом Hub. Обновите серверную часть.";
   if (code === "SSH_TIMEOUT") return "SSH-сервер не ответил вовремя.";
-  return "Не удалось проверить сервер. Ничего не изменено.";
+  return "Не удалось выполнить запрос. Обновите состояние установки перед повтором.";
 }
 async function serverSetupApi(path, value, timeoutMs, seq) {
   if (!serverSetupAllowed() || !$("addServerDialog").open || seq !== serverSetup.seq) throw new Error("STALE_REQUEST");
   const controller = new AbortController();
-  serverSetup.controller = controller;
+  serverSetup.controllers.add(controller);
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const body = JSON.stringify(value);
   for (const key of ["password", "private_key", "passphrase"]) if (Object.hasOwn(value, key)) value[key] = "";
@@ -2673,13 +2764,14 @@ async function serverSetupApi(path, value, timeoutMs, seq) {
     if (!response.ok) {
       const failure = new Error(typeof payload?.error === "string" ? payload.error : "SSH_UNAVAILABLE");
       failure.status = response.status;
+      if (typeof payload?.request_id === "string") failure.requestId = payload.request_id;
       throw failure;
     }
     return payload;
   } catch (error) {
     if (error.name === "AbortError") throw new Error("SSH_TIMEOUT");
     throw error;
-  } finally { clearTimeout(timer); if (serverSetup.controller === controller) serverSetup.controller = null; }
+  } finally { clearTimeout(timer); serverSetup.controllers.delete(controller); }
 }
 async function serverSetupInspect() {
   if (serverSetup.busy) return;
@@ -2716,7 +2808,7 @@ async function serverSetupInspect() {
   }
 }
 function serverSetupCredentialsChanged(clearOther = false) {
-  $("serverSetupResult").hidden = true;
+  if (serverSetup.kind !== "missing" && !serverSetup.recovery) $("serverSetupResult").hidden = true;
   if (serverSetup.busy) { serverSetupInvalidate(); return; }
   if (clearOther) serverSetupClearSecrets();
   serverSetupRender();
@@ -2777,6 +2869,9 @@ async function serverSetupStatus(event) {
         reply.port !== reviewed.port || reply.host_key_fingerprint !== reviewed.fingerprint ||
         !Object.hasOwn(serverSetupKinds, reply.kind)) throw new Error("INVALID_RESPONSE");
     serverSetupSavePin(reviewed.host, reviewed.port, reviewed.fingerprint);
+    serverSetup.kind = reply.kind;
+    if (reply.kind === "missing" && !$("serverSetupInstallName").value)
+      $("serverSetupInstallName").value = reviewed.host.slice(0, 80);
     $("serverSetupResultTitle").textContent = serverSetupKinds[reply.kind][0];
     $("serverSetupResultText").textContent = serverSetupKinds[reply.kind][1];
     $("serverSetupResult").hidden = false;
@@ -2797,10 +2892,237 @@ async function serverSetupStatus(event) {
     }
   }
 }
+async function serverSetupLoadJobs() {
+  if (!serverSetupAllowed() || !$("addServerDialog").open) return;
+  const seq = serverSetup.seq;
+  try {
+    const rows = await serverSetupApi("/api/v1/browser-ssh/agent/list", {}, 12000, seq);
+    if (seq !== serverSetup.seq || !Array.isArray(rows)) return;
+    serverSetup.jobs = rows.filter((row) => row && typeof row.request_id === "string" &&
+      typeof row.name === "string" && typeof row.phase === "string");
+    serverSetupRenderJobs();
+    serverSetupRender();
+  } catch { /* The SSH status check remains usable before a worker is installed. */ }
+}
+function serverSetupSelectRecovery() {
+  const selected = $("serverSetupRecoverySelect").value;
+  serverSetup.recovery = serverSetup.jobs.find((row) => row.request_id === selected && row.recoverable) || null;
+  serverSetup.job = null;
+  serverSetup.kind = null;
+  $("serverSetupResult").hidden = true;
+  $("serverSetupApplyConfirm").checked = false;
+  serverSetupRenderJobs();
+  serverSetupRender();
+}
+function serverSetupJobPreviewValid(reply) {
+  return reply?.protocol === 1 && /^[0-9a-f-]{36}$/.test(reply.request_id || "") &&
+    Number.isSafeInteger(reply.revision) && reply.revision >= 1 &&
+    ["prepared", "transport_ready", "registered", "active"].includes(reply.phase) &&
+    reply.writes === true && reply.activation_writes === false &&
+    typeof reply.hub_fingerprint === "string" && serverSetupFingerprintPattern.test(reply.hub_fingerprint) &&
+    typeof reply.platform?.ubuntu_version === "string" &&
+    /^[0-9a-f]{40}$/.test(reply.source_commits?.["sovagrid-agent"] || "");
+}
+async function serverSetupReadCredentials(seq, reviewed) {
+  const target = serverSetupTarget();
+  if (target.host !== reviewed.host || target.port !== reviewed.port ||
+      !$("serverSetupTrust").checked || serverSetup.changedPin)
+    throw new Error("STALE_REQUEST");
+  const username = $("serverSetupUsername").value.trim();
+  const method = $("serverSetupAuthKey").checked ? "private_key" : "password";
+  if (!serverSetupUsernamePattern.test(username)) throw new Error("INVALID_USERNAME");
+  if (username !== "root") throw new Error("ROOT_REQUIRED");
+  let password = "", private_key = "", passphrase = "";
+  const file = method === "private_key" ? $("serverSetupPrivateKey").files?.[0] : null;
+  try {
+    if (method === "private_key") {
+      if (!file || file.size < 1 || file.size > 65536) throw new Error("INVALID_KEY");
+      try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
+      passphrase = $("serverSetupPassphrase").value;
+      if (!private_key || new TextEncoder().encode(private_key).length > 65536 || passphrase.length > 1024)
+        throw new Error("INVALID_KEY");
+    } else {
+      password = $("serverSetupPassword").value;
+      if (!password || password.length > 1024) throw new Error("PASSWORD_INVALID");
+    }
+    const currentMethod = $("serverSetupAuthKey").checked ? "private_key" : "password";
+    if (seq !== serverSetup.seq || !$("addServerDialog").open || !serverSetupAllowed() ||
+        !$("serverSetupTrust").checked || serverSetup.changedPin ||
+        $("serverSetupUsername").value.trim() !== username ||
+        currentMethod !== method ||
+        (method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file))
+      throw new Error("STALE_REQUEST");
+    return { host: reviewed.host, port: reviewed.port, username, method,
+      fingerprint: reviewed.fingerprint, password, private_key, passphrase };
+  } finally {
+    serverSetupClearSecrets();
+    password = private_key = passphrase = "";
+  }
+}
+function serverSetupInstallFields() {
+  const name = $("serverSetupInstallName").value.trim();
+  const hub_host = $("serverSetupHubHost").value.trim();
+  const hub_port = Number($("serverSetupHubPort").value);
+  const local_port = Number($("serverSetupLocalPort").value);
+  if (!name || name.length > 80 || /[\r\n\x00-\x1f]/.test(name)) throw new Error("INVALID_NAME");
+  if (!hub_host || hub_host.length > 45 || !/^[0-9a-fA-F:.]+$/.test(hub_host) ||
+      !Number.isSafeInteger(hub_port) || hub_port < 1 || hub_port > 65535 ||
+      !Number.isSafeInteger(local_port) || local_port < 1024 || local_port > 65535)
+    throw new Error("INVALID_ENDPOINT");
+  return { name, hub_host, hub_port, local_port };
+}
+async function serverSetupPrepare() {
+  if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed ||
+      !$("serverSetupTrust").checked || serverSetup.changedPin || serverSetup.job) return;
+  const recovery = serverSetup.recovery;
+  if (!recovery && serverSetup.kind !== "missing") return;
+  let fields;
+  try { fields = recovery ? null : serverSetupInstallFields(); }
+  catch (error) {
+    serverSetupError(error.message === "INVALID_NAME" ? "Введите короткое название сервера." :
+      "Укажите IP и SSH-порт Hub, доступные новому серверу, и локальный порт Agent.");
+    return;
+  }
+  const reviewed = { ...serverSetup.reviewed };
+  const seq = ++serverSetup.seq;
+  const token = state.token;
+  serverSetup.busy = true;
+  serverSetup.phase = recovery ? "resume" : "prepare";
+  serverSetupClearError();
+  serverSetupRender();
+  let ssh;
+  try {
+    ssh = await serverSetupReadCredentials(seq, reviewed);
+    if (seq !== serverSetup.seq || state.token !== token) throw new Error("STALE_REQUEST");
+    if (recovery) {
+      const reply = await serverSetupApi("/api/v1/browser-ssh/agent/resume",
+        { request_id: recovery.request_id, ...ssh }, 720000, seq);
+      if (seq !== serverSetup.seq || state.token !== token) return;
+      if (!serverSetupJobPreviewValid(reply) || reply.request_id !== recovery.request_id)
+        throw new Error("INVALID_RESPONSE");
+      serverSetup.job = reply;
+    } else {
+      const payload = { ...ssh, ...fields };
+      const preview = await serverSetupApi("/api/v1/browser-ssh/target-install-preview",
+        { ...payload }, 45000, seq);
+      if (seq !== serverSetup.seq || state.token !== token) return;
+      if (preview?.protocol !== 1 || preview.action !== "install_preview" ||
+          preview.host !== reviewed.host || preview.port !== reviewed.port ||
+          preview.host_key_fingerprint !== reviewed.fingerprint || preview.writes !== false)
+        throw new Error("INVALID_RESPONSE");
+      if (preview.target_kind !== "missing" || preview.hub_route !== "reachable" ||
+          preview.preflight_passed !== true)
+        throw new Error(preview.hub_route === "unreachable" ? "HUB_ROUTE_BLOCKED" : "TARGET_NOT_EMPTY");
+      const reply = await serverSetupApi("/api/v1/browser-ssh/agent/prepare", payload, 720000, seq);
+      if (seq !== serverSetup.seq || state.token !== token) return;
+      if (!serverSetupJobPreviewValid(reply)) throw new Error("INVALID_RESPONSE");
+      serverSetup.job = reply;
+    }
+    $("serverSetupApplyConfirm").checked = false;
+    $("serverSetupResult").hidden = true;
+    await serverSetupLoadJobs();
+  } catch (error) {
+    if (seq === serverSetup.seq) {
+      if (error.message === "HOST_KEY_CHANGED") serverSetupInvalidate();
+      const guidance = error.message === "INVALID_USERNAME" ? "Введите пользователя SSH без пробелов." :
+        error.message === "ROOT_REQUIRED" ? "Для автоматической установки нужен SSH-вход пользователя root." :
+        error.message === "INVALID_KEY" || error.message === "FILE_READ_FAILED" ? "Выберите читаемый приватный ключ до 64 КиБ и проверьте парольную фразу." :
+        error.message === "PASSWORD_INVALID" ? "Введите пароль SSH длиной до 1024 символов." :
+        error.message === "HUB_ROUTE_BLOCKED" ? "Новый сервер не может подключиться к SSH-порту Hub. Проверьте IP, порт и сеть." :
+        error.message === "TARGET_NOT_EMPTY" ? "На сервере найдена существующая или конфликтующая установка. Выберите её в списке восстановления либо проверьте вручную." :
+        serverSetupExplain(error);
+      serverSetupError(error.requestId ? `${guidance} ID: ${error.requestId}` : guidance);
+      void serverSetupLoadJobs();
+    }
+  } finally {
+    if (ssh) for (const key of ["password", "private_key", "passphrase"]) ssh[key] = "";
+    if (seq === serverSetup.seq) {
+      serverSetupClearSecrets(); serverSetup.busy = false; serverSetup.phase = null; serverSetupRender();
+    }
+  }
+}
+async function serverSetupPollStatus(seq, requestId) {
+  if (seq !== serverSetup.seq || !serverSetup.busy || !serverSetup.job) return;
+  try {
+    const row = await serverSetupApi("/api/v1/browser-ssh/agent/status",
+      { request_id: requestId }, 12000, seq);
+    if (seq !== serverSetup.seq || row?.request_id !== requestId) return;
+    serverSetup.job = { ...serverSetup.job, ...row };
+    serverSetupRenderJob();
+  } catch { /* The original operation still owns the result; recovery remains available. */ }
+}
+async function serverSetupApply() {
+  const job = serverSetup.job;
+  if (serverSetup.busy || !job || job.phase === "active" || job.cleanup_required ||
+      !$("serverSetupApplyConfirm").checked || !serverSetupAllowed()) return;
+  const seq = ++serverSetup.seq;
+  serverSetup.busy = true;
+  serverSetup.phase = "apply";
+  serverSetupClearError();
+  serverSetupRender();
+  serverSetup.pollTimer = setInterval(() => { void serverSetupPollStatus(seq, job.request_id); }, 5000);
+  try {
+    const reply = await serverSetupApi("/api/v1/browser-ssh/agent/apply",
+      { request_id: job.request_id, expected_revision: job.revision }, 720000, seq);
+    if (seq !== serverSetup.seq || reply?.request_id !== job.request_id) return;
+    serverSetup.job = { ...serverSetup.job, ...reply };
+    if (reply.phase === "active") void refresh();
+  } catch (error) {
+    if (seq === serverSetup.seq) {
+      serverSetupError(serverSetupExplain(error));
+      void serverSetupPollStatus(seq, job.request_id);
+    }
+  } finally {
+    if (serverSetup.pollTimer) clearInterval(serverSetup.pollTimer);
+    serverSetup.pollTimer = null;
+    if (seq === serverSetup.seq) { serverSetup.busy = false; serverSetup.phase = null; serverSetupRender(); }
+  }
+}
+async function serverSetupCleanup() {
+  const job = serverSetup.job;
+  if (serverSetup.busy || !job || job.phase === "active" || !serverSetupAllowed() ||
+      !globalThis.confirm?.("Очистить временный пакет и незавершённую регистрацию этого Agent?")) return;
+  const seq = ++serverSetup.seq;
+  serverSetup.busy = true;
+  serverSetup.phase = "cleanup";
+  serverSetupClearError();
+  serverSetupRender();
+  try {
+    const reply = await serverSetupApi("/api/v1/browser-ssh/agent/cleanup",
+      { request_id: job.request_id, expected_revision: job.revision }, 720000, seq);
+    if (seq !== serverSetup.seq || reply?.request_id !== job.request_id) return;
+    if (reply.removed === true) {
+      serverSetup.job = null;
+      serverSetup.recovery = null;
+      serverSetup.kind = null;
+      $("serverSetupResultTitle").textContent = "Подготовка очищена";
+      $("serverSetupResultText").textContent = "Временный пакет и запись незавершённой установки удалены. Другие серверы не изменены.";
+      $("serverSetupResult").hidden = false;
+      void serverSetupLoadJobs();
+    } else serverSetup.job = { ...serverSetup.job, ...reply };
+  } catch (error) {
+    if (seq === serverSetup.seq) serverSetupError(serverSetupExplain(error));
+  } finally {
+    if (seq === serverSetup.seq) { serverSetup.busy = false; serverSetup.phase = null; serverSetupRender(); }
+  }
+}
+async function serverSetupInterrupt() {
+  if (!serverSetup.busy || !serverSetupAllowed()) return;
+  const seq = serverSetup.seq;
+  try {
+    const reply = await serverSetupApi("/api/v1/browser-ssh/agent/interrupt",
+      serverSetup.job ? { request_id: serverSetup.job.request_id } : {}, 12000, seq);
+    if (seq === serverSetup.seq && reply?.cancel_requested === true)
+      serverSetupError("Остановка запрошена. Проверьте состояние установки и при необходимости очистите её.");
+  } catch (error) {
+    if (seq === serverSetup.seq) serverSetupError(serverSetupExplain(error));
+  }
+}
 function openAddServer() {
   clearError($("addServerError"));
   $("addServerDialog").showModal();
   serverSetupReset();
+  void serverSetupLoadJobs();
   $("serverSetupHost").focus?.();
 }
 
@@ -2844,6 +3166,13 @@ $("serverSetupPassword").addEventListener("input", () => serverSetupCredentialsC
 $("serverSetupPrivateKey").addEventListener("change", () => serverSetupCredentialsChanged());
 $("serverSetupPassphrase").addEventListener("input", () => serverSetupCredentialsChanged());
 $("serverSetupStatusForm").addEventListener("submit", (event) => { void serverSetupStatus(event); });
+$("serverSetupRecoverySelect").addEventListener("change", serverSetupSelectRecovery);
+$("serverSetupReloadJobs").addEventListener("click", () => { void serverSetupLoadJobs(); });
+$("serverSetupPrepareButton").addEventListener("click", () => { void serverSetupPrepare(); });
+$("serverSetupApplyConfirm").addEventListener("change", serverSetupRender);
+$("serverSetupApplyButton").addEventListener("click", () => { void serverSetupApply(); });
+$("serverSetupCleanupButton").addEventListener("click", () => { void serverSetupCleanup(); });
+$("serverSetupInterruptButton").addEventListener("click", () => { void serverSetupInterrupt(); });
 $("addServerForm").addEventListener("submit", addServer);
 document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.view)));
 document.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => { setView("commands"); $("commandInput").value = button.dataset.command; $("commandInput").focus(); }));
