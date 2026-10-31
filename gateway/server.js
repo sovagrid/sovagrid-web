@@ -318,7 +318,8 @@ export function validateAmneziaEnrollment(value) {
 
 export function validateTargetHostKey(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      Object.keys(value).length !== 2 || !Object.hasOwn(value, "host") ||
+      Object.keys(value).length !== (Object.hasOwn(value, "jump") ? 3 : 2) ||
+      !Object.hasOwn(value, "host") ||
       !Object.hasOwn(value, "port") || typeof value.host !== "string" ||
       !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) {
     throw new Error("INVALID_INPUT");
@@ -337,7 +338,8 @@ export function validateTargetHostKey(value) {
       throw new Error("INVALID_INPUT");
     }
   }
-  return { host: host.toLowerCase(), port: value.port };
+  return { host: host.toLowerCase(), port: value.port,
+    ...(Object.hasOwn(value, "jump") ? { jump: validateTargetStatus(value.jump) } : {}) };
 }
 
 export function validateTargetStatus(value) {
@@ -355,6 +357,16 @@ export function validateTargetStatus(value) {
     .map((key) => [key, value[key]]));
   validateLogin(login);
   return { ...target, ...login };
+}
+
+function validateTargetRouteStatus(value) {
+  const fields = ["host", "port", "username", "method", "fingerprint", "password",
+    "private_key", "passphrase"];
+  if (!exactFields(value, Object.hasOwn(value ?? {}, "jump") ? [...fields, "jump"] : fields)) {
+    throw new Error("INVALID_INPUT");
+  }
+  const target = validateTargetStatus(Object.fromEntries(fields.map((key) => [key, value[key]])));
+  return { target, jump: Object.hasOwn(value, "jump") ? validateTargetStatus(value.jump) : null };
 }
 
 export function validateTargetInstallPreview(value) {
@@ -881,7 +893,74 @@ export function safeAmneziaPreview(raw, expectedTarget) {
   return result;
 }
 
-function inspectSSHHostKey(host, port, { clientFactory = () => new Client(), timeoutMs = 8000 } = {}) {
+async function withJumpSocket(jump, target, options, operation) {
+  const clientFactory = options.jumpClientFactory ?? options.clientFactory ?? (() => new Client());
+  const timeoutMs = options.timeoutMs ?? 20000;
+  const privateKey = jump.method === "private_key" ? Buffer.from(jump.private_key, "utf8") : null;
+  let client;
+  try { client = clientFactory(); }
+  catch {
+    privateKey?.fill(0); clearCredentials(jump); throw new Error("SSH_UNAVAILABLE");
+  }
+  let socket;
+  try {
+    socket = await new Promise((resolve, reject) => {
+      let settled = false, keyVerified = false, keyChanged = false, keyboardAnswered = false;
+      const finish = (error, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve(result);
+      };
+      const timer = setTimeout(() => finish(new Error("SSH_UNAVAILABLE")), timeoutMs);
+      client.on("error", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+      client.on("close", () => finish(new Error(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE")));
+      if (jump.method === "password") {
+        client.on("keyboard-interactive", (_name, _instructions, _language, prompts, done) => {
+          const accepted = !keyboardAnswered && Array.isArray(prompts) && prompts.length === 1 &&
+            prompts[0]?.echo === false && passwordChallenge(prompts[0].prompt);
+          if (accepted) keyboardAnswered = true;
+          done(accepted ? [jump.password] : []);
+        });
+      }
+      client.on("ready", () => {
+        try {
+          client.forwardOut("127.0.0.1", 0, target.host, target.port,
+            (error, channel) => finish(error || !channel ? new Error("SSH_UNAVAILABLE") : null, channel));
+        } catch { finish(new Error("SSH_UNAVAILABLE")); }
+      });
+      try {
+        client.connect({ host: jump.host, port: jump.port, username: jump.username,
+          readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: jump.method === "password",
+          ...(jump.method === "password" ? { password: jump.password } :
+            { privateKey, passphrase: jump.passphrase || undefined }),
+          hostVerifier: (key) => {
+            try {
+              if (sameFingerprint(hostKey(key).fingerprint, jump.fingerprint)) {
+                keyVerified = true;
+                return true;
+              }
+            } catch { /* Malformed jump key is never trusted. */ }
+            keyChanged = true;
+            return false;
+          },
+        });
+      } catch { finish(new Error("SSH_UNAVAILABLE")); }
+    });
+    return await operation(socket);
+  } finally {
+    try { socket?.destroy?.(); } catch { /* The forwarded channel may already be closed. */ }
+    try { client.end(); } catch { /* Cleanup must continue. */ }
+    try { client.destroy?.(); } catch { /* A stalled jump must not retain credentials. */ }
+    privateKey?.fill(0);
+    clearCredentials(jump);
+  }
+}
+
+function inspectSSHHostKey(host, port, { clientFactory = () => new Client(), timeoutMs = 8000,
+  sock = null } = {}) {
   return new Promise((resolve, reject) => {
     const client = clientFactory();
     let settled = false;
@@ -897,7 +976,7 @@ function inspectSSHHostKey(host, port, { clientFactory = () => new Client(), tim
     client.on("error", () => finish(new Error("SSH_UNAVAILABLE")));
     client.on("close", () => finish(new Error("SSH_UNAVAILABLE")));
     try {
-      client.connect({ host, port, username: "sovagrid-probe",
+      client.connect({ host, port, ...(sock ? { sock } : {}), username: "sovagrid-probe",
         readyTimeout: Math.min(timeoutMs, 7000), tryKeyboard: false,
         hostVerifier: (key) => {
           try { finish(null, { protocol: 1, port, ...hostKey(key) }); }
@@ -914,11 +993,17 @@ export function inspectHostKey(options = {}) {
 }
 
 export async function inspectTargetHostKey(raw, options = {}) {
-  const target = validateTargetHostKey(raw);
-  const key = await inspectSSHHostKey(target.host, target.port, options);
-  // The key belongs to this one probe only. Every future SSH authentication
-  // must repeat host-key verification against the user's chosen fingerprint.
-  return { ...key, scope: "entered_target", host: target.host, reverify_required: true };
+  try {
+    const target = validateTargetHostKey(raw);
+    const inspect = (sock) => inspectSSHHostKey(target.host, target.port,
+      { ...options, ...(sock ? { sock } : {}) });
+    const key = target.jump ? await withJumpSocket(target.jump, target, options, inspect) : await inspect();
+    // The probe never authenticates to the target. Subsequent connections
+    // verify both SSH host keys again against the administrator's pins.
+    return { ...key, scope: "entered_target", host: target.host, reverify_required: true,
+      ...(target.jump ? { jump_host: target.jump.host, jump_port: target.jump.port,
+        jump_host_key_fingerprint: target.jump.fingerprint } : {}) };
+  } finally { clearCredentials(raw); }
 }
 
 function clearCredentials(value) {
@@ -926,6 +1011,7 @@ function clearCredentials(value) {
   for (const key of ["password", "private_key", "passphrase"]) {
     if (Object.hasOwn(value, key)) value[key] = "";
   }
+  if (Object.hasOwn(value, "jump")) clearCredentials(value.jump);
 }
 
 function passwordChallenge(prompt) {
@@ -943,7 +1029,8 @@ function targetStatusKind(output, code, signal) {
   return match?.[1] ?? "unknown";
 }
 
-function probeTargetReadOnly(raw, { clientFactory = () => new Client(), timeoutMs = 20000 } = {},
+function probeTargetReadOnly(raw, { clientFactory = () => new Client(), timeoutMs = 20000,
+  sock = null } = {},
   { command, input, failureCode, parse }) {
   let value;
   try { value = validateTargetStatus(raw); }
@@ -1031,7 +1118,8 @@ function probeTargetReadOnly(raw, { clientFactory = () => new Client(), timeoutM
       catch { finish(new Error(failureCode)); }
     });
     try {
-      client.connect({ host: value.host, port: value.port, username: value.username,
+      client.connect({ host: value.host, port: value.port, ...(sock ? { sock } : {}),
+        username: value.username,
         readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: value.method === "password",
         ...(value.method === "password" ? { password: value.password } :
           { privateKey, passphrase: value.passphrase || undefined }),
@@ -1051,10 +1139,18 @@ function probeTargetReadOnly(raw, { clientFactory = () => new Client(), timeoutM
 }
 
 export function probeTargetStatus(raw, options = {}) {
-  return probeTargetReadOnly(raw, options, { command: STATUS_COMMAND, input: STATUS_SCRIPT,
-    failureCode: "STATUS_UNAVAILABLE", parse: (output, code, signal, value) =>
-      ({ protocol: 1, scope: "entered_target", host: value.host, port: value.port,
-        kind: targetStatusKind(output, code, signal), host_key_fingerprint: value.fingerprint }) });
+  let route;
+  try { route = validateTargetRouteStatus(raw); }
+  catch (error) { clearCredentials(raw); throw error; }
+  const run = (sock) => probeTargetReadOnly(route.target, { ...options, ...(sock ? { sock } : {}) },
+    { command: STATUS_COMMAND, input: STATUS_SCRIPT,
+      failureCode: "STATUS_UNAVAILABLE", parse: (output, code, signal, value) =>
+        ({ protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+          kind: targetStatusKind(output, code, signal), host_key_fingerprint: value.fingerprint,
+          ...(route.jump ? { jump_host: route.jump.host, jump_port: route.jump.port,
+            jump_host_key_fingerprint: route.jump.fingerprint } : {}) }) });
+  return (route.jump ? withJumpSocket(route.jump, route.target, options, run) : run())
+    .finally(() => clearCredentials(raw));
 }
 
 function probeTargetHubRoute(raw, endpoint, options = {}) {
@@ -1603,9 +1699,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           try { json(res, 200, await agent(action, selected, token)); }
           finally { clearCredentials(selected); }
         } else if (isTargetProbe) {
-          json(res, 200, await inspectTarget(validateTargetHostKey(value)));
+          const selected = validateTargetHostKey(value);
+          try { json(res, 200, await inspectTarget(selected)); }
+          finally { clearCredentials(selected); }
         } else if (isTargetStatus) {
-          const selected = validateTargetStatus(value);
+          const route = validateTargetRouteStatus(value);
+          const selected = { ...route.target, ...(route.jump ? { jump: route.jump } : {}) };
           try { json(res, 200, await targetStatus(selected)); }
           finally { clearCredentials(selected); }
         } else if (isInstallPreview) {

@@ -88,6 +88,7 @@ function hubSessionUser(payload, legacyUsername = "admin") {
 
 function applyHubPermissions() {
   const admin = hubCanAdmin(), globalAdmin = hubCanGlobalAdmin();
+  if (!globalAdmin) globalThis.vpnJumpReset?.();
   for (const element of document.querySelectorAll("[data-admin-only], [data-command]")) element.hidden = !admin;
   for (const element of document.querySelectorAll("[data-vpn-admin-only]")) element.hidden = !vpnTarget() || !hubCanAdmin(vpnTarget());
   for (const element of document.querySelectorAll("[data-global-admin-only]")) element.hidden = !globalAdmin;
@@ -391,6 +392,7 @@ function logout(revoke = true) {
   resetAllTerminals(true);
   globalThis.filesReset?.();
   globalThis.amneziaReset?.();
+  globalThis.vpnJumpReset?.();
   globalThis.telegramReset?.();
   globalThis.monitoringReset?.();
   globalThis.inodeReset?.();
@@ -778,6 +780,7 @@ function setView(view) {
       (!hubCanAudit() && ADMIN_AUDIT_VIEWS.has(view))) return;
   if (state.view === "commands") $("terminalInput").value = "";
   if (state.view === "journal") globalThis.journalReset?.();
+  if (state.view === "vpn") globalThis.vpnJumpReset?.();
   if (state.view === "overview") {
     globalThis.containerLogsReset?.();
     globalThis.containerActionReset?.();

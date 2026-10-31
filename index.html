@@ -25,6 +25,7 @@
   <link rel="stylesheet" href="backups.css?v=2">
   <link rel="stylesheet" href="host-backups.css?v=1">
   <link rel="stylesheet" href="public-web.css?v=2">
+  <link rel="stylesheet" href="vpn-jump.css?v=1">
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="app.js?v=50" defer></script>
@@ -38,6 +39,7 @@
   <link rel="stylesheet" href="checks.css?v=3">
   <script src="files.js?v=4" defer></script>
   <script src="amnezia.js?v=14" defer></script>
+  <script src="vpn-jump.js?v=1" defer></script>
   <script src="process-inventory.js?v=1" defer></script>
   <script src="container-logs.js?v=1" defer></script>
   <script src="container-control.js?v=1" defer></script>
@@ -479,6 +481,37 @@
           <select id="vpnTargetServer" aria-describedby="vpnTargetStatus"></select>
           <p id="vpnTargetStatus" class="field-help" role="status">Выберите сервер с Agent.</p>
         </section>
+        <section id="vpnJumpPanel" class="panel vpn-control-panel vpn-jump-panel" aria-labelledby="vpnJumpHeading" data-global-admin-only hidden>
+          <div class="panel-heading"><div><p class="eyebrow">Маршрут SSH</p><h2 id="vpnJumpHeading">Сервер через промежуточный хост</h2></div></div>
+          <details class="vpn-jump-details"><summary>Проверить путь через SSH-хост</summary>
+          <p class="panel-intro">Проверьте путь к Ubuntu-серверу через VPS или другой SSH-хост. Сначала отдельно сверьте оба SSH-ключа, затем проверьте доступ и состояние SovaGrid. Эта проверка ничего не устанавливает.</p>
+          <div class="vpn-jump-grid">
+            <fieldset><legend>Промежуточный хост</legend>
+              <label>Адрес<input id="vpnJumpHost" maxlength="253" autocomplete="off" spellcheck="false" placeholder="gateway.example.com"></label>
+              <label>Порт SSH<input id="vpnJumpPort" type="number" min="1" max="65535" value="22" inputmode="numeric"></label>
+              <label>SSH-пользователь<input id="vpnJumpUser" maxlength="32" autocomplete="off" placeholder="operator"></label>
+              <label>Вход<select id="vpnJumpMethod"><option value="password">Пароль</option><option value="private_key">Файл ключа</option></select></label>
+              <label id="vpnJumpPasswordField">Пароль SSH<input id="vpnJumpPassword" type="password" maxlength="1024" autocomplete="off"></label>
+              <div id="vpnJumpKeyFields" hidden><label>Приватный ключ до 32 КиБ<input id="vpnJumpKey" type="file" accept=".key,.pem,.txt"></label><label>Парольная фраза<input id="vpnJumpPassphrase" type="password" maxlength="1024" autocomplete="off"></label></div>
+              <button id="vpnJumpInspect" class="secondary-button" type="button">Проверить ключ хоста</button>
+              <div id="vpnJumpReview" hidden><code id="vpnJumpFingerprint"></code><label><input id="vpnJumpTrust" type="checkbox"> Я сверил отпечаток с независимым источником</label></div>
+            </fieldset>
+            <fieldset><legend>Целевой Ubuntu-сервер</legend>
+              <label>Адрес, видимый с промежуточного хоста<input id="vpnJumpTargetHost" maxlength="253" autocomplete="off" spellcheck="false" placeholder="127.0.0.1"></label>
+              <label>Порт SSH<input id="vpnJumpTargetPort" type="number" min="1" max="65535" value="22" inputmode="numeric"></label>
+              <label>SSH-пользователь<input id="vpnJumpTargetUser" maxlength="32" autocomplete="off" placeholder="root"></label>
+              <label>Вход<select id="vpnJumpTargetMethod"><option value="password">Пароль</option><option value="private_key">Файл ключа</option></select></label>
+              <label id="vpnJumpTargetPasswordField">Пароль SSH<input id="vpnJumpTargetPassword" type="password" maxlength="1024" autocomplete="off"></label>
+              <div id="vpnJumpTargetKeyFields" hidden><label>Приватный ключ до 32 КиБ<input id="vpnJumpTargetKey" type="file" accept=".key,.pem,.txt"></label><label>Парольная фраза<input id="vpnJumpTargetPassphrase" type="password" maxlength="1024" autocomplete="off"></label></div>
+              <button id="vpnJumpInspectTarget" class="secondary-button" type="button" disabled>Проверить ключ через хост</button>
+              <div id="vpnJumpTargetReview" hidden><code id="vpnJumpTargetFingerprint"></code><label><input id="vpnJumpTargetTrust" type="checkbox"> Я отдельно сверил ключ целевого сервера</label></div>
+            </fieldset>
+          </div>
+          <p class="field-help">Для каждого действия введите SSH-пароль или снова выберите файл ключа. Пароли и приватные ключи не сохраняются. Управление VPN через этот маршрут будет доступно после подключения защищённого установщика; сейчас доступна проверка соединения и состояния.</p>
+          <button id="vpnJumpStatus" class="primary-button" type="button" disabled>Проверить соединение и состояние</button>
+          <p id="vpnJumpResult" role="status" aria-live="polite"></p><p id="vpnJumpError" class="form-error" role="alert" hidden></p>
+          </details>
+        </section>
         <section class="hero-card vpn-hero" aria-label="Состояние VPN">
           <div><div class="hero-kicker"><span class="section-tag">СЕТЕВЫЕ СЕРВИСЫ</span><span id="vpnSourceBadge" class="status-badge vpn-status-unavailable">Нет данных</span></div><h2>Amnezia VPN</h2><p id="vpnSourceLocation">Источник: сервер не выбран</p><p id="vpnSourceText">Получаем состояние сервисов...</p><small id="vpnSnapshotTime">Снимок ещё не получен</small></div>
           <div class="hero-symbol" aria-hidden="true">◈</div>
@@ -503,7 +536,7 @@
           <p class="panel-intro">Выберите хост панели <strong id="amneziaSetupHost"></strong> или другой Ubuntu-сервер, доступный по SSH из сети Hub. Выбор сервера в сводке не влияет на этот SSH-мастер. Каждый шаг повторно проверяет состояние и требует отдельного подтверждения.</p>
           <p id="amneziaSetupAvailability" class="field-help" role="status"></p>
           <fieldset id="amneziaSetupScope" class="amnezia-setup-scope"><legend>Где находится VPN</legend><label><input id="amneziaSetupScopeLocal" type="radio" name="amneziaSetupScope" value="hub_host" checked> На хосте панели</label><label><input id="amneziaSetupScopeRemote" type="radio" name="amneziaSetupScope" value="entered_target"> На другом Ubuntu-сервере</label></fieldset>
-          <div id="amneziaSetupRemoteFields" class="amnezia-setup-remote" hidden><label for="amneziaSetupRemoteHost">Адрес SSH-сервера<input id="amneziaSetupRemoteHost" inputmode="url" maxlength="253" placeholder="vpn.example.com" autocomplete="off" spellcheck="false"></label><label for="amneziaSetupRemotePort">Порт SSH<input id="amneziaSetupRemotePort" type="number" min="1" max="65535" value="22" inputmode="numeric"></label><p class="field-help">Если на этом Ubuntu-сервере ещё нет SovaGrid Agent, сначала добавьте его через мастер серверов. После подготовки VPN-кода этот мастер может создать контейнер AmneziaWG 3.1; для подключения брокера нужен работающий совместимый контейнер. Промежуточный SSH-хост пока не поддерживается.</p><div id="amneziaSourcePanel" class="amnezia-settings"><h3>Код управления VPN на этом сервере</h3><p class="field-help">После сверки SSH-ключа и входа проверьте, нужен ли серверу пакет SovaGrid VPN. Проверка временно передаст пакет с проверенным манифестом; VPN-контейнер и службы не меняются. После обрыва можно отдельно завершить очистку временных файлов.</p><button id="amneziaSourcePreview" class="secondary-button" type="button" disabled>Проверить VPN-код</button><p id="amneziaSourceNotice" role="status"></p><div id="amneziaSourceReview" hidden><p id="amneziaSourceSummary" role="status"></p><details><summary>Отпечаток пакета</summary><code id="amneziaSourceDigest"></code></details><p class="field-help">Для применения снова введите пароль или выберите SSH-ключ. Перед записью SovaGrid сверит сервер и все проверенные файлы ещё раз.</p><div class="amnezia-status-row"><button id="amneziaSourceApply" class="primary-button" type="button" hidden>Подготовить VPN-код</button><button id="amneziaSourceRecover" class="secondary-button" type="button" hidden>Завершить очистку</button></div></div></div></div>
+          <div id="amneziaSetupRemoteFields" class="amnezia-setup-remote" hidden><label for="amneziaSetupRemoteHost">Адрес SSH-сервера<input id="amneziaSetupRemoteHost" inputmode="url" maxlength="253" placeholder="vpn.example.com" autocomplete="off" spellcheck="false"></label><label for="amneziaSetupRemotePort">Порт SSH<input id="amneziaSetupRemotePort" type="number" min="1" max="65535" value="22" inputmode="numeric"></label><p class="field-help">Если на этом Ubuntu-сервере ещё нет SovaGrid Agent, сначала добавьте его через мастер серверов. После подготовки VPN-кода этот мастер может создать контейнер AmneziaWG 3.1; для подключения брокера нужен работающий совместимый контейнер. Проверка пути через промежуточный SSH-хост доступна выше, а установка VPN на другом хосте пока требует прямого SSH-доступа из Hub.</p><div id="amneziaSourcePanel" class="amnezia-settings"><h3>Код управления VPN на этом сервере</h3><p class="field-help">После сверки SSH-ключа и входа проверьте, нужен ли серверу пакет SovaGrid VPN. Проверка временно передаст пакет с проверенным манифестом; VPN-контейнер и службы не меняются. После обрыва можно отдельно завершить очистку временных файлов.</p><button id="amneziaSourcePreview" class="secondary-button" type="button" disabled>Проверить VPN-код</button><p id="amneziaSourceNotice" role="status"></p><div id="amneziaSourceReview" hidden><p id="amneziaSourceSummary" role="status"></p><details><summary>Отпечаток пакета</summary><code id="amneziaSourceDigest"></code></details><p class="field-help">Для применения снова введите пароль или выберите SSH-ключ. Перед записью SovaGrid сверит сервер и все проверенные файлы ещё раз.</p><div class="amnezia-status-row"><button id="amneziaSourceApply" class="primary-button" type="button" hidden>Подготовить VPN-код</button><button id="amneziaSourceRecover" class="secondary-button" type="button" hidden>Завершить очистку</button></div></div></div></div>
           <div id="amneziaProvisionPanel" class="amnezia-settings" hidden>
             <h3>Новая AmneziaWG 3.1 на чистом сервере</h3>
             <p class="field-help">После подготовки VPN-кода можно создать новый AmneziaWG 3.1 в контейнере awg2. Установка создаст и запустит Docker-контейнер, включит интерфейс awg0 и откроет выбранный UDP-порт на сервере. Существующий контейнер мастер не заменяет.</p>

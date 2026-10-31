@@ -76,6 +76,31 @@ An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
 from the gateway container by this route; a separately configured reachable
 SSH endpoint is needed.
 
+## Read-only one-hop SSH route check
+
+The VPN tab has a separate read-only route check for a target reachable only
+from an intermediate SSH host. The existing administrator-only
+`target-host-key` accepts `{host, port, jump}` where `jump` contains exactly
+the eight pinned target SSH fields (`host`, `port`, `username`, `method`,
+`fingerprint`, `password`, `private_key`, `passphrase`). The user first probes
+the jump host directly with `target-host-key`, independently verifies and
+accepts its fingerprint, then probes the target through it. The gateway
+authenticates to the pinned jump, opens one `direct-tcpip` channel to the
+specified target host and port, and inspects the target key without target
+authentication. The response includes the target fingerprint and the jump
+host, port and fingerprint. `target-status` accepts the eight target fields
+plus the same `jump` object, checks both keys again, and runs only the fixed
+read-only Ubuntu inventory script. It returns only the fixed status category
+and both route identities. Neither endpoint accepts a command or persists
+SSH credentials. The browser keeps only the two accepted fingerprints; its
+credential inputs are cleared after each request.
+
+This route check does not authorize VPN source preparation, broker enrollment,
+WireGuard control or Amnezia provisioning through the jump. Those write paths
+still require a directly reachable target from their respective SSH workers.
+The UI presents the check separately so a successful route probe cannot be
+mistaken for permission to run a write over the hop.
+
 ## Plain WireGuard broker on an entered Agent
 
 After preparing the verified `sovagrid-vpn` source, the same pinned SSH form

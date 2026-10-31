@@ -1,0 +1,18 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.vpn-jump-panel{margin-top:16px}
+.vpn-jump-details>summary{cursor:pointer;color:var(--sg-accent);font-weight:700;font-size:.82rem}
+.vpn-jump-details[open]>summary{margin-bottom:13px}
+.vpn-jump-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:15px 0}
+.vpn-jump-grid fieldset{min-width:0;display:grid;align-content:start;gap:10px;margin:0;padding:16px;border:1px solid var(--sg-border);border-radius:12px}
+.vpn-jump-grid legend{padding:0 6px;color:var(--sg-text);font-weight:700}
+.vpn-jump-grid label{display:grid;gap:5px;font-size:.78rem;color:var(--sg-muted)}
+.vpn-jump-grid input:not([type=checkbox]),.vpn-jump-grid select{width:100%;min-width:0;padding:9px 10px;border:1px solid var(--sg-border-strong);border-radius:8px;background:var(--sg-input);color:var(--sg-text)}
+.vpn-jump-grid input[type=checkbox]{margin-right:7px}
+.vpn-jump-grid code{display:block;overflow-wrap:anywhere;padding:10px;border-radius:8px;background:var(--sg-code-bg);color:var(--sg-accent);font-size:.72rem}
+.vpn-jump-grid [id$=Review]{display:grid;gap:9px}
+.vpn-jump-grid [id$=KeyFields]{display:grid;gap:9px}
+.vpn-jump-grid [hidden]{display:none!important}
+#vpnJumpResult{font-size:.78rem;color:var(--sg-text);margin:10px 0 0}
+@media(max-width:760px){.vpn-jump-grid{grid-template-columns:1fr}.vpn-jump-grid fieldset{padding:13px}}

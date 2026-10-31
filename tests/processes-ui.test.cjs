@@ -65,13 +65,13 @@ test('process table and new asset versions are included in the offline shell', (
   const html = fs.readFileSync('index.html', 'utf8');
   const shell = fs.readFileSync('sw.js', 'utf8');
   assert.match(html, /id="topProcessesTable"[^>]*hidden/);
-  assert.match(html, /styles\.css\?v=43/);
+  assert.match(html, /styles\.css\?v=44/);
   assert.match(html, /app\.js\?v=50/);
   assert.match(shell, /sovagrid-shell:\$\{encodeURIComponent\(BASE\)\}:/);
-  assert.match(shell, /\$\{CACHE_PREFIX\}v74/);
+  assert.match(shell, /\$\{CACHE_PREFIX\}v78/);
   assert.match(html, /checks\.js\?v=5/);
   assert.match(shell, /checks\.js\?v=5/);
-  assert.match(shell, /styles\.css\?v=43/);
+  assert.match(shell, /styles\.css\?v=44/);
   assert.match(shell, /app\.js\?v=50/);
   assert.match(shell, /container-alerts\.js\?v=1/);
   assert.match(shell, /journal\.js\?v=2/);

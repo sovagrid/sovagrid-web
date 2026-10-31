@@ -220,6 +220,169 @@ function fakeClient(operations, { key = KEY, output, code = 0 } = {}) {
   return client;
 }
 
+function fakeJump(operations, { key = KEY } = {}) {
+  const client = fakeClient(operations, { key });
+  const channel = { destroyed: false, destroy() { this.destroyed = true; } };
+  client.forwardOut = (sourceHost, sourcePort, destinationHost, destinationPort, callback) => {
+    operations.forward = { sourceHost, sourcePort, destinationHost, destinationPort };
+    callback(null, channel);
+  };
+  return { client, channel };
+}
+
+test("one-hop target probe pins the jump and target independently without target authentication", async () => {
+  const jump = statusInput({ host: "JUMP.example", port: 2222, username: "operator",
+    password: "jump-secret" });
+  const raw = { host: "127.0.0.1", port: 22022, jump };
+  const jumpOps = {}, targetOps = {};
+  const forward = fakeJump(jumpOps);
+  const result = await inspectTargetHostKey(raw, {
+    jumpClientFactory: () => forward.client,
+    clientFactory: () => fakeClient(targetOps),
+  });
+  assert.equal(result.host, "127.0.0.1");
+  assert.equal(result.jump_host, "jump.example");
+  assert.equal(result.jump_port, 2222);
+  assert.equal(result.jump_host_key_fingerprint, FINGERPRINT);
+  assert.deepEqual(jumpOps.forward, { sourceHost: "127.0.0.1", sourcePort: 0,
+    destinationHost: "127.0.0.1", destinationPort: 22022 });
+  assert.equal(targetOps.config.sock, forward.channel);
+  assert.equal(targetOps.config.password, undefined);
+  assert.equal(targetOps.config.username, "sovagrid-probe");
+  assert.equal(forward.channel.destroyed, true);
+  assert.equal(jump.password, "");
+  assert.equal(jumpOps.ended, true);
+  const changedJump = fakeJump({}, { key: Buffer.from(KEY).fill(0x31, 8 + "ssh-ed25519".length) });
+  await assert.rejects(inspectTargetHostKey({ host: "127.0.0.1", port: 22022,
+    jump: statusInput({ host: "jump.example", port: 2222 }) }, {
+    jumpClientFactory: () => changedJump.client,
+    clientFactory: () => { throw new Error("target must not be contacted"); },
+  }), /HOST_KEY_CHANGED/);
+});
+
+test("one-hop target status runs only the fixed inventory through both pinned SSH sessions", async () => {
+  const raw = statusInput({ host: "127.0.0.1", port: 22022,
+    jump: statusInput({ host: "jump.example", port: 2222, username: "operator",
+      password: "jump-secret" }) });
+  const jumpOps = {}, targetOps = {};
+  const forward = fakeJump(jumpOps);
+  const result = await probeTargetStatus(raw, {
+    jumpClientFactory: () => forward.client,
+    clientFactory: () => fakeClient(targetOps, { output: "SG_STATUS_V1:agent_only\n" }),
+  });
+  assert.equal(result.kind, "agent_only");
+  assert.deepEqual([result.jump_host, result.jump_port, result.jump_host_key_fingerprint],
+    ["jump.example", 2222, FINGERPRINT]);
+  assert.equal(targetOps.config.sock, forward.channel);
+  assert.match(targetOps.script, /SOVAGRID_SSH_STATUS_V1/);
+  assert.equal(raw.password, "");
+  assert.equal(raw.jump.password, "");
+  assert.equal(forward.channel.destroyed, true);
+  const invalid = statusInput({ jump: { ...statusInput(), extra: "unsafe" } });
+  assert.throws(() => validateTargetHostKey({ host: "remote.example", port: 22,
+    jump: invalid.jump }), /INVALID_INPUT/);
+  assert.throws(() => probeTargetStatus(invalid), /INVALID_INPUT/);
+  assert.equal(invalid.password, "");
+  assert.equal(invalid.jump.password, "");
+});
+
+test("real one-hop SSH handshake reaches a target through a pinned direct-tcpip channel", async () => {
+  const makeKey = () => generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  let targetAuth = 0, forwarded = 0;
+  const targetServer = new ssh2.Server({ hostKeys: [makeKey()] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (ctx) => {
+      if (ctx.method === "password") targetAuth++;
+      if (ctx.method === "password" && ctx.username === "root" && ctx.password === "target-secret") ctx.accept();
+      else ctx.reject();
+    }).on("ready", () => client.on("session", (accept) => {
+      const session = accept();
+      session.on("exec", (accept, _reject, info) => {
+        assert.match(info.command, /^sh -c '/);
+        const channel = accept();
+        channel.on("data", () => {});
+        channel.on("end", () => {
+          channel.write("SG_STATUS_V1:agent_only\n");
+          channel.exit(0);
+          channel.end();
+        });
+      });
+    }));
+  });
+  await new Promise((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+  const jumpServer = new ssh2.Server({ hostKeys: [makeKey()] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (ctx) => {
+      if (ctx.method === "password" && ctx.username === "operator" && ctx.password === "jump-secret") ctx.accept();
+      else ctx.reject();
+    }).on("ready", () => client.on("tcpip", (accept, reject, info) => {
+      if (info.destIP !== "127.0.0.1" || info.destPort !== targetServer.address().port) {
+        reject(); return;
+      }
+      forwarded++;
+      const upstream = net.connect({ host: "127.0.0.1", port: targetServer.address().port });
+      upstream.once("connect", () => { const channel = accept(); channel.pipe(upstream).pipe(channel); });
+      upstream.once("error", () => { reject(); upstream.destroy(); });
+    }));
+  });
+  await new Promise((resolve) => jumpServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const jumpAddress = { host: "127.0.0.1", port: jumpServer.address().port };
+    const targetAddress = { host: "127.0.0.1", port: targetServer.address().port };
+    const jumpKey = await inspectTargetHostKey(jumpAddress);
+    const jump = { ...jumpAddress, username: "operator", method: "password",
+      fingerprint: jumpKey.fingerprint, password: "jump-secret", private_key: "", passphrase: "" };
+    const targetKey = await inspectTargetHostKey({ ...targetAddress, jump });
+    assert.equal(targetAuth, 0);
+    assert.equal(targetKey.jump_host_key_fingerprint, jumpKey.fingerprint);
+    const result = await probeTargetStatus({ ...targetAddress, username: "root", method: "password",
+      fingerprint: targetKey.fingerprint, password: "target-secret", private_key: "", passphrase: "",
+      jump: { ...jump, password: "jump-secret" } });
+    assert.equal(result.kind, "agent_only");
+    assert.equal(targetAuth, 1);
+    assert.equal(forwarded, 2);
+  } finally {
+    await new Promise((resolve) => jumpServer.close(resolve));
+    await new Promise((resolve) => targetServer.close(resolve));
+  }
+});
+
+test("one-hop HTTP probes require Hub admin and erase both SSH credentials", async () => {
+  const jump = statusInput({ host: "jump.example", port: 2222, password: "jump-secret" });
+  let inspected, probed;
+  const handler = createHandler({ admin: async (authorization) => {
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, inspectTarget: async (value) => {
+    inspected = value;
+    assert.equal(value.jump.password, "jump-secret");
+    return { protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+      key_type: "ssh-ed25519", fingerprint: FINGERPRINT, reverify_required: true,
+      jump_host: value.jump.host, jump_port: value.jump.port,
+      jump_host_key_fingerprint: value.jump.fingerprint };
+  }, targetStatus: async (value) => { probed = value; return { protocol: 1, scope: "entered_target",
+    host: value.host, port: value.port, kind: "agent_only",
+    host_key_fingerprint: value.fingerprint, jump_host: value.jump.host,
+    jump_port: value.jump.port, jump_host_key_fingerprint: value.jump.fingerprint }; } });
+  const probe = { host: "127.0.0.1", port: 22022, jump };
+  assert.equal((await call(handler, { path: "/api/v1/browser-ssh/target-host-key", payload: probe })).status, 401);
+  const found = await call(handler, { path: "/api/v1/browser-ssh/target-host-key", payload: probe,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(found.status, 200);
+  assert.equal(found.body.jump_host_key_fingerprint, FINGERPRINT);
+  assert.equal(inspected.jump.password, "");
+  const status = statusInput({ host: "127.0.0.1", port: 22022,
+    jump: statusInput({ host: "jump.example", port: 2222, password: "jump-secret" }) });
+  const reply = await call(handler, { path: "/api/v1/browser-ssh/target-status", payload: status,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(reply.status, 200);
+  assert.equal(reply.body.kind, "agent_only");
+  assert.equal(reply.body.jump_host, "jump.example");
+  assert.equal(probed.password, "");
+  assert.equal(probed.jump.password, "");
+});
+
 test("host key is inspected without any SSH authentication", async () => {
   const operations = {};
   const result = await inspectHostKey({ clientFactory: () => fakeClient(operations) });
