@@ -94,8 +94,8 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=12/);
-  assert.match(shell, /amnezia\.js\?v=12/);
+  assert.match(html, /amnezia\.js\?v=13/);
+  assert.match(shell, /amnezia\.js\?v=13/);
   assert.match(html, /styles\.css\?v=44/);
   assert.match(shell, /styles\.css\?v=44/);
 });
@@ -139,7 +139,7 @@ test('fresh AmneziaWG preview pins SSH and explicit apply creates only reviewed 
   assert.equal(h.element('amneziaProvisionReview').hidden, false);
   assert.equal(h.element('amneziaProvisionApply').hidden, false);
   assert.equal(h.element('amneziaSetupPassword').value, '');
-  assert.match(h.element('amneziaProvisionSummary').textContent, /весь интернет/);
+  assert.match(h.element('amneziaProvisionSummary').textContent, /IPv4 через VPN/);
   h.element('amneziaSetupPassword').value = 'disposable-apply-password';
   h.context.amneziaProvisionConfirm('apply');
   assert.equal(h.element('amneziaProvisionDialog').open, true);

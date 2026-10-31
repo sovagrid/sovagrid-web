@@ -1969,7 +1969,7 @@ function amneziaProvisionShowPreview(value, config) {
   amneziaProvision.config = config;
   $("amneziaProvisionSummary").textContent = value.can_apply ?
     `Сервер готов к созданию AmneziaWG 3.1: UDP ${config.listen_port}, ${config.subnet}, ` +
-      (config.route_mode === "full" ? "весь интернет через VPN." : "только VPN-подсеть сервера.") :
+      (config.route_mode === "full" ? "IPv4 через VPN; IPv6 в туннеле без выхода." : "только VPN-подсеть сервера.") :
     amneziaProvisionReason(value.reason);
   $("amneziaProvisionDetails").textContent = value.state_revision ?
     `Контейнер: ${value.container}. Образ ${value.image_cached ? "уже загружен" : "будет загружен при установке"}. ` +
@@ -2051,7 +2051,7 @@ function amneziaProvisionConfirm(action) {
   $("amneziaProvisionDialogSummary").textContent = action === "apply" ?
     `На ${host} будет создан и запущен контейнер amnezia-awg2, включён awg0, опубликован UDP ` +
       `${amneziaProvision.config.listen_port}. Маршрут: ` +
-      (amneziaProvision.config.route_mode === "full" ? "весь интернет через VPN." : "только VPN-подсеть сервера.") :
+      (amneziaProvision.config.route_mode === "full" ? "IPv4 через VPN; IPv6 в туннеле без выхода." : "только VPN-подсеть сервера.") :
     `SovaGrid проверит и завершит только собственную прерванную установку на ${host}. ` +
       "Если контейнер уже работает и совпадает с проверенным состоянием, он останется запущен.";
   amneziaProvision.pendingAction = action;

@@ -78,7 +78,7 @@ test('entered Ubuntu host prepares source and explicitly creates AmneziaWG 3.1',
   await page.locator('#amneziaSetupPassword').fill(secret);
   await page.locator('#amneziaProvisionPreview').click();
   await expect(page.locator('#amneziaProvisionApply')).toBeVisible();
-  await expect(page.locator('#amneziaProvisionSummary')).toContainText('весь интернет');
+  await expect(page.locator('#amneziaProvisionSummary')).toContainText('IPv4 через VPN');
   await expect(page.locator('#amneziaSetupPassword')).toHaveValue('');
   await page.locator('#amneziaSetupPassword').fill(secret);
   await page.locator('#amneziaProvisionApply').click();

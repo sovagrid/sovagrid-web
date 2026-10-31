@@ -56,7 +56,7 @@ test('HTML fallback for a missing script aborts installation without caching the
   };
   await assert.rejects(w.event('install'), /Incomplete SovaGrid app shell/);
   assert.equal(w.added.length, 0);
-  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v75']);
+  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v76']);
 });
 
 test('HTML fallback for a script never replaces the cached JavaScript on refresh', async () => {

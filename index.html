@@ -37,7 +37,7 @@
   <script src="checks.js?v=5" defer></script>
   <link rel="stylesheet" href="checks.css?v=3">
   <script src="files.js?v=4" defer></script>
-  <script src="amnezia.js?v=12" defer></script>
+  <script src="amnezia.js?v=13" defer></script>
   <script src="process-inventory.js?v=1" defer></script>
   <script src="container-logs.js?v=1" defer></script>
   <script src="container-control.js?v=1" defer></script>
@@ -510,9 +510,9 @@
             <div class="check-grid amnezia-provision-fields">
               <label for="amneziaProvisionPort">UDP-порт VPN<input id="amneziaProvisionPort" type="number" min="1" max="65535" step="1" inputmode="numeric" value="51820"></label>
               <label for="amneziaProvisionSubnet">Приватная подсеть VPN /24<input id="amneziaProvisionSubnet" type="text" maxlength="18" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="decimal" value="10.44.0.0/24"></label>
-              <label for="amneziaProvisionRoute">Маршрутизация<select id="amneziaProvisionRoute"><option value="full" selected>Весь интернет через VPN</option><option value="split">Только VPN-подсеть сервера</option></select></label>
+              <label for="amneziaProvisionRoute">Маршрутизация<select id="amneziaProvisionRoute"><option value="full" selected>Весь IPv4 через VPN; IPv6 без выхода</option><option value="split">Только VPN-подсеть сервера</option></select></label>
             </div>
-            <p class="field-help">Полный маршрут передаёт интернет-трафик клиентов через сервер. Раздельный маршрут открывает только приватную VPN-подсеть сервера. Проверьте правила своего сетевого экрана для выбранного UDP-порта.</p>
+            <p class="field-help">Полный маршрут передаёт IPv4-трафик клиентов через сервер. IPv6 тоже направляется в туннель, но без IPv6-выхода на сервере будет недоступен и не пойдёт мимо VPN. Раздельный маршрут открывает только приватную VPN-подсеть сервера. Проверьте сетевой экран для выбранного UDP-порта.</p>
             <button id="amneziaProvisionPreview" class="secondary-button" type="button" disabled>Проверить создание AmneziaWG</button>
             <p id="amneziaProvisionNotice" role="status"></p><p id="amneziaProvisionError" class="form-error" role="alert" hidden></p>
             <div id="amneziaProvisionReview" hidden><p id="amneziaProvisionSummary" role="status"></p><p id="amneziaProvisionDetails" class="field-help"></p><details id="amneziaProvisionRevisions" hidden><summary>Проверенное состояние</summary><code id="amneziaProvisionDigest"></code></details><p class="field-help">Для установки снова введите пароль или выберите SSH-ключ. Сервер повторно сверит состояние перед созданием контейнера.</p><div class="amnezia-status-row"><button id="amneziaProvisionApply" class="primary-button" type="button" hidden>Создать и запустить AmneziaWG</button><button id="amneziaProvisionRecover" class="secondary-button" type="button" hidden>Проверить и завершить установку</button></div></div>
