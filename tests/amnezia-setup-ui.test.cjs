@@ -94,10 +94,15 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=13/);
-  assert.match(shell, /amnezia\.js\?v=13/);
+  assert.match(html, /amnezia\.js\?v=14/);
+  assert.match(shell, /amnezia\.js\?v=14/);
   assert.match(html, /styles\.css\?v=44/);
   assert.match(shell, /styles\.css\?v=44/);
+});
+
+test('Amnezia installation drift asks for manual review', () => {
+  const h = harness();
+  assert.match(h.context.amneziaProvisionReason('INSTALLATION_DRIFT'), /ручная проверка сервера/);
 });
 
 test('fresh AmneziaWG preview pins SSH and explicit apply creates only reviewed configuration', async () => {

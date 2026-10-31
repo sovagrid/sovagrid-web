@@ -1153,6 +1153,8 @@ test("AmneziaWG provision result is bounded to fixed fields and timeouts include
     reason: "password=secret" }), /INSTALLER_UNAVAILABLE/);
   const blocked = { ...full, can_apply: false, reason: "UDP_PORT_BUSY" };
   assert.deepEqual(safeAgentResult("amnezia-provision-preview", blocked), blocked);
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", { ...blocked,
+    reason: "INSTALLATION_DRIFT" }).reason, "INSTALLATION_DRIFT");
   const degraded = { ...scope, schema_version: 1, action: "preview", writes: false,
     target: "awg2", container: "amnezia-awg2", can_apply: false, reason: "DOCKER_UNAVAILABLE" };
   assert.deepEqual(safeAgentResult("amnezia-provision-preview", degraded), degraded);

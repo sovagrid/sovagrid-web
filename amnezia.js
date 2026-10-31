@@ -1926,6 +1926,7 @@ function amneziaProvisionScope(value) {
 }
 const AMNEZIA_PROVISION_REASONS = new Set(["UNSUPPORTED_PLATFORM", "RECOVERY_REQUIRED",
   "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE", "UDP_PORT_BUSY", "ROOT_REQUIRED", "UNSAFE_STATE",
+  "INSTALLATION_DRIFT",
   "DOCKER_UNAVAILABLE", "DOCKER_OPERATION_FAILED", "IMAGE_IDENTITY_INVALID",
   "CONTAINER_IDENTITY_INVALID", "DOCKER_RESPONSE_TOO_LARGE", "INVALID_PORT", "INVALID_SUBNET",
   "INVALID_ROUTE", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED", "SOURCE_BUSY"]);
@@ -1956,6 +1957,7 @@ function amneziaProvisionReason(reason) {
     SOURCE_NOT_PREPARED: "Сначала подготовьте VPN-код в шаге выше, затем повторите проверку.",
     SOURCE_UNTRUSTED: "Проверенный VPN-код изменился или небезопасен. Проверьте пакет и подготовьте его заново.",
     SOURCE_BUSY: "Сейчас выполняется другая операция с VPN-кодом. Подождите и повторите проверку.",
+    INSTALLATION_DRIFT: "Установленный контейнер AmneziaWG отсутствует или изменился. Нужна ручная проверка сервера; мастер его не заменяет.",
     UNSAFE_STATE: "Состояние установщика небезопасно. Нужна ручная проверка на сервере.",
     INVALID_PORT: "Введите UDP-порт от 1 до 65535.",
     INVALID_SUBNET: "Введите приватную сеть /24, например 10.44.0.0/24.",
@@ -2108,6 +2110,7 @@ async function amneziaProvisionAction(action) {
       if (["INVALID_INPUT", "AUTH_FAILED", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HOST_KEY_CHANGED",
         "PREVIEW_STALE", "STALE_PREVIEW", "CONFIRMATION_REQUIRED", "INVALID_REVISION", "CONTAINER_EXISTS",
         "ALREADY_INSTALLED", "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "UDP_PORT_BUSY", "ROOT_REQUIRED",
+        "INSTALLATION_DRIFT",
         "INVALID_PORT", "INVALID_SUBNET", "INVALID_ROUTE", "SOURCE_UNTRUSTED",
         "SOURCE_BUSY", "SOURCE_NOT_PREPARED"].includes(failure.message)) {
         amneziaProvisionMarkPending(false);
