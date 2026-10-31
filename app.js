@@ -2637,6 +2637,11 @@ async function addServer(event) {
 const serverSetup = { seq: 0, busy: false, phase: null, controllers: new Set(), mode: "ssh",
   reviewed: null, changedPin: false, kind: null, jobs: [], recovery: null, job: null, pollTimer: null };
 const serverSetupFingerprintPattern = /^SHA256:[A-Za-z0-9+/]{43}$/;
+const serverSetupHostKeyBlobPattern = /^[A-Za-z0-9+/]+={0,2}$/;
+function serverSetupHostKeyBlobValid(value) {
+  return typeof value === "string" && value.length >= 12 && value.length <= 10924 &&
+    serverSetupHostKeyBlobPattern.test(value);
+}
 const serverSetupUsernamePattern = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const serverSetupKinds = {
   missing: ["SovaGrid не обнаружен", "Ubuntu доступна. Проверка ничего не установила и не добавила в панель. Ниже можно подготовить Agent."],
@@ -2900,10 +2905,12 @@ async function serverSetupInspect() {
     if (reply?.protocol !== 1 || reply.scope !== "entered_target" || reply.reverify_required !== true ||
         reply.host !== target.host || reply.port !== target.port ||
         typeof reply.key_type !== "string" || !/^[A-Za-z0-9@._-]{4,96}$/.test(reply.key_type) ||
-        typeof reply.fingerprint !== "string" || !serverSetupFingerprintPattern.test(reply.fingerprint)) {
+        typeof reply.fingerprint !== "string" || !serverSetupFingerprintPattern.test(reply.fingerprint) ||
+        (Object.hasOwn(reply, "host_key_blob") && !serverSetupHostKeyBlobValid(reply.host_key_blob))) {
       throw new Error("INVALID_RESPONSE");
     }
-    serverSetup.reviewed = { ...target, fingerprint: reply.fingerprint };
+    serverSetup.reviewed = { ...target, fingerprint: reply.fingerprint,
+      host_key_blob: reply.host_key_blob };
     $("serverSetupReviewedHost").textContent = target.host.includes(":") ?
       `[${target.host}]:${target.port}` : `${target.host}:${target.port}`;
     $("serverSetupFingerprint").textContent = reply.fingerprint;
@@ -2925,10 +2932,16 @@ function serverSetupCredentialsChanged(clearOther = false) {
 }
 async function serverSetupStatus(event) {
   event.preventDefault();
-  if (globalThis.sovagridDirectSSH?.jumpEnabled?.()) return;
+  const useJump = Boolean(globalThis.sovagridDirectSSH?.jumpEnabled?.());
   if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed || serverSetup.changedPin ||
       !$("serverSetupTrust").checked || !$("addServerDialog").open) return;
   const reviewed = { ...serverSetup.reviewed };
+  const jump = useJump ? globalThis.sovagridDirectSSH?.reviewedJump?.() : null;
+  if ((useJump && (!jump || !reviewed.viaJump || reviewed.jumpHost !== jump.host ||
+      reviewed.jumpPort !== jump.port || reviewed.jumpFingerprint !== jump.fingerprint)) ||
+      (!useJump && reviewed.viaJump)) {
+    serverSetupError("Маршрут SSH изменился. Сверьте ключи обоих серверов заново."); return;
+  }
   let target;
   try { target = serverSetupTarget(); } catch (error) { serverSetupError(error.message); return; }
   if (target.host !== reviewed.host || target.port !== reviewed.port) {
@@ -2955,7 +2968,7 @@ async function serverSetupStatus(event) {
   serverSetupClearError();
   $("serverSetupResult").hidden = true;
   serverSetupRender();
-  let password = "", private_key = "", passphrase = "";
+  let password = "", private_key = "", passphrase = "", jumpCredentials;
   try {
     if (method === "private_key") {
       if (generated) private_key = generated.privateKey;
@@ -2980,13 +2993,23 @@ async function serverSetupStatus(event) {
     serverSetupClearSecrets();
     const payload = { host: reviewed.host, port: reviewed.port, username, method,
       fingerprint: reviewed.fingerprint, password, private_key, passphrase };
+    if (jump) {
+      jumpCredentials = await globalThis.sovagridDirectSSH.installJumpCredentials(seq, jump);
+      if (seq !== serverSetup.seq || state.token !== token ||
+          globalThis.sovagridDirectSSH.reviewedJump()?.fingerprint !== jump.fingerprint)
+        throw new Error("STALE_REQUEST");
+      const { host_key_blob: _blob, ...statusJump } = jumpCredentials;
+      payload.jump = statusJump;
+    }
     password = private_key = passphrase = "";
     const reply = await serverSetupApi("/api/v1/browser-ssh/target-status", payload, 30000, seq);
     if (seq !== serverSetup.seq || !$("addServerDialog").open || !serverSetupAllowed() ||
         state.token !== token || serverSetupPin(reviewed.host, reviewed.port) !== priorPin) return;
     if (reply?.protocol !== 1 || reply.scope !== "entered_target" || reply.host !== reviewed.host ||
         reply.port !== reviewed.port || reply.host_key_fingerprint !== reviewed.fingerprint ||
-        !Object.hasOwn(serverSetupKinds, reply.kind)) throw new Error("INVALID_RESPONSE");
+        !Object.hasOwn(serverSetupKinds, reply.kind) ||
+        (jump && (reply.jump_host !== jump.host || reply.jump_port !== jump.port ||
+          reply.jump_host_key_fingerprint !== jump.fingerprint))) throw new Error("INVALID_RESPONSE");
     serverSetupSavePin(reviewed.host, reviewed.port, reviewed.fingerprint);
     serverSetup.kind = reply.kind;
     if (reply.kind === "missing" && !$("serverSetupInstallName").value)
@@ -3006,6 +3029,7 @@ async function serverSetupStatus(event) {
     }
   } finally {
     password = private_key = passphrase = "";
+    if (jumpCredentials) for (const key of ["password", "private_key", "passphrase"]) jumpCredentials[key] = "";
     if (seq === serverSetup.seq) {
       serverSetupClearSecrets(); serverSetup.busy = false; serverSetup.phase = null; serverSetupRender();
     }
@@ -3097,7 +3121,7 @@ function serverSetupInstallFields() {
   return { name, hub_host, hub_port, local_port };
 }
 async function serverSetupPrepare() {
-  if (globalThis.sovagridDirectSSH?.jumpEnabled?.()) return;
+  const useJump = Boolean(globalThis.sovagridDirectSSH?.jumpEnabled?.());
   if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed ||
       !$("serverSetupTrust").checked || serverSetup.changedPin || serverSetup.job) return;
   const recovery = serverSetup.recovery;
@@ -3110,35 +3134,58 @@ async function serverSetupPrepare() {
     return;
   }
   const reviewed = { ...serverSetup.reviewed };
+  const jump = useJump ? globalThis.sovagridDirectSSH?.reviewedJump?.() : null;
+  if ((useJump && (!jump || !reviewed.viaJump || reviewed.jumpHost !== jump.host ||
+      reviewed.jumpPort !== jump.port || reviewed.jumpFingerprint !== jump.fingerprint ||
+      !serverSetupHostKeyBlobValid(reviewed.host_key_blob))) ||
+      (!useJump && reviewed.viaJump)) {
+    serverSetupError("Маршрут SSH изменился. Сверьте ключи обоих серверов заново."); return;
+  }
   const seq = ++serverSetup.seq;
   const token = state.token;
   serverSetup.busy = true;
   serverSetup.phase = recovery ? "resume" : "prepare";
   serverSetupClearError();
   serverSetupRender();
-  let ssh;
+  let ssh, jumpCredentials;
   try {
     ssh = await serverSetupReadCredentials(seq, reviewed);
     if (seq !== serverSetup.seq || state.token !== token) throw new Error("STALE_REQUEST");
+    if (jump) {
+      jumpCredentials = await globalThis.sovagridDirectSSH.installJumpCredentials(seq, jump);
+      if (seq !== serverSetup.seq || state.token !== token ||
+          globalThis.sovagridDirectSSH.reviewedJump()?.fingerprint !== jump.fingerprint ||
+          (serverSetupPin(reviewed.host, reviewed.port) &&
+            serverSetupPin(reviewed.host, reviewed.port) !== reviewed.fingerprint))
+        throw new Error("STALE_REQUEST");
+    }
     if (recovery) {
+      const payload = { request_id: recovery.request_id, ...ssh,
+        ...(jump ? { host_key_blob: reviewed.host_key_blob, jump: { ...jumpCredentials } } : {}) };
       const reply = await serverSetupApi("/api/v1/browser-ssh/agent/resume",
-        { request_id: recovery.request_id, ...ssh }, 720000, seq);
+        payload, 720000, seq);
       if (seq !== serverSetup.seq || state.token !== token) return;
       if (!serverSetupJobPreviewValid(reply) || reply.request_id !== recovery.request_id)
         throw new Error("INVALID_RESPONSE");
       serverSetup.job = reply;
     } else {
-      const payload = { ...ssh, ...fields };
+      const { host_key_blob: _blob, ...previewJump } = jumpCredentials || {};
+      const previewPayload = { ...ssh, ...fields,
+        ...(jump ? { jump: previewJump } : {}) };
       const preview = await serverSetupApi("/api/v1/browser-ssh/target-install-preview",
-        { ...payload }, 45000, seq);
+        previewPayload, 45000, seq);
       if (seq !== serverSetup.seq || state.token !== token) return;
       if (preview?.protocol !== 1 || preview.action !== "install_preview" ||
           preview.host !== reviewed.host || preview.port !== reviewed.port ||
-          preview.host_key_fingerprint !== reviewed.fingerprint || preview.writes !== false)
+          preview.host_key_fingerprint !== reviewed.fingerprint || preview.writes !== false ||
+          (jump && (preview.jump_host !== jump.host || preview.jump_port !== jump.port ||
+            preview.jump_host_key_fingerprint !== jump.fingerprint)))
         throw new Error("INVALID_RESPONSE");
       if (preview.target_kind !== "missing" || preview.hub_route !== "reachable" ||
           preview.preflight_passed !== true)
         throw new Error(preview.hub_route === "unreachable" ? "HUB_ROUTE_BLOCKED" : "TARGET_NOT_EMPTY");
+      const payload = { ...ssh, ...fields,
+        ...(jump ? { host_key_blob: reviewed.host_key_blob, jump: { ...jumpCredentials } } : {}) };
       const reply = await serverSetupApi("/api/v1/browser-ssh/agent/prepare", payload, 720000, seq);
       if (seq !== serverSetup.seq || state.token !== token) return;
       if (!serverSetupJobPreviewValid(reply)) throw new Error("INVALID_RESPONSE");
@@ -3163,6 +3210,7 @@ async function serverSetupPrepare() {
     }
   } finally {
     if (ssh) for (const key of ["password", "private_key", "passphrase"]) ssh[key] = "";
+    if (jumpCredentials) for (const key of ["password", "private_key", "passphrase"]) jumpCredentials[key] = "";
     if (seq === serverSetup.seq) {
       serverSetupClearSecrets(); serverSetup.busy = false; serverSetup.phase = null; serverSetupRender();
     }

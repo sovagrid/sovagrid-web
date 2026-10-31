@@ -114,6 +114,7 @@ except (OSError, ValueError, TypeError):
 const HUB_ACCESS_URL = "http://hub:8765/api/v1/session/access";
 const AGENT_SOCKET = "/run/sovagrid-web-agent/control.sock";
 const MAX_BODY = 70 * 1024;
+const MAX_JUMP_BODY = 160 * 1024;
 const MAX_AGENT_REPLY = 32 * 1024;
 const MAX_OUTPUT = 4096;
 const MAX_STATUS_OUTPUT = 512;
@@ -196,6 +197,18 @@ export function hostKey(key) {
 function sameFingerprint(actual, expected) {
   if (!FINGERPRINT.test(expected)) return false;
   return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+function pinnedHostKeyBlob(blob, fingerprint) {
+  if (typeof blob !== "string" || blob.length < 12 || blob.length > 10924 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(blob)) throw new Error("INVALID_INPUT");
+  const key = Buffer.from(blob, "base64");
+  if (key.toString("base64") !== blob) throw new Error("INVALID_INPUT");
+  let actual;
+  try { actual = hostKey(key).fingerprint; }
+  catch { throw new Error("INVALID_INPUT"); }
+  if (!sameFingerprint(actual, fingerprint)) throw new Error("HOST_KEY_CHANGED");
+  return blob;
 }
 
 export function validateLogin(value) {
@@ -378,11 +391,14 @@ function validateTargetRouteStatus(value) {
 export function validateTargetInstallPreview(value) {
   const fields = ["host", "port", "username", "method", "fingerprint", "password",
     "private_key", "passphrase", "name", "hub_host", "hub_port", "local_port"];
+  const withJump = Object.hasOwn(value ?? {}, "jump");
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      Object.keys(value).length !== fields.length || fields.some((key) => !Object.hasOwn(value, key))) {
+      Object.keys(value).length !== fields.length + Number(withJump) ||
+      fields.some((key) => !Object.hasOwn(value, key))) {
     throw new Error("INVALID_INPUT");
   }
   const target = validateTargetStatus(Object.fromEntries(fields.slice(0, 8).map((key) => [key, value[key]])));
+  const jump = withJump ? validateTargetStatus(value.jump) : null;
   if (typeof value.name !== "string" || value.name.length < 1 || value.name.length > 80 ||
       value.name !== value.name.trim() || value.name.includes("PRIVATE KEY") ||
       [...value.name].some((char) => char !== " " && /[\p{C}\p{Z}]/u.test(char))) {
@@ -406,7 +422,7 @@ export function validateTargetInstallPreview(value) {
         /^ff[0-9a-f]{2}(?=:|$)/.test(normalizedHubHost) ||
         normalizedHubHost.startsWith("::ffff:")) throw new Error("INVALID_INPUT");
   }
-  return { ...target, name: value.name,
+  return { ...target, ...(jump ? { jump } : {}), name: value.name,
     hub_endpoint: { host: normalizedHubHost, port: value.hub_port, local_port: value.local_port } };
 }
 
@@ -475,20 +491,46 @@ export function validateAgentPayload(action, value) {
     return { ...target, expected: Object.fromEntries(expectedFields.map((key) => [key, value.expected[key]])) };
   }
   if (action === "prepare") {
-    const selected = validateTargetInstallPreview(value);
+    const withJump = Object.hasOwn(value ?? {}, "jump");
+    const preview = withJump ? Object.fromEntries(Object.entries(value)
+      .filter(([key]) => key !== "host_key_blob" && key !== "jump")) : value;
+    if (withJump) preview.jump = Object.fromEntries(Object.entries(value.jump ?? {})
+      .filter(([key]) => key !== "host_key_blob"));
+    const selected = validateTargetInstallPreview(preview);
+    if (withJump && (!exactFields(value.jump, ["host", "port", "username", "method",
+          "fingerprint", "password", "private_key", "passphrase", "host_key_blob"]) ||
+        Object.keys(value).length !== 14 || !Object.hasOwn(value, "host_key_blob"))) {
+      throw new Error("INVALID_INPUT");
+    }
+    if (withJump) {
+      pinnedHostKeyBlob(value.host_key_blob, selected.fingerprint);
+      pinnedHostKeyBlob(value.jump.host_key_blob, selected.jump.fingerprint);
+    }
     return { host: selected.host, port: selected.port, username: selected.username,
       method: selected.method, fingerprint: selected.fingerprint,
       password: selected.password, private_key: selected.private_key, passphrase: selected.passphrase,
       name: selected.name, hub_host: selected.hub_endpoint.host,
-      hub_port: selected.hub_endpoint.port, local_port: selected.hub_endpoint.local_port };
+      hub_port: selected.hub_endpoint.port, local_port: selected.hub_endpoint.local_port,
+      ...(withJump ? { host_key_blob: value.host_key_blob,
+        jump: { ...selected.jump, host_key_blob: value.jump.host_key_blob } } : {}) };
   }
   if (action === "resume") {
     const fields = ["request_id", "host", "port", "username", "method", "fingerprint",
       "password", "private_key", "passphrase"];
-    if (!exactFields(value, fields) || typeof value.request_id !== "string" ||
+    const withJump = Object.hasOwn(value ?? {}, "jump");
+    if (!exactFields(value, withJump ? [...fields, "host_key_blob", "jump"] : fields) ||
+        typeof value.request_id !== "string" ||
         !UUID.test(value.request_id)) throw new Error("INVALID_INPUT");
     const target = validateTargetStatus(Object.fromEntries(fields.slice(1).map((key) => [key, value[key]])));
-    return { request_id: value.request_id, ...target };
+    if (!withJump) return { request_id: value.request_id, ...target };
+    if (!exactFields(value.jump, ["host", "port", "username", "method", "fingerprint",
+      "password", "private_key", "passphrase", "host_key_blob"])) throw new Error("INVALID_INPUT");
+    const jump = validateTargetStatus(Object.fromEntries(fields.slice(1).map((key) =>
+      [key, value.jump[key]])));
+    pinnedHostKeyBlob(value.host_key_blob, target.fingerprint);
+    pinnedHostKeyBlob(value.jump.host_key_blob, jump.fingerprint);
+    return { request_id: value.request_id, ...target, host_key_blob: value.host_key_blob,
+      jump: { ...jump, host_key_blob: value.jump.host_key_blob } };
   }
   if (action === "apply" || action === "cleanup") {
     if (!exactFields(value, ["request_id", "expected_revision"]) ||
@@ -985,7 +1027,8 @@ function inspectSSHHostKey(host, port, { clientFactory = () => new Client(), tim
       client.connect({ host, port, ...(sock ? { sock } : {}), username: "sovagrid-probe",
         readyTimeout: Math.min(timeoutMs, 7000), tryKeyboard: false,
         hostVerifier: (key) => {
-          try { finish(null, { protocol: 1, port, ...hostKey(key) }); }
+          try { finish(null, { protocol: 1, port, ...hostKey(key),
+            host_key_blob: key.toString("base64") }); }
           catch { finish(new Error("SSH_UNAVAILABLE")); }
           return false; // Inspection never authenticates.
         },
@@ -1594,7 +1637,11 @@ export class DirectTerminalSessions {
 }
 
 function probeTargetHubRoute(raw, endpoint, options = {}) {
-  return probeTargetReadOnly(raw, options, { command: HUB_ROUTE_COMMAND,
+  let route;
+  try { route = validateTargetRouteStatus(raw); }
+  catch (error) { clearCredentials(raw); throw error; }
+  const run = (sock) => probeTargetReadOnly(route.target, { ...options, ...(sock ? { sock } : {}) },
+    { command: HUB_ROUTE_COMMAND,
     input: JSON.stringify({ host: endpoint.host, port: endpoint.port }),
     failureCode: "ROUTE_UNAVAILABLE", parse: (output, code, signal) => {
       if (code !== 0 || signal) throw new Error("ROUTE_UNAVAILABLE");
@@ -1602,21 +1649,28 @@ function probeTargetHubRoute(raw, endpoint, options = {}) {
       if (!match) throw new Error("ROUTE_UNAVAILABLE");
       return match[1];
     } });
+  return (route.jump ? withJumpSocket(route.jump, route.target, options, run) : run())
+    .finally(() => clearCredentials(raw));
 }
 
 export async function previewTargetInstall(raw, { status = probeTargetStatus,
-  route = probeTargetHubRoute, clientFactory = () => new Client(), timeoutMs = 20000 } = {}) {
+  route = probeTargetHubRoute, clientFactory = () => new Client(),
+  jumpClientFactory = clientFactory, timeoutMs = 20000 } = {}) {
   let selected;
   try { selected = validateTargetInstallPreview(raw); }
   catch (error) { clearCredentials(raw); throw error; }
   const target = Object.fromEntries(["host", "port", "username", "method", "fingerprint", "password",
     "private_key", "passphrase"].map((key) => [key, selected[key]]));
-  const routeTarget = { ...target };
+  if (selected.jump) target.jump = { ...selected.jump };
+  const routeTarget = { ...target, ...(selected.jump ? { jump: { ...selected.jump } } : {}) };
   try {
-    const inventory = await status(target, { clientFactory, timeoutMs });
+    const inventory = await status(target, { clientFactory, jumpClientFactory, timeoutMs });
     if (!inventory || inventory.protocol !== 1 || inventory.scope !== "entered_target" ||
         inventory.host !== selected.host || inventory.port !== selected.port ||
         inventory.host_key_fingerprint !== selected.fingerprint ||
+        (selected.jump && (inventory.jump_host !== selected.jump.host ||
+          inventory.jump_port !== selected.jump.port ||
+          inventory.jump_host_key_fingerprint !== selected.jump.fingerprint)) ||
         !["managed", "agent_only", "missing", "conflict", "unsupported", "unknown"].includes(inventory.kind)) {
       throw new Error("STATUS_UNAVAILABLE");
     }
@@ -1626,17 +1680,21 @@ export async function previewTargetInstall(raw, { status = probeTargetStatus,
         hub_endpoint: selected.hub_endpoint, target_kind: inventory.kind,
         hub_route: "not_checked", preflight_passed: false,
         source_verification_required: true, reverify_required: true,
-        host_key_fingerprint: selected.fingerprint };
+        host_key_fingerprint: selected.fingerprint,
+        ...(selected.jump ? { jump_host: selected.jump.host, jump_port: selected.jump.port,
+          jump_host_key_fingerprint: selected.jump.fingerprint } : {}) };
     }
     const hubRoute = await route(routeTarget, selected.hub_endpoint,
-      { clientFactory, timeoutMs: Math.min(timeoutMs, 12000) });
+      { clientFactory, jumpClientFactory, timeoutMs: Math.min(timeoutMs, 12000) });
     if (!["reachable", "unreachable"].includes(hubRoute)) throw new Error("ROUTE_UNAVAILABLE");
     return { protocol: 1, action: "install_preview", writes: false, scope: "entered_target",
       host: selected.host, port: selected.port, name: selected.name,
       hub_endpoint: selected.hub_endpoint, target_kind: inventory.kind,
       hub_route: hubRoute, preflight_passed: hubRoute === "reachable",
       source_verification_required: true, reverify_required: true,
-      host_key_fingerprint: selected.fingerprint };
+      host_key_fingerprint: selected.fingerprint,
+      ...(selected.jump ? { jump_host: selected.jump.host, jump_port: selected.jump.port,
+        jump_host_key_fingerprint: selected.jump.fingerprint } : {}) };
   } finally {
     clearCredentials(target); clearCredentials(routeTarget); clearCredentials(selected); clearCredentials(raw);
   }
@@ -2041,13 +2099,13 @@ function json(res, status, value) {
   res.end(body);
 }
 
-async function body(req) {
+async function body(req, maximum = MAX_BODY) {
   if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(req.headers["content-type"] || "")) {
     throw new Error("INVALID_INPUT");
   }
   const length = Number(req.headers["content-length"]);
   if (req.headers["content-length"] !== undefined &&
-      (!Number.isSafeInteger(length) || length < 0 || length > MAX_BODY)) {
+      (!Number.isSafeInteger(length) || length < 0 || length > maximum)) {
     throw new Error("INVALID_INPUT");
   }
   const chunks = [];
@@ -2057,7 +2115,7 @@ async function body(req) {
     for await (const chunk of req) {
       chunks.push(chunk);
       total += chunk.length;
-      if (total > MAX_BODY) throw new Error("INVALID_INPUT");
+      if (total > maximum) throw new Error("INVALID_INPUT");
     }
     raw = Buffer.concat(chunks);
     try { return JSON.parse(raw.toString("utf8")); }
@@ -2134,7 +2192,9 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const bodyTimer = setTimeout(() => req.destroy(), 10000);
     try {
       if (isAdminRoute) await admin(req.headers.authorization);
-      const value = await body(req);
+      const value = await body(req, (isTargetStatus || isInstallPreview ||
+        ["prepare", "resume"].includes(agentAction) || directAction === "open") ?
+        MAX_JUMP_BODY : MAX_BODY);
       clearTimeout(bodyTimer);
       try {
         if (directAction) {

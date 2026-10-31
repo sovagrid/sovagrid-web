@@ -244,6 +244,7 @@ test("one-hop target probe pins the jump and target independently without target
   assert.equal(result.jump_host, "jump.example");
   assert.equal(result.jump_port, 2222);
   assert.equal(result.jump_host_key_fingerprint, FINGERPRINT);
+  assert.equal(result.host_key_blob, KEY.toString("base64"));
   assert.deepEqual(jumpOps.forward, { sourceHost: "127.0.0.1", sourcePort: 0,
     destinationHost: "127.0.0.1", destinationPort: 22022 });
   assert.equal(targetOps.config.sock, forward.channel);
@@ -383,11 +384,35 @@ test("one-hop HTTP probes require Hub admin and erase both SSH credentials", asy
   assert.equal(probed.jump.password, "");
 });
 
+test("two bounded SSH private keys fit only the jump-capable request body", async () => {
+  const key = "K".repeat(65536);
+  const payload = statusInput({ method: "private_key", password: "", private_key: key,
+    jump: statusInput({ host: "jump.example", port: 2222, method: "private_key",
+      password: "", private_key: key }) });
+  let called = 0;
+  const handler = createHandler({ admin: async () => {}, targetStatus: async (value) => {
+    called++;
+    assert.equal(value.jump.private_key.length, 65536);
+    return { protocol: 1, scope: "entered_target", host: value.host, port: value.port,
+      host_key_fingerprint: value.fingerprint, kind: "missing", jump_host: value.jump.host,
+      jump_port: value.jump.port, jump_host_key_fingerprint: value.jump.fingerprint };
+  } });
+  const response = await call(handler, { path: "/api/v1/browser-ssh/target-status", payload,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(response.status, 200);
+  assert.equal(called, 1);
+  const oversized = await call(handler, { path: "/api/v1/browser-ssh/target-status",
+    payload: { ...payload, extra: "X".repeat(40 * 1024) },
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(oversized.status, 400);
+  assert.equal(called, 1);
+});
+
 test("host key is inspected without any SSH authentication", async () => {
   const operations = {};
   const result = await inspectHostKey({ clientFactory: () => fakeClient(operations) });
   assert.deepEqual(result, { protocol: 1, port: 22, key_type: "ssh-ed25519",
-    fingerprint: FINGERPRINT });
+    fingerprint: FINGERPRINT, host_key_blob: KEY.toString("base64") });
   assert.equal(operations.config.host, "172.30.253.1");
   assert.equal(operations.config.username, "sovagrid-probe");
   assert.equal(operations.config.password, undefined);
@@ -419,7 +444,7 @@ test("entered target host key accepts an explicit IP or hostname but no URL or c
     { clientFactory: () => fakeClient(operations) });
   assert.deepEqual(result, { protocol: 1, scope: "entered_target", host: "remote.example",
     port: 22022, key_type: "ssh-ed25519", fingerprint: FINGERPRINT,
-    reverify_required: true });
+    host_key_blob: KEY.toString("base64"), reverify_required: true });
   assert.equal(operations.config.host, "remote.example");
   assert.equal(operations.config.port, 22022);
   assert.equal(operations.config.username, "sovagrid-probe");
@@ -555,6 +580,53 @@ test("install preview accepts only a pinned target and a routable Hub IP", () =>
     { name: "" }, { hub_port: 0 }, { local_port: 1023 }, { local_port: 65536 },
     { extra: "unexpected" },
   ]) assert.throws(() => validateTargetInstallPreview(installPreviewInput(invalid)), /INVALID_INPUT/);
+  const jump = statusInput({ host: "JUMP.example", port: 2222, username: "operator",
+    password: "jump-secret" });
+  const viaJump = validateTargetInstallPreview(installPreviewInput({ jump }));
+  assert.equal(viaJump.jump.host, "jump.example");
+  assert.equal(viaJump.jump.fingerprint, FINGERPRINT);
+  assert.throws(() => validateTargetInstallPreview(installPreviewInput({
+    jump: { ...jump, extra: "unexpected" },
+  })), /INVALID_INPUT/);
+});
+
+test("install preview uses two independent pinned jump sessions and clears both secrets", async () => {
+  const raw = installPreviewInput({ host: "127.0.0.1", port: 22022,
+    jump: statusInput({ host: "jump.example", port: 2222, username: "operator",
+      password: "jump-secret" }) });
+  const jumps = [{}, {}], targets = [{}, {}];
+  const forwarded = jumps.map((operations) => fakeJump(operations));
+  let jumpIndex = 0, targetIndex = 0;
+  const result = await previewTargetInstall(raw, {
+    jumpClientFactory: () => forwarded[jumpIndex++].client,
+    clientFactory: () => fakeClient(targets[targetIndex], {
+      output: targetIndex++ === 0 ? "SG_STATUS_V1:missing\n" : "SG_HUB_ROUTE_V1:reachable\n",
+    }),
+  });
+  assert.equal(result.preflight_passed, true);
+  assert.deepEqual([result.jump_host, result.jump_port, result.jump_host_key_fingerprint],
+    ["jump.example", 2222, FINGERPRINT]);
+  assert.equal(jumpIndex, 2);
+  assert.equal(targetIndex, 2);
+  assert.equal(jumps[0].config.password, "jump-secret");
+  assert.equal(jumps[1].config.password, "jump-secret");
+  assert.equal(targets[0].config.sock, forwarded[0].channel);
+  assert.equal(targets[1].config.sock, forwarded[1].channel);
+  assert.equal(raw.password, "");
+  assert.equal(raw.jump.password, "");
+
+  const changed = Buffer.from(KEY);
+  changed[changed.length - 1] ^= 1;
+  let attempts = 0;
+  await assert.rejects(previewTargetInstall(installPreviewInput({ host: "127.0.0.1",
+    jump: statusInput({ host: "jump.example", port: 2222, username: "operator",
+      password: "jump-secret" }) }), {
+    jumpClientFactory: () => fakeJump({}, { key: attempts++ === 0 ? KEY : changed }).client,
+    clientFactory: () => fakeClient({}, {
+      output: attempts === 1 ? "SG_STATUS_V1:missing\n" : "SG_HUB_ROUTE_V1:reachable\n",
+    }),
+  }), /HOST_KEY_CHANGED/);
+  assert.equal(attempts, 2);
 });
 
 test("install preview checks target ownership and Hub route with fixed read-only SSH commands", async () => {
@@ -1407,6 +1479,31 @@ test("Agent enrollment validates each exact action body and strips private worke
   assert.throws(() => safeAgentResult("prepare", { ...AGENT_RECORD, writes: false,
     activation_writes: false,
     hub_fingerprint: FINGERPRINT, platform: {}, source_commits: SOURCE_COMMITS }), /INSTALLER_UNAVAILABLE/);
+});
+
+test("Agent prepare and resume bind two reviewed host-key blobs to one jump route", () => {
+  const jump = statusInput({ host: "jump.example", port: 2222, username: "operator",
+    password: "jump-secret", host_key_blob: KEY.toString("base64") });
+  const prepare = validateAgentPayload("prepare", installPreviewInput({
+    host_key_blob: KEY.toString("base64"), jump,
+  }));
+  assert.equal(prepare.host_key_blob, KEY.toString("base64"));
+  assert.equal(prepare.jump.host, "jump.example");
+  assert.equal(prepare.jump.host_key_blob, KEY.toString("base64"));
+  const resumed = validateAgentPayload("resume", { request_id: REQUEST_ID,
+    ...statusInput(), host_key_blob: KEY.toString("base64"), jump });
+  assert.equal(resumed.request_id, REQUEST_ID);
+  assert.equal(resumed.jump.username, "operator");
+  for (const invalid of [
+    installPreviewInput({ jump }),
+    installPreviewInput({ host_key_blob: KEY.toString("base64"),
+      jump: { ...jump, fingerprint: "SHA256:" + "A".repeat(43) } }),
+    installPreviewInput({ host_key_blob: "not-base64", jump }),
+    installPreviewInput({ host_key_blob: KEY.toString("base64"),
+      jump: { ...jump, extra: "unsafe" } }),
+  ]) assert.throws(() => validateAgentPayload("prepare", invalid), /INVALID_INPUT|HOST_KEY_CHANGED/);
+  assert.throws(() => validateAgentPayload("resume", { request_id: REQUEST_ID,
+    ...statusInput(), jump }), /INVALID_INPUT/);
 });
 
 test("Agent HTTP routes require a fresh unrestricted session and never expose submitted secrets", async () => {

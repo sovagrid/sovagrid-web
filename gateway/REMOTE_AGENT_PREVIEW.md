@@ -18,6 +18,7 @@ The JSON body has exactly these fields:
 | `name` | Proposed Hub display name, 1–80 printable characters. |
 | `hub_host`, `hub_port` | Non-loopback IP address and SSH port of this Hub as seen from the target server. |
 | `local_port` | Proposed local Agent port on the target, 1024–65535. |
+| `jump` (optional) | One separately reviewed intermediate SSH host with the same exact eight login fields as the target. Nested jumps are rejected. |
 
 The response contains `action: "install_preview"`, `writes: false`,
 `target_kind`, `hub_route`, `preflight_passed`,
@@ -29,6 +30,12 @@ short TCP connection from that target to the Hub SSH endpoint succeeds. It is
 an advisory preflight: it does not prove SSH login to the Hub, download the
 release, reserve a port, or authorize the Agent. Every check must run again
 before a future apply action.
+
+When `jump` is present, the gateway checks both SSH host keys on each probe,
+forwards only the fixed status and Hub-route commands through the intermediate
+host, and echoes its host, port and fingerprint in the preview. Separate copies
+of the two ephemeral credential sets are used for the status and route probes;
+the gateway clears each copy after use.
 
 Both SSH connections reverify the exact target host key before authentication.
 The second connection executes a fixed Python TCP probe with the Hub endpoint
@@ -44,8 +51,8 @@ HTTP) enforcement:
 
 | Route suffix under `/api/v1/browser-ssh/agent/` | JSON body |
 | --- | --- |
-| `prepare` | The exact 12 fields of `target-install-preview` above. |
-| `resume` | `request_id` plus the 8 SSH target fields (`host`, `port`, `username`, `method`, `fingerprint`, `password`, `private_key`, `passphrase`). |
+| `prepare` | The exact 12 direct fields of `target-install-preview` above, or those fields plus `host_key_blob` and `jump`. The latter has the eight SSH fields plus its own `host_key_blob`. |
+| `resume` | `request_id` plus the 8 SSH target fields (`host`, `port`, `username`, `method`, `fingerprint`, `password`, `private_key`, `passphrase`); for a jump route, add `host_key_blob` and `jump` as for `prepare`. |
 | `apply`, `cleanup` | `request_id`, `expected_revision`. |
 | `status` | `request_id`. |
 | `list` | `{}`. |
@@ -63,6 +70,11 @@ reply and discards any unexpected private fields. The worker must independently
 recheck the session and bind the reviewed target host-key fingerprint before
 any SSH authentication or write. The browser cannot choose the socket path,
 remote command, archive, or worker action outside this list.
+`host_key_blob` contains the public SSH host key from the reviewed probe,
+encoded as canonical base64. For a jump route, the gateway checks each blob's
+SHA-256 against its reviewed fingerprint; the root worker pins both public
+keys again for OpenSSH. Neither private SSH key nor password is returned by a
+probe or written to the job journal.
 
 The existing Connect `AgentEnrollment` protocol owns prepare, apply, resume,
 cleanup and its private durable journal. `prepare` checks both hosts, writes a

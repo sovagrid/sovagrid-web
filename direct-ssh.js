@@ -118,9 +118,16 @@ function directSshRender() {
     !$("directSshJumpTrust").checked);
   $("serverSetupInspect").textContent = jump ? "1. Проверить ключ целевого сервера через ProxyJump" : "1. Проверить SSH-ключ";
   if (jump) {
+    const ready = Boolean(directSshReviewedJump() && serverSetup.reviewed?.viaJump &&
+      serverSetup.reviewed.jumpHost === jumpReviewed?.host &&
+      serverSetup.reviewed.jumpPort === jumpReviewed?.port &&
+      serverSetup.reviewed.jumpFingerprint === jumpReviewed?.fingerprint);
+    $("serverSetupStatusButton").disabled ||= !ready;
+    $("serverSetupPrepareButton").disabled ||= !ready;
+    $("serverSetupInstallPanel").hidden ||= !ready;
+  } else if (serverSetup.reviewed?.viaJump) {
     $("serverSetupStatusButton").disabled = true;
     $("serverSetupInstallPanel").hidden = true;
-    $("serverSetupJobReview").hidden = true;
   }
   for (const id of ["directSshUseJump", "directSshJumpHost", "directSshJumpPort",
     "directSshJumpUsername", "directSshJumpAuthPassword", "directSshJumpAuthKey", "directSshJumpPassword",
@@ -294,7 +301,8 @@ function directSshHostKeyReplyValid(reply, target) {
   return reply?.protocol === 1 && reply.scope === "entered_target" && reply.reverify_required === true &&
     reply.host === target.host && reply.port === target.port &&
     typeof reply.key_type === "string" && /^[A-Za-z0-9@._-]{4,96}$/.test(reply.key_type) &&
-    typeof reply.fingerprint === "string" && serverSetupFingerprintPattern.test(reply.fingerprint);
+    typeof reply.fingerprint === "string" && serverSetupFingerprintPattern.test(reply.fingerprint) &&
+    (!Object.hasOwn(reply, "host_key_blob") || serverSetupHostKeyBlobValid(reply.host_key_blob));
 }
 async function directSshJumpInspect() {
   if (!directSshJumpEnabled() || directSshActive() || !serverSetupAllowed() ||
@@ -317,7 +325,8 @@ async function directSshJumpInspect() {
     if (seq !== serverSetup.seq || token !== state.token || !serverSetupAllowed() ||
         !$("addServerDialog").open || !directSshJumpEnabled()) return;
     if (!directSshHostKeyReplyValid(reply, target)) throw new Error("INVALID_RESPONSE");
-    directSSH.jump.reviewed = { ...target, fingerprint: reply.fingerprint };
+    directSSH.jump.reviewed = { ...target, fingerprint: reply.fingerprint,
+      host_key_blob: reply.host_key_blob };
     $("directSshJumpReviewedHost").textContent = target.host.includes(":") ?
       `[${target.host}]:${target.port}` : `${target.host}:${target.port}`;
     $("directSshJumpFingerprint").textContent = reply.fingerprint;
@@ -362,6 +371,28 @@ async function directSshJumpCredentials(seq, reviewed) {
     password = private_key = passphrase = "";
   }
 }
+
+function directSshReviewedJump() {
+  const reviewed = directSSH.jump.reviewed;
+  const saved = reviewed ? serverSetupPin(reviewed.host, reviewed.port) : null;
+  if (!directSshJumpEnabled() || !reviewed || directSSH.jump.changedPin ||
+      !$("directSshJumpTrust").checked || !serverSetupHostKeyBlobValid(reviewed.host_key_blob) ||
+      (saved && saved !== reviewed.fingerprint)) return null;
+  try {
+    const target = directSshJumpTarget();
+    if (target.host !== reviewed.host || target.port !== reviewed.port) return null;
+  } catch { return null; }
+  return { ...reviewed };
+}
+
+async function directSshInstallJumpCredentials(seq, reviewed) {
+  const current = directSshReviewedJump();
+  if (!current || current.host !== reviewed?.host || current.port !== reviewed.port ||
+      current.fingerprint !== reviewed.fingerprint ||
+      current.host_key_blob !== reviewed.host_key_blob) throw new Error("STALE_REQUEST");
+  const credentials = await directSshJumpCredentials(seq, current);
+  return { ...credentials, host_key_blob: current.host_key_blob };
+}
 async function directSshInspectTargetViaJump() {
   if (!directSshJumpEnabled() || directSshActive() || serverSetup.busy || !serverSetupAllowed() ||
       !directSSH.jump.reviewed || directSSH.jump.changedPin || !$("directSshJumpTrust").checked) return;
@@ -391,7 +422,8 @@ async function directSshInspectTargetViaJump() {
     if (!directSshHostKeyReplyValid(reply, target) ||
         reply.jump_host_key_fingerprint !== jump.fingerprint) throw new Error("INVALID_RESPONSE");
     serverSetupSavePin(jump.host, jump.port, jump.fingerprint);
-    serverSetup.reviewed = { ...target, fingerprint: reply.fingerprint, viaJump: true,
+    serverSetup.reviewed = { ...target, fingerprint: reply.fingerprint,
+      host_key_blob: reply.host_key_blob, viaJump: true,
       jumpHost: jump.host, jumpPort: jump.port, jumpFingerprint: jump.fingerprint };
     $("serverSetupReviewedHost").textContent = target.host.includes(":") ?
       `[${target.host}]:${target.port}` : `${target.host}:${target.port}`;
@@ -720,4 +752,5 @@ globalThis.addEventListener?.("sovagridthemechange", () => {
 });
 globalThis.sovagridDirectSSH = { render: directSshRender, reset: directSshReset,
   accessChanged: directSshAccessChanged, jumpEnabled: directSshJumpEnabled,
-  inspectTargetViaJump: directSshInspectTargetViaJump, clearJump: directSshJumpClear };
+  inspectTargetViaJump: directSshInspectTargetViaJump, clearJump: directSshJumpClear,
+  reviewedJump: directSshReviewedJump, installJumpCredentials: directSshInstallJumpCredentials };

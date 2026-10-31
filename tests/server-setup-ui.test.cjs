@@ -95,8 +95,8 @@ test('add-server dialog has guided SSH path and separate manual Agent registrati
   assert.match(html, /Проверить состояние без изменений/);
   assert.match(html, /id="serverSetupInstallPanel"/);
   assert.match(html, /id="serverSetupRecovery"/);
-  assert.match(html, /app\.js\?v=54/);
-  assert.match(shell, /app\.js\?v=54/);
+  assert.match(html, /app\.js\?v=55/);
+  assert.match(shell, /app\.js\?v=55/);
   assert.match(html, /styles\.css\?v=46/);
   assert.match(shell, /styles\.css\?v=46/);
 });

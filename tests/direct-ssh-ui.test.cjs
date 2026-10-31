@@ -109,8 +109,8 @@ test('direct terminal is offered after trusted host-key review and only to an un
   const sw = fs.readFileSync('sw.js', 'utf8');
   assert.match(html, /id="serverSetupDirectTerminalButton"/);
   assert.match(html, /id="directSshScreen"/);
-  assert.match(html, /direct-ssh\.js\?v=1/);
-  assert.match(sw, /direct-ssh\.js\?v=1/);
+  assert.match(html, /direct-ssh\.js\?v=2/);
+  assert.match(sw, /direct-ssh\.js\?v=2/);
   assert.match(sw, /direct-ssh\.css\?v=1/);
   const h = harness();
   assert.equal(h.element('serverSetupDirectTerminalButton').disabled, true);
@@ -369,6 +369,85 @@ test('ProxyJump verifies both host keys, re-enters jump credentials, and opens o
   assert.equal(h.storage.get('sovagrid.target-ssh-host-key:https://panel.example:server.example:22'), FP);
   h.element('addServerDialog').close();
   waiting.resolve({ ok: true, status: 200, json: async () => ({ events: [], next_cursor: 0, closed: true }) });
+});
+
+test('ProxyJump Agent setup keeps two pinned keys and separates preview from prepare credentials', async () => {
+  const h = harness({ storageAvailable: false });
+  const blob = Buffer.from('fixture-public-host-key').toString('base64');
+  const jumpFP = OTHER_FP;
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  h.setFetchHook(async (path, options) => {
+    if (path === '/api/v1/browser-ssh/agent/list') return {
+      ok: true, status: 200, json: async () => [],
+    };
+    if (path === '/api/v1/browser-ssh/target-host-key') {
+      const body = JSON.parse(options.body);
+      return { ok: true, status: 200, json: async () => body.host === 'jump.example' ? {
+        protocol: 1, scope: 'entered_target', host: 'jump.example', port: 22,
+        key_type: 'ssh-ed25519', fingerprint: jumpFP, host_key_blob: blob,
+        reverify_required: true,
+      } : {
+        protocol: 1, scope: 'entered_target', host: 'server.example', port: 22,
+        key_type: 'ssh-ed25519', fingerprint: FP, host_key_blob: blob,
+        jump_host_key_fingerprint: jumpFP, reverify_required: true,
+      } };
+    }
+    if (path === '/api/v1/browser-ssh/target-status') return { ok: true, status: 200,
+      json: async () => ({ protocol: 1, scope: 'entered_target', host: 'server.example', port: 22,
+        host_key_fingerprint: FP, kind: 'missing', jump_host: 'jump.example', jump_port: 22,
+        jump_host_key_fingerprint: jumpFP }) };
+    if (path === '/api/v1/browser-ssh/target-install-preview') return { ok: true, status: 200,
+      json: async () => ({ protocol: 1, action: 'install_preview', writes: false,
+        host: 'server.example', port: 22, target_kind: 'missing', hub_route: 'reachable',
+        preflight_passed: true, host_key_fingerprint: FP, jump_host: 'jump.example',
+        jump_port: 22, jump_host_key_fingerprint: jumpFP }) };
+    if (path === '/api/v1/browser-ssh/agent/prepare') return { ok: true, status: 200,
+      json: async () => ({ protocol: 1, request_id: requestId, name: 'server.example',
+        phase: 'prepared', revision: 1, created_at: 1, updated_at: 2,
+        cleanup_required: false, server_id: null, registration_state: null,
+        recoverable: true, writes: true, activation_writes: false,
+        hub_fingerprint: FP, platform: { ubuntu_version: '24.04', python_version: '3.12',
+          systemd_version: '255' }, source_commits: { 'sovagrid-agent': 'a'.repeat(40) } }) };
+    throw new Error(path);
+  });
+  h.element('directSshUseJump').checked = true;
+  h.element('directSshUseJump').listeners.get('change')();
+  h.element('directSshJumpHost').value = 'jump.example';
+  h.element('directSshJumpPort').value = '22';
+  await h.context.directSshJumpInspect();
+  h.element('directSshJumpTrust').checked = true;
+  h.element('directSshJumpUsername').value = 'operator';
+  h.element('directSshJumpPassword').value = 'jump-review-secret';
+  await h.context.serverSetupInspect();
+  h.element('serverSetupTrust').checked = true;
+  h.context.serverSetupRender();
+  assert.equal(h.element('serverSetupStatusButton').disabled, false);
+  h.element('serverSetupUsername').value = 'root';
+  h.element('serverSetupPassword').value = 'target-status-secret';
+  h.element('directSshJumpPassword').value = 'jump-status-secret';
+  await h.context.serverSetupStatus({ preventDefault() {} });
+  const statusBody = JSON.parse(h.calls.find((call) => call.path.endsWith('/target-status')).options.body);
+  assert.equal(statusBody.password, 'target-status-secret');
+  assert.equal(statusBody.jump.password, 'jump-status-secret');
+  assert.equal(h.element('serverSetupInstallPanel').hidden, false);
+  h.element('serverSetupInstallName').value = 'server.example';
+  h.element('serverSetupHubHost').value = '198.51.100.20';
+  h.element('serverSetupHubPort').value = '22';
+  h.element('serverSetupLocalPort').value = '22023';
+  h.element('serverSetupPassword').value = 'target-prepare-secret';
+  h.element('directSshJumpPassword').value = 'jump-prepare-secret';
+  await h.context.serverSetupPrepare();
+  const previewBody = JSON.parse(h.calls.find((call) => call.path.endsWith('/target-install-preview')).options.body);
+  const prepareBody = JSON.parse(h.calls.find((call) => call.path.endsWith('/agent/prepare')).options.body);
+  assert.equal(previewBody.jump.password, 'jump-prepare-secret');
+  assert.equal(previewBody.jump.host_key_blob, undefined);
+  assert.equal(previewBody.host_key_blob, undefined);
+  assert.equal(prepareBody.password, 'target-prepare-secret');
+  assert.equal(prepareBody.jump.password, 'jump-prepare-secret');
+  assert.equal(prepareBody.host_key_blob, blob);
+  assert.equal(prepareBody.jump.host_key_blob, blob);
+  assert.equal(h.element('serverSetupPassword').value, '');
+  assert.equal(h.element('directSshJumpPassword').value, '');
 });
 
 test('ProxyJump target review rejects a changed jump key and never pins the target', async () => {
