@@ -9,6 +9,10 @@
 .host-backups-panel .backups-restore-active .backup-card-actions button { min-height: 40px; }
 #hostBackupCreateSummary, #hostBackupRecoverSummary { white-space: pre-line; overflow-wrap: anywhere; }
 .host-portable-downloads { margin: 14px 0 18px; padding: 14px; border: 1px solid var(--line, #64748b); border-radius: 12px; }
+.host-portable-pending { margin: 14px 0 18px; padding: 14px; border: 1px solid var(--accent, #2563eb); border-radius: 12px; }
+.host-portable-pending p { margin: 8px 0 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.host-portable-pending .backup-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.host-portable-pending .backup-card-actions button { min-height: 40px; }
 .host-portable-downloads p { margin: 0 0 10px; line-height: 1.5; }
 .host-portable-downloads a { overflow-wrap: anywhere; }
 .host-portable-files { display: grid; gap: 10px; }
@@ -20,4 +24,6 @@
   .host-backups-panel .backups-restore-active .backup-card-actions button { width: 100%; }
   .host-portable-file { align-items: stretch; flex-direction: column; }
   .host-portable-file .secondary-button { width: 100%; }
+  .host-portable-pending .backup-card-actions { flex-direction: column; }
+  .host-portable-pending .backup-card-actions button { width: 100%; }
 }

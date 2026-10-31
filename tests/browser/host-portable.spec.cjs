@@ -77,4 +77,24 @@ test('phone and desktop download a verified portable image with one-use same-ori
   expect(grants).toBe(1);
   const replay = await page.context().request.get(download.url());
   expect(replay.status()).toBe(403);
+  await expect(page.locator('#hostBackupDownloadPending')).toBeVisible();
+  await expect(page.locator('#hostBackupDownloadPending')).toContainText('до часа');
+  await expect(page.locator('#hostBackupPortableCreate')).toBeDisabled();
+  const archiveRow = page.locator('.host-portable-file').filter({ hasText: 'Архив хоста' });
+  await expect(archiveRow.getByRole('button', { name: 'Подготовить скачивание' })).toBeDisabled();
+
+  await page.reload();
+  await page.locator('#hubLoginMode').click();
+  await page.locator('#hubUrl').fill('http://127.0.0.1:8900');
+  await page.locator('#username').fill('owner');
+  await page.locator('#password').fill('fixture-owner-passphrase');
+  await page.locator('#loginButton').click();
+  await expect(page.locator('#appView')).toBeVisible();
+  await page.locator('[data-view="settings"]').click();
+  await expect(page.locator('#hostBackupDownloadPending')).toBeVisible();
+  await page.locator('#hostBackupDownloadPending').getByRole('button',
+    { name: 'Файл сохранён — продолжить' }).click();
+  await expect(page.locator('#hostBackupDownloadPending')).toBeHidden();
+  await expect(page.locator('#hostBackupPortableCreate')).toBeEnabled();
+  expect(grants).toBe(1);
 });

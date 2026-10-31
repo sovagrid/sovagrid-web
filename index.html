@@ -23,7 +23,7 @@
   <link rel="stylesheet" href="theme.css?v=6">
   <link rel="stylesheet" href="users.css?v=2">
   <link rel="stylesheet" href="backups.css?v=2">
-  <link rel="stylesheet" href="host-backups.css?v=2">
+  <link rel="stylesheet" href="host-backups.css?v=3">
   <link rel="stylesheet" href="updates.css?v=1">
   <link rel="stylesheet" href="external-agent-update.css?v=1">
   <link rel="stylesheet" href="public-web.css?v=2">
@@ -38,7 +38,7 @@
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
   <script src="backups-restore.js?v=1" defer></script>
-  <script src="host-backups.js?v=2" defer></script>
+  <script src="host-backups.js?v=3" defer></script>
   <script src="updates.js?v=1" defer></script>
   <script src="external-agent-update.js?v=1" defer></script>
   <script src="access.js?v=1" defer></script>
@@ -845,6 +845,7 @@
           <p id="hostBackupPortableSupport" class="field-help">Проверяем поддержку переносимых копий.</p>
           <p id="hostBackupStatus" class="field-help" role="status" aria-live="polite">Проверяем доступ к копиям хоста.</p>
           <p id="hostBackupError" class="form-error" role="alert" hidden></p>
+          <div id="hostBackupDownloadPending" class="host-portable-pending" role="status" aria-live="polite" hidden></div>
           <div id="hostBackupActive" class="backups-restore-active" hidden></div>
           <div id="hostBackupPortableFiles" class="host-portable-downloads" hidden></div>
           <div class="backups-restore-heading"><div><p class="eyebrow">АРХИВЫ</p><h3>Копии хоста</h3></div></div>
@@ -993,6 +994,7 @@
   <dialog id="backupsForgetDialog" class="modal" aria-labelledby="backupsForgetHeading"><div class="modal-heading"><p class="eyebrow">Локальный запрос</p><h2 id="backupsForgetHeading">Убрать запись с этого устройства?</h2></div><p id="backupsForgetSummary"></p><p class="command-warning">Это удалит только сохранённый в браузере UUID. Снимки и журнал на сервере не изменятся. Перед новым восстановлением убедитесь, что прежнее не идёт; сервер отклонит параллельную операцию.</p><div class="modal-actions"><button id="backupsForgetCancel" class="secondary-button" type="button">Оставить запрос</button><button id="backupsForgetConfirm" class="primary-button" type="button">Убрать локальную запись</button></div></dialog>
   <dialog id="hostBackupCreateDialog" class="modal" aria-labelledby="hostBackupCreateHeading"><div class="modal-heading"><p class="eyebrow">КОПИЯ ХОСТА</p><h2 id="hostBackupCreateHeading">Временно остановить службы?</h2></div><p id="hostBackupCreateSummary"></p><p class="command-warning">Hub и Web могут не отвечать несколько минут; текущий сеанс может завершиться. Запрос продолжится на сервере. Если панель не вернётся, проверьте этот же ID через SovaGrid Connect по SSH.</p><p id="hostBackupCreateError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="hostBackupCreateCancel" class="secondary-button" type="button">Отмена</button><button id="hostBackupCreateConfirm" class="primary-button" type="button">Остановить и создать копию</button></div></dialog>
   <dialog id="hostBackupRecoverDialog" class="modal" aria-labelledby="hostBackupRecoverHeading"><div class="modal-heading"><p class="eyebrow">КОПИЯ ХОСТА</p><h2 id="hostBackupRecoverHeading">Восстановить службы?</h2></div><p id="hostBackupRecoverSummary"></p><p class="command-warning">Пока предыдущий worker работает, сервер отклонит запрос. Повторное создание архива не выполняется. Если Hub остановлен, исправление возможно через Connect по SSH.</p><p id="hostBackupRecoverError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="hostBackupRecoverCancel" class="secondary-button" type="button">Отмена</button><button id="hostBackupRecoverConfirm" class="primary-button" type="button">Восстановить службы</button></div></dialog>
+  <dialog id="hostBackupDownloadRetryDialog" class="modal" aria-labelledby="hostBackupDownloadRetryHeading"><div class="modal-heading"><p class="eyebrow">СКАЧИВАНИЕ КОПИИ</p><h2 id="hostBackupDownloadRetryHeading">Повторить попытку?</h2></div><p id="hostBackupDownloadRetrySummary"></p><div class="modal-actions"><button id="hostBackupDownloadRetryCancel" class="secondary-button" type="button">Продолжить ожидание</button><button id="hostBackupDownloadRetryConfirm" class="primary-button" type="button">Прежняя загрузка остановлена</button></div></dialog>
   <dialog id="amneziaDialog" class="modal vpn-action-confirm"><div class="modal-heading"><p class="eyebrow">Подтверждение VPN</p><h2 id="amneziaDialogTitle">Операция с профилем</h2></div><p id="amneziaDialogSummary"></p><p id="amneziaDialogServer"></p><div id="amneziaRevokeConfirmation" hidden><label for="amneziaRevokeName">Введите имя клиента для отзыва</label><input id="amneziaRevokeName" autocomplete="off" spellcheck="false"></div><p id="amneziaDialogError" class="form-error" role="alert" hidden></p><div class="modal-actions"><button id="amneziaDialogCancel" class="secondary-button" type="button">Отмена</button><button id="amneziaDialogConfirm" class="primary-button" type="button">Выполнить</button></div></dialog>
   <dialog id="amneziaSetupDialog" class="modal vpn-action-confirm"><div class="modal-heading"><p class="eyebrow">Подтверждение настройки</p><h2 id="amneziaSetupDialogTitle">Настроить VPN</h2></div><p id="amneziaSetupDialogSummary"></p><label id="amneziaSetupMaintenanceLabel" hidden><input id="amneziaSetupMaintenance" type="checkbox"> У меня есть окно обслуживания: подключение клиентов может прерваться</label><p class="field-help">SovaGrid повторно сверит состояние перед действием. Если оно изменилось, действие будет остановлено.</p><div class="modal-actions"><button id="amneziaSetupDialogCancel" class="secondary-button" type="button">Отмена</button><button id="amneziaSetupDialogConfirm" class="primary-button" type="button">Подтвердить</button></div></dialog>
   <dialog id="wgControlDialog" class="modal vpn-action-confirm" aria-labelledby="wgControlDialogTitle"><div class="modal-heading"><p class="eyebrow">Подтверждение WireGuard</p><h2 id="wgControlDialogTitle">Установить брокер?</h2></div><p id="wgControlDialogSummary"></p><p class="field-help">Сервер повторно проверит SSH-ключ и состояние. Если ответ потеряется, сначала откройте новый предпросмотр.</p><div class="modal-actions"><button id="wgControlDialogCancel" class="secondary-button" type="button">Отмена</button><button id="wgControlDialogConfirm" class="primary-button" type="button">Подтвердить</button></div></dialog>

@@ -263,6 +263,55 @@ test('verified portable pair gets one same-origin cookie grant and a native down
   assert.equal(h.calls.filter((call) => call.url.endsWith('/portable/download/images')).length, 0);
   links[0].listeners.get('click')();
   assert.equal(h.client.portableGrant, null);
+  assert.deepEqual({ ...h.context.hostBackupReadDownloadMarker() }, {
+    requestId: operationId, part: 'images', startedAt: h.client.portableDownloadPending.startedAt,
+  });
+  h.context.hostBackupRender();
+  assert.equal(h.element('hostBackupDownloadPending').hidden, false);
+  assert.match(h.element('hostBackupDownloadPending').children[1].textContent, /до часа/);
+  assert.equal(h.element('hostBackupCreate').disabled, true);
+  await h.context.hostBackupPortablePrepareDownload(operationId, 'archive');
+  assert.equal(h.calls.filter((call) => call.url.includes('/download-grants/')).length, 1);
+
+  const resumed = harness(h.localStore);
+  resumed.context.location.origin = 'https://hub.example';
+  resumed.setFetchHook((url) => Promise.resolve(url.endsWith('/portable/capabilities')
+    ? reply(200, { supported: true, download: true }) : metadata(url)));
+  await resumed.context.hostBackupsRefresh(true);
+  assert.equal(resumed.client.portableDownloadPending.part, 'images');
+  assert.equal(resumed.element('hostBackupDownloadPending').hidden, false);
+  assert.equal(resumed.element('hostBackupPortableCreate').disabled, true);
+  const pendingActions = resumed.element('hostBackupDownloadPending').children[2].children;
+  pendingActions[1].listeners.get('click')();
+  assert.equal(resumed.element('hostBackupDownloadRetryDialog').open, true);
+  resumed.element('hostBackupDownloadRetryCancel').listeners.get('click')();
+  assert.equal(resumed.context.hostBackupReadDownloadMarker().part, 'images');
+  pendingActions[1].listeners.get('click')();
+  resumed.element('hostBackupDownloadRetryConfirm').listeners.get('click')();
+  assert.equal(resumed.context.hostBackupReadDownloadMarker(), null);
+  assert.equal(resumed.element('hostBackupDownloadPending').hidden, true);
+  assert.equal(resumed.element('hostBackupPortableCreate').disabled, false);
+});
+
+test('native download is canceled if the browser cannot persist its pending state', () => {
+  const h = harness();
+  h.context.location.origin = 'https://hub.example';
+  Object.assign(h.client, { ready: true, activeId: operationId,
+    active: operation(operationId, 'complete'), activePortable: true,
+    portableReceipt, portableVerified: { requestId: operationId, archive,
+      imagesBytes: 8192, receipt: portableReceipt, base: h.state.base, token: h.state.token },
+    portableGrant: { requestId: operationId, part: 'images', base: h.state.base,
+      token: h.state.token, expiresAt: Date.now() + 60000 } });
+  h.context.hostBackupRender();
+  const link = descendants(h.element('hostBackupPortableFiles')).find((item) =>
+    typeof item.href === 'string' && item.href.endsWith('/portable/download/images'));
+  assert.ok(link);
+  h.context.localStorage.setItem = () => { throw new Error('storage unavailable'); };
+  let canceled = false;
+  link.listeners.get('click')({ preventDefault() { canceled = true; } });
+  assert.equal(canceled, true);
+  assert.equal(h.client.portableDownloadPending, null);
+  assert.match(h.element('hostBackupError').textContent, /Не удалось сохранить состояние/);
 });
 
 test('remote-origin panel does not issue a cookie grant for another Hub', async () => {

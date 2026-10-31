@@ -6,6 +6,7 @@
 // The Hub and Web containers stop during a host snapshot. Keep only its
 // request ID in browser storage; the root journal is the source of truth.
 const HOST_BACKUP_MARKER = "sovagrid.host-backup-request.v1:";
+const HOST_PORTABLE_DOWNLOAD_MARKER = "sovagrid.host-portable-download.v1:";
 const HOST_BACKUP_ID = /^[0-9a-f]{32}$/;
 const HOST_BACKUP_SHA = /^[0-9a-f]{64}$/;
 const HOST_BACKUP_ERROR = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -27,6 +28,7 @@ const hostBackupClient = {
   active: null, pending: null, pendingRecover: null, lastRefresh: 0,
   ready: false, uncertain: false, portableAvailable: false, activePortable: false,
   portableReceipt: null, portableVerified: null, portableGrant: null,
+  portableDownloadPending: null,
 };
 
 function hostBackupCurrent(generation, token, base) {
@@ -66,6 +68,50 @@ function hostBackupClearMarker(requestId) {
   try {
     if (hostBackupReadMarker() === requestId) localStorage.removeItem(hostBackupMarkerKey());
   } catch { /* The server record remains available without local storage. */ }
+}
+
+function hostBackupDownloadMarkerKey() { return HOST_PORTABLE_DOWNLOAD_MARKER + state.base; }
+
+function hostBackupReadDownloadMarker() {
+  try {
+    const value = JSON.parse(localStorage.getItem(hostBackupDownloadMarkerKey()) || "null");
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        Object.keys(value).sort().join(",") !== "base,part,request_id,started_at" ||
+        value.base !== state.base || !HOST_BACKUP_ID.test(value.request_id) ||
+        !Object.hasOwn(HOST_PORTABLE_PARTS, value.part) ||
+        !Number.isSafeInteger(value.started_at) || value.started_at < 0 ||
+        !Number.isFinite(new Date(value.started_at).getTime())) return null;
+    return { requestId: value.request_id, part: value.part, startedAt: value.started_at };
+  } catch { return null; }
+}
+
+function hostBackupSaveDownloadMarker(requestId, part) {
+  if (!HOST_BACKUP_ID.test(requestId) || !Object.hasOwn(HOST_PORTABLE_PARTS, part) ||
+      hostBackupReadDownloadMarker()) return null;
+  const startedAt = Date.now();
+  try {
+    localStorage.setItem(hostBackupDownloadMarkerKey(), JSON.stringify({
+      base: state.base, request_id: requestId, part, started_at: startedAt,
+    }));
+    const saved = hostBackupReadDownloadMarker();
+    return saved?.requestId === requestId && saved.part === part &&
+      saved.startedAt === startedAt ? saved : null;
+  } catch { return null; }
+}
+
+function hostBackupClearDownloadMarker(pending) {
+  try {
+    const saved = hostBackupReadDownloadMarker();
+    if (saved && saved.requestId === pending.requestId && saved.part === pending.part &&
+        saved.startedAt === pending.startedAt)
+      localStorage.removeItem(hostBackupDownloadMarkerKey());
+    if (localStorage.getItem(hostBackupDownloadMarkerKey()) !== null) {
+      hostBackupClient.portableDownloadPending = hostBackupReadDownloadMarker() || pending;
+      return false;
+    }
+    hostBackupClient.portableDownloadPending = null;
+    return true;
+  } catch { return false; }
 }
 
 function hostBackupDate(value) {
@@ -195,7 +241,8 @@ function hostBackupCanStart() {
   const client = hostBackupClient;
   return hubCanGlobalAdmin() && Boolean(state.token) && client.ready && client.plan &&
     client.manifest && !client.loading && !client.starting && !client.recovering &&
-    !client.pending && !hostBackupReadMarker() &&
+    !client.pending && !client.portableDownloadPending && !hostBackupReadDownloadMarker() &&
+    !hostBackupReadMarker() &&
     !client.operations.some((item) => !HOST_BACKUP_FINAL.has(item.phase));
 }
 
@@ -217,6 +264,26 @@ function hostBackupRender() {
   $("hostBackupPortableSupport").textContent = client.portableAvailable
     ? "Переносимая копия включает архив хоста, точные образы контейнеров и квитанцию. После проверки их можно скачать по отдельности."
     : "Переносимые копии появятся после установки совместимого серверного выпуска.";
+  const downloadPending = $("hostBackupDownloadPending");
+  downloadPending.replaceChildren();
+  downloadPending.hidden = !ready || !client.portableDownloadPending;
+  if (!downloadPending.hidden) {
+    const pending = client.portableDownloadPending;
+    const title = document.createElement("strong");
+    title.textContent = `Скачивание «${HOST_PORTABLE_PARTS[pending.part]}» запрошено`;
+    const detail = document.createElement("p");
+    detail.textContent = `Запрос ${pending.requestId} · ${new Date(pending.startedAt).toLocaleString("ru-RU", { timeZone: "UTC" })} UTC. Сервер может проверять файлы до часа до начала передачи. После этого скачивание может идти дольше. Проверьте загрузки браузера: панель не видит, сохранён ли файл.`;
+    const actions = document.createElement("div"); actions.className = "backup-card-actions";
+    const complete = document.createElement("button"); complete.type = "button";
+    complete.className = "primary-button"; complete.textContent = "Файл сохранён — продолжить";
+    complete.addEventListener("click", () => { hostBackupResolveDownload("complete"); });
+    const retry = document.createElement("button"); retry.type = "button";
+    retry.className = "secondary-button";
+    retry.textContent = "Скачивание прервалось — повторить…";
+    retry.addEventListener("click", hostBackupPrepareDownloadRetry);
+    actions.append(complete, retry);
+    downloadPending.append(title, detail, actions);
+  }
   $("hostBackupCount").textContent = client.ready ? String(client.archives.length) : "—";
   $("hostBackupPlan").textContent = client.plan
     ? `${client.plan.layout === "full" ? "Полный узел" : "Только Hub"} · ${client.plan.active_units.length} служб · ${client.plan.running_containers.length} контейнера(ов). При создании архивируются настройки и данные этого узла.`
@@ -245,7 +312,8 @@ function hostBackupRender() {
       verify.className = "secondary-button";
       verify.textContent = client.checking === client.activeId ? "Проверяем…" :
         "Проверить архив и образы";
-      verify.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
+      verify.disabled = !ready || Boolean(client.portableDownloadPending) ||
+        Boolean(client.checking) || client.starting || client.recovering;
       verify.addEventListener("click", () => { void hostBackupPortableVerify(client.activeId); });
       actions.append(verify);
     }
@@ -280,7 +348,13 @@ function hostBackupRender() {
         const row = document.createElement("div"); row.className = "host-portable-file";
         const name = document.createElement("span"); name.textContent = label;
         const grant = client.portableGrant;
-        if (grant && grant.requestId === result.requestId && grant.part === part &&
+        const pendingThis = client.portableDownloadPending?.requestId === result.requestId &&
+          client.portableDownloadPending.part === part;
+        if (pendingThis) {
+          const status = document.createElement("span");
+          status.className = "field-help"; status.textContent = "Ожидаем браузер";
+          row.append(name, status);
+        } else if (grant && grant.requestId === result.requestId && grant.part === part &&
             grant.expiresAt > Date.now() && grant.base === state.base && grant.token === state.token) {
           const link = document.createElement("a");
           link.className = "secondary-button";
@@ -288,21 +362,33 @@ function hostBackupRender() {
           link.href = `${state.base}/api/v1/host-backups/operations/${result.requestId}/portable/download/${part}`;
           link.download = part === "archive" ? "host.tar.gz" :
             part === "images" ? "images.tar" : "receipt.json";
-          link.addEventListener("click", () => {
+          link.addEventListener("click", (event) => {
+            const pending = hostBackupSaveDownloadMarker(result.requestId, part);
+            if (!pending) {
+              event.preventDefault();
+              showError($("hostBackupError"),
+                "Не удалось сохранить состояние скачивания или уже идёт другая загрузка. Разрешите хранение данных сайта и обновите панель.");
+              return;
+            }
+            client.portableDownloadPending = pending;
             client.portableGrant = null;
             link.setAttribute("aria-disabled", "true");
             link.style.pointerEvents = "none";
-            setTimeout(() => {
+            $("hostBackupStatus").textContent =
+              "Запрос на скачивание отправлен. Проверка на сервере может занять до часа; следите за загрузками браузера.";
+            const redraw = setTimeout(() => {
               if (hostBackupCurrent(client.generation, state.token, state.base))
                 hostBackupRender();
             }, 1500);
+            redraw?.unref?.();
           });
           row.append(name, link);
         } else {
           const prepare = document.createElement("button"); prepare.type = "button";
           prepare.className = "secondary-button";
           prepare.textContent = "Подготовить скачивание";
-          prepare.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
+          prepare.disabled = !ready || Boolean(client.portableDownloadPending) ||
+            Boolean(client.checking) || client.starting || client.recovering;
           prepare.addEventListener("click", () => { void hostBackupPortablePrepareDownload(result.requestId, part); });
           row.append(name, prepare);
         }
@@ -310,7 +396,7 @@ function hostBackupRender() {
       }
       portableFiles.append(list);
       const note = document.createElement("p"); note.className = "field-help";
-      note.textContent = "Нажмите «Подготовить скачивание», затем «Скачать» в течение минуты. Браузер сохранит файл напрямую с вашего Hub; SovaGrid не загружает многогигабайтный архив в память страницы.";
+      note.textContent = "Нажмите «Подготовить скачивание», затем «Скачать» в течение минуты. Сервер может проверять файлы до часа перед передачей. Дождитесь результата в загрузках браузера и подтвердите его выше; SovaGrid не загружает многогигабайтный архив в память страницы.";
       portableFiles.append(note);
     }
   }
@@ -364,9 +450,10 @@ function hostBackupsReset() {
     activeId: null, active: null, pending: null, pendingRecover: null,
     lastRefresh: 0, ready: false, uncertain: false, portableAvailable: false,
     activePortable: false, portableReceipt: null, portableVerified: null,
-    portableGrant: null });
+    portableGrant: null, portableDownloadPending: null });
   if ($("hostBackupCreateDialog").open) $("hostBackupCreateDialog").close();
   if ($("hostBackupRecoverDialog").open) $("hostBackupRecoverDialog").close();
+  if ($("hostBackupDownloadRetryDialog").open) $("hostBackupDownloadRetryDialog").close();
   $("hostBackupStatus").textContent = "Откройте настройки, чтобы проверить копии хоста.";
   clearError($("hostBackupError"));
   hostBackupRender();
@@ -382,6 +469,7 @@ async function hostBackupsRefresh(force = false) {
   if (!force && Date.now() - client.lastRefresh < interval) return;
   const generation = client.generation, token = state.token, base = state.base;
   client.loading = true; client.lastRefresh = Date.now();
+  client.portableDownloadPending = hostBackupReadDownloadMarker();
   const markerRecord = hostBackupReadMarkerRecord();
   const marker = markerRecord?.requestId || null;
   if (marker && !client.activeId) client.activeId = marker;
@@ -542,7 +630,7 @@ async function hostBackupPortableVerify(requestId) {
   if (!HOST_BACKUP_ID.test(requestId) || client.activeId !== requestId ||
       !client.activePortable || client.active?.phase !== "complete" ||
       !client.portableReceipt || !state.token || !hubCanGlobalAdmin() ||
-      client.checking || client.starting || client.recovering) return;
+      client.portableDownloadPending || client.checking || client.starting || client.recovering) return;
   const generation = client.generation, token = state.token, base = state.base;
   client.checking = requestId; client.portableVerified = null; client.portableGrant = null;
   hostBackupRender();
@@ -579,9 +667,15 @@ async function hostBackupPortableVerify(requestId) {
 
 async function hostBackupPortablePrepareDownload(requestId, part) {
   const client = hostBackupClient, verified = client.portableVerified;
+  const savedDownload = hostBackupReadDownloadMarker();
+  if (savedDownload && !client.portableDownloadPending) {
+    client.portableDownloadPending = savedDownload;
+    hostBackupRender();
+  }
   if (!HOST_BACKUP_ID.test(requestId) || !Object.hasOwn(HOST_PORTABLE_PARTS, part) ||
       !verified || verified.requestId !== requestId || verified.base !== state.base ||
       verified.token !== state.token || !hostBackupSameOrigin() ||
+      client.portableDownloadPending ||
       !hubCanGlobalAdmin() || client.checking || client.starting || client.recovering) return;
   const generation = client.generation, token = state.token, base = state.base;
   client.checking = requestId; client.portableGrant = null; hostBackupRender();
@@ -614,6 +708,34 @@ async function hostBackupPortablePrepareDownload(requestId, part) {
   } finally {
     if (hostBackupCurrent(generation, token, base)) { client.checking = null; hostBackupRender(); }
   }
+}
+
+function hostBackupPrepareDownloadRetry() {
+  const pending = hostBackupClient.portableDownloadPending;
+  if (!pending || !hubCanGlobalAdmin() || !state.token) return;
+  $("hostBackupDownloadRetrySummary").textContent =
+    `«${HOST_PORTABLE_PARTS[pending.part]}» · запрос ${pending.requestId}. Повторите только если браузер показал ошибку, вы остановили прежнюю загрузку или она так и не появилась после долгого ожидания. Панель не может проверить завершение загрузки. После подтверждения подготовьте новое скачивание.`;
+  $("hostBackupDownloadRetryDialog").showModal();
+}
+
+function hostBackupResolveDownload(outcome) {
+  if (!["complete", "retry"].includes(outcome)) return;
+  const pending = hostBackupClient.portableDownloadPending;
+  if (!pending || !hubCanGlobalAdmin() || !state.token) return;
+  if ($("hostBackupDownloadRetryDialog").open) $("hostBackupDownloadRetryDialog").close();
+  if (!hostBackupClearDownloadMarker(pending)) {
+    showError($("hostBackupError"),
+      "Не удалось убрать локальную запись о скачивании. Проверьте разрешение на хранение данных сайта и обновите панель.");
+    hostBackupRender();
+    return;
+  }
+  hostBackupClient.portableGrant = null;
+  if (outcome === "retry") hostBackupClient.portableVerified = null;
+  $("hostBackupStatus").textContent = outcome === "complete"
+    ? `«${HOST_PORTABLE_PARTS[pending.part]}» сохранён. Можно скачать следующий файл.`
+    : "Прежняя попытка отмечена как прерванная. Проверьте архив и образы, затем подготовьте новое скачивание.";
+  clearError($("hostBackupError"));
+  hostBackupRender();
 }
 
 async function hostBackupPrepareCreate(mode = "ordinary") {
@@ -656,6 +778,7 @@ async function hostBackupConfirmCreate() {
   const client = hostBackupClient, pending = client.pending;
   if (!pending || !hostBackupCurrent(pending.generation, pending.token, pending.base) ||
       client.starting || client.recovering || hostBackupReadMarker() ||
+      client.portableDownloadPending || hostBackupReadDownloadMarker() ||
       client.operations.some((item) => !HOST_BACKUP_FINAL.has(item.phase))) return;
   if (!hostBackupSaveMarker(pending.requestId, pending.mode)) {
     showError($("hostBackupCreateError"),
@@ -731,9 +854,17 @@ async function hostBackupConfirmRecover() {
 $("hostBackupReload").addEventListener("click", () => { void hostBackupsRefresh(true); });
 $("hostBackupCreate").addEventListener("click", () => { void hostBackupPrepareCreate("ordinary"); });
 $("hostBackupPortableCreate").addEventListener("click", () => { void hostBackupPrepareCreate("portable"); });
+$("hostBackupDownloadRetryCancel").addEventListener("click", () => $("hostBackupDownloadRetryDialog").close());
+$("hostBackupDownloadRetryConfirm").addEventListener("click", () => hostBackupResolveDownload("retry"));
 $("hostBackupCreateConfirm").addEventListener("click", () => { void hostBackupConfirmCreate(); });
 $("hostBackupCreateCancel").addEventListener("click", () => $("hostBackupCreateDialog").close());
 $("hostBackupCreateDialog").addEventListener("close", () => { hostBackupClient.pending = null; hostBackupRender(); });
 $("hostBackupRecoverConfirm").addEventListener("click", () => { void hostBackupConfirmRecover(); });
 $("hostBackupRecoverCancel").addEventListener("click", () => $("hostBackupRecoverDialog").close());
 $("hostBackupRecoverDialog").addEventListener("close", () => { hostBackupClient.pendingRecover = null; });
+globalThis.addEventListener?.("storage", (event) => {
+  if (event.key !== hostBackupDownloadMarkerKey() || !state.token) return;
+  hostBackupClient.portableDownloadPending = hostBackupReadDownloadMarker();
+  hostBackupClient.portableGrant = null;
+  hostBackupRender();
+});
