@@ -87,14 +87,185 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /id="amneziaSourceApply"/);
   assert.match(html, /id="wgControlPanel"/);
   assert.match(html, /id="wgControlPreview"/);
+  assert.match(html, /id="amneziaProvisionPanel"/);
+  assert.match(html, /Новая AmneziaWG 3\.1/);
+  assert.match(html, /id="amneziaProvisionRoute"/);
   assert.match(html, /VPN-интерфейс и клиентские профили не создаются и не включаются/);
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=11/);
-  assert.match(shell, /amnezia\.js\?v=11/);
-  assert.match(html, /styles\.css\?v=43/);
-  assert.match(shell, /styles\.css\?v=43/);
+  assert.match(html, /amnezia\.js\?v=12/);
+  assert.match(shell, /amnezia\.js\?v=12/);
+  assert.match(html, /styles\.css\?v=44/);
+  assert.match(shell, /styles\.css\?v=44/);
+});
+
+test('fresh AmneziaWG preview pins SSH and explicit apply creates only reviewed configuration', async () => {
+  const host = 'awg.example', port = 2202;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT };
+  const config = { listen_port: 51820, subnet: '10.44.0.0/24', route_mode: 'full' };
+  const full = { ...scope, schema_version: 1, action: 'preview', writes: false,
+    target: 'awg2', container: 'amnezia-awg2', ...config,
+    image_digest: 'sha256:' + 'd'.repeat(64), image_cached: false,
+    state_revision: 'a'.repeat(64), can_apply: true };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/amnezia-provision/preview': full,
+    '/api/v1/browser-ssh/amnezia-provision/apply': { ...scope, schema_version: 1,
+      action: 'installed', target: 'awg2', container: 'amnezia-awg2',
+      container_id: 'b'.repeat(64), image_id: 'sha256:' + 'c'.repeat(64),
+      ...config, recovery_required: false },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaProvisionPort').value = String(config.listen_port);
+  h.element('amneziaProvisionSubnet').value = config.subnet;
+  h.element('amneziaProvisionRoute').value = config.route_mode;
+  h.element('amneziaSetupPassword').value = 'disposable-preview-password';
+  await h.context.amneziaProvisionPreview();
+  assert.deepEqual(h.calls.map((call) => call.path), [
+    '/api/v1/browser-ssh/target-host-key', '/api/v1/browser-ssh/target-status',
+    '/api/v1/browser-ssh/amnezia-provision/preview',
+  ]);
+  assert.equal(h.element('amneziaProvisionReview').hidden, false);
+  assert.equal(h.element('amneziaProvisionApply').hidden, false);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.match(h.element('amneziaProvisionSummary').textContent, /весь интернет/);
+  h.element('amneziaSetupPassword').value = 'disposable-apply-password';
+  h.context.amneziaProvisionConfirm('apply');
+  assert.equal(h.element('amneziaProvisionDialog').open, true);
+  assert.equal(h.calls.length, 3, 'review and dialog alone must not create a container');
+  h.element('amneziaProvisionDialogConfirm').listeners.get('click')();
+  await until(() => h.element('amneziaProvisionNotice').textContent.includes('Docker опубликовал'));
+  const applied = h.calls.at(-1);
+  assert.equal(applied.path, '/api/v1/browser-ssh/amnezia-provision/apply');
+  const body = JSON.parse(applied.options.body);
+  assert.deepEqual({ listen_port: body.listen_port, subnet: body.subnet, route_mode: body.route_mode }, config);
+  assert.equal(body.expected_state, full.state_revision);
+  assert.equal(body.confirm, true);
+  assert.equal(body.password, 'disposable-apply-password');
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.equal(h.session.size, 0);
+  assert.doesNotMatch(JSON.stringify([...h.storage, ...h.session]), /disposable-/);
+  assert.match(h.element('amneziaProvisionNotice').textContent, /сетевой экран провайдера/);
+});
+
+test('AmneziaWG recovery is separate, and changing subnet invalidates reviewed apply', async () => {
+  const host = 'awg.example', scope = { protocol: 1, scope: 'entered_target', host, port: 22,
+    host_key_fingerprint: FINGERPRINT };
+  const config = { listen_port: 51820, subnet: '10.44.0.0/24', route_mode: 'split' };
+  let reason = 'UDP_PORT_BUSY';
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/amnezia-provision/preview': () => ({ ...scope,
+      schema_version: 1, action: 'preview', writes: false, target: 'awg2',
+      container: 'amnezia-awg2', ...config, image_digest: 'sha256:' + 'd'.repeat(64),
+      image_cached: true, state_revision: 'a'.repeat(64), can_apply: reason === null,
+      ...(reason ? { reason } : {}) }),
+    '/api/v1/browser-ssh/amnezia-provision/recover': { ...scope,
+      schema_version: 1, action: 'recovered', changed: true, installed: false },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = '22';
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaProvisionPort').value = String(config.listen_port);
+  h.element('amneziaProvisionSubnet').value = config.subnet;
+  h.element('amneziaProvisionRoute').value = config.route_mode;
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.amneziaProvisionPreview();
+  assert.equal(h.element('amneziaProvisionApply').hidden, true);
+  assert.equal(h.element('amneziaProvisionRecover').hidden, true);
+  assert.match(h.element('amneziaProvisionSummary').textContent, /UDP-порт уже занят/);
+  reason = 'RECOVERY_REQUIRED';
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.amneziaProvisionPreview();
+  assert.equal(h.element('amneziaProvisionRecover').hidden, false);
+  h.element('amneziaSetupPassword').value = 'fresh';
+  h.context.amneziaProvisionConfirm('recover');
+  assert.equal(h.element('amneziaProvisionDialog').open, true);
+  assert.equal(h.calls.filter((call) => call.path.endsWith('/amnezia-provision/recover')).length, 0);
+  h.element('amneziaProvisionDialogConfirm').listeners.get('click')();
+  await until(() => h.element('amneziaProvisionNotice').textContent.includes('очищена'));
+  const recovered = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(recovered.confirm, true);
+  assert.equal(Object.hasOwn(recovered, 'expected_state'), false);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  reason = null;
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.amneziaProvisionPreview();
+  assert.equal(h.element('amneziaProvisionApply').hidden, false);
+  h.element('amneziaProvisionSubnet').value = '10.45.0.0/24';
+  h.element('amneziaProvisionSubnet').listeners.get('input')();
+  assert.equal(h.element('amneziaProvisionApply').hidden, true);
+  assert.equal(h.element('amneziaProvisionReview').hidden, true);
+});
+
+test('uncertain AmneziaWG apply blocks retry until fresh recovery review', async () => {
+  const host = 'awg.example', scope = { protocol: 1, scope: 'entered_target', host, port: 22,
+    host_key_fingerprint: FINGERPRINT };
+  const config = { listen_port: 51820, subnet: '10.44.0.0/24', route_mode: 'full' };
+  let recovery = false;
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/amnezia-provision/preview': () => ({ ...scope,
+      schema_version: 1, action: 'preview', writes: false, target: 'awg2',
+      container: 'amnezia-awg2', ...config, image_digest: 'sha256:' + 'd'.repeat(64),
+      image_cached: true, state_revision: 'a'.repeat(64), can_apply: !recovery,
+      ...(recovery ? { reason: 'RECOVERY_REQUIRED' } : {}) }),
+    '/api/v1/browser-ssh/amnezia-provision/apply': { __httpStatus: 503,
+      body: { error: 'APPLY_UNCERTAIN' } },
+    '/api/v1/browser-ssh/amnezia-provision/recover': { ...scope, schema_version: 1,
+      action: 'recovered', changed: true, installed: true, container_id: 'b'.repeat(64) },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = '22';
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaProvisionPort').value = String(config.listen_port);
+  h.element('amneziaProvisionSubnet').value = config.subnet;
+  h.element('amneziaProvisionRoute').value = config.route_mode;
+  h.element('amneziaSetupPassword').value = 'first';
+  await h.context.amneziaProvisionPreview();
+  h.element('amneziaSetupPassword').value = 'second';
+  h.context.amneziaProvisionConfirm('apply');
+  h.element('amneziaProvisionDialogConfirm').listeners.get('click')();
+  await until(() => h.element('amneziaProvisionError').textContent.includes('Состояние могло измениться'));
+  assert.equal(h.session.size, 1);
+  assert.equal(h.element('amneziaProvisionApply').hidden, true);
+  recovery = true;
+  h.element('amneziaSetupPassword').value = 'third';
+  await h.context.amneziaProvisionPreview();
+  assert.equal(h.element('amneziaProvisionRecover').hidden, false);
+  assert.equal(h.element('amneziaProvisionApply').hidden, true);
+  h.element('amneziaSetupPassword').value = 'fourth';
+  h.context.amneziaProvisionConfirm('recover');
+  h.element('amneziaProvisionDialogConfirm').listeners.get('click')();
+  await until(() => h.element('amneziaProvisionNotice').textContent.includes('Контейнер AmneziaWG 3.1'));
+  assert.equal(h.session.size, 0);
+  assert.equal(h.calls.filter((call) => call.path.endsWith('/amnezia-provision/apply')).length, 1);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
 });
 
 test('plain WireGuard broker preview uses pinned target and confirmed apply with exact revisions', async () => {

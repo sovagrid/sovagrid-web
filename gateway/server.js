@@ -128,7 +128,8 @@ const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list",
   "vpn-source-preview", "vpn-source-apply", "vpn-source-recover",
-  "wg-control-preview", "wg-control-apply", "wg-control-recover"]);
+  "wg-control-preview", "wg-control-apply", "wg-control-recover",
+  "amnezia-provision-preview", "amnezia-provision-apply", "amnezia-provision-recover"]);
 const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE", "BUSY", "INVALID_INPUT", "INVALID_REQUEST_ID",
   "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH", "NOT_FOUND",
   "STALE_REVISION", "RESUME_REQUIRED", "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED",
@@ -139,11 +140,33 @@ const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILAB
   "INVALID_REQUEST", "SOURCE_CHANGED", "STATE_CONFLICT", "OWNERSHIP_CONFLICT",
   "STALE_PREVIEW", "CONTROL_ACTIVE", "OPERATION_FAILED", "INTERNAL_ERROR",
   "STAGE_CLEANUP_REQUIRED", "RESPONSE_TOO_LARGE", "SOURCE_NOT_PREPARED",
-  "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "RECOVERY_UNCERTAIN"]);
+  "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "RECOVERY_UNCERTAIN",
+  "UNSUPPORTED_PLATFORM", "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE",
+  "UNSAFE_STATE", "DOCKER_UNAVAILABLE", "DOCKER_OPERATION_FAILED", "DOCKER_RESPONSE_TOO_LARGE",
+  "IMAGE_IDENTITY_INVALID", "CONTAINER_IDENTITY_INVALID", "INVALID_PORT", "INVALID_SUBNET",
+  "INVALID_ROUTE", "PREVIEW_STALE", "AWG_RUNTIME_UNVERIFIED", "MANUAL_RECOVERY_REQUIRED",
+  "CONFIRMATION_REQUIRED", "AMNEZIA_PROVISION_FAILED", "UDP_PORT_BUSY", "SOURCE_BUSY"]);
 const WG_DEPENDENCIES = new Set(["wg", "wg-quick", "ip", "python3-cryptography", "apparmor_parser"]);
 const WG_REASONS = new Set(["SOURCE_NOT_PREPARED", "SOURCE_CHANGED", "AGENT_UNAVAILABLE",
   "DEPENDENCIES_UNAVAILABLE", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "BUSY",
   "OPERATION_FAILED", "ROOT_REQUIRED", "SSH_UNAVAILABLE", "STALE_PREVIEW"]);
+const PROVISION_FULL_REASONS = new Set(["UNSUPPORTED_PLATFORM", "RECOVERY_REQUIRED",
+  "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE", "UDP_PORT_BUSY"]);
+const PROVISION_REASONS = new Set([...PROVISION_FULL_REASONS, "ROOT_REQUIRED", "UNSAFE_STATE",
+  "DOCKER_UNAVAILABLE", "DOCKER_OPERATION_FAILED", "IMAGE_IDENTITY_INVALID",
+  "CONTAINER_IDENTITY_INVALID", "DOCKER_RESPONSE_TOO_LARGE", "INVALID_PORT", "INVALID_SUBNET",
+  "INVALID_ROUTE", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED", "SOURCE_BUSY"]);
+
+function canonicalPrivate24(value) {
+  if (typeof value !== "string" || value.length > 18) return false;
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.0\/24$/.exec(value);
+  if (!match || match.slice(1).some((octet) => String(Number(octet)) !== octet || Number(octet) > 255)) {
+    return false;
+  }
+  const [first, second] = match.slice(1).map(Number);
+  return first === 10 || first === 172 && second >= 16 && second <= 31 ||
+    first === 192 && second === 168;
+}
 
 if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("Invalid fixed host SSH port");
@@ -374,6 +397,31 @@ function exactFields(value, fields) {
 
 export function validateAgentPayload(action, value) {
   if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  if (action.startsWith("amnezia-provision-")) {
+    const credentialFields = ["host", "port", "username", "method", "fingerprint",
+      "password", "private_key", "passphrase"];
+    const configFields = ["listen_port", "subnet", "route_mode"];
+    const fields = action === "amnezia-provision-apply" ?
+      [...credentialFields, ...configFields, "expected_state", "confirm"] :
+      action === "amnezia-provision-recover" ? [...credentialFields, "confirm"] :
+        [...credentialFields, ...configFields];
+    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
+    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+    if (action === "amnezia-provision-recover") {
+      if (value.confirm !== true) throw new Error("INVALID_INPUT");
+      return { ...target, confirm: true };
+    }
+    if (!Number.isSafeInteger(value.listen_port) || value.listen_port < 1 || value.listen_port > 65535 ||
+        !canonicalPrivate24(value.subnet) || !["full", "split"].includes(value.route_mode)) {
+      throw new Error("INVALID_INPUT");
+    }
+    const configured = { ...target, listen_port: value.listen_port,
+      subnet: value.subnet, route_mode: value.route_mode };
+    if (action === "amnezia-provision-preview") return configured;
+    if (typeof value.expected_state !== "string" || !HEX_SHA.test(value.expected_state) ||
+        value.confirm !== true) throw new Error("INVALID_INPUT");
+    return { ...configured, expected_state: value.expected_state, confirm: true };
+  }
   if (action.startsWith("wg-control-")) {
     const credentialFields = ["host", "port", "username", "method", "fingerprint",
       "password", "private_key", "passphrase"];
@@ -564,7 +612,79 @@ function safeWgControlResult(action, value) {
   return { ...base, action: "recovered", changed: value.changed };
 }
 
+function safeAmneziaProvisionResult(action, value) {
+  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.protocol !== 1 ||
+      value.scope !== "entered_target" || typeof value.host !== "string" ||
+      !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535 ||
+      typeof value.host_key_fingerprint !== "string" || !FINGERPRINT.test(value.host_key_fingerprint)) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
+  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
+  const base = { protocol: 1, scope: "entered_target", host: value.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  const common = [...baseFields, "schema_version", "action"];
+  if (value.schema_version !== 1) throw new Error("INSTALLER_UNAVAILABLE");
+  if (action === "amnezia-provision-preview") {
+    const fullFields = ["writes", "target", "container", "listen_port", "subnet", "route_mode",
+      "image_digest", "image_cached", "state_revision", "can_apply"];
+    const full = exactFields(value, [...common, ...fullFields]) ||
+      exactFields(value, [...common, ...fullFields, "reason"]);
+    if (value.action !== "preview" || value.writes !== false || value.target !== "awg2" ||
+        value.container !== "amnezia-awg2" || typeof value.can_apply !== "boolean") {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    if (full) {
+      if (!Number.isSafeInteger(value.listen_port) || value.listen_port < 1 || value.listen_port > 65535 ||
+          !canonicalPrivate24(value.subnet) || !["full", "split"].includes(value.route_mode) ||
+          typeof value.image_digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.image_digest) ||
+          typeof value.image_cached !== "boolean" ||
+          typeof value.state_revision !== "string" || !HEX_SHA.test(value.state_revision) ||
+          (value.can_apply ? Object.hasOwn(value, "reason") : !PROVISION_FULL_REASONS.has(value.reason))) {
+        throw new Error("INSTALLER_UNAVAILABLE");
+      }
+      return { ...base, schema_version: 1, action: "preview", writes: false, target: "awg2",
+        container: "amnezia-awg2", listen_port: value.listen_port, subnet: value.subnet,
+        route_mode: value.route_mode, image_digest: value.image_digest,
+        image_cached: value.image_cached, state_revision: value.state_revision,
+        can_apply: value.can_apply, ...(value.reason ? { reason: value.reason } : {}) };
+    }
+    if (!exactFields(value, [...common, "writes", "target", "container", "can_apply", "reason"]) ||
+        value.can_apply !== false || !PROVISION_REASONS.has(value.reason)) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    return { ...base, schema_version: 1, action: "preview", writes: false, target: "awg2",
+      container: "amnezia-awg2", can_apply: false, reason: value.reason };
+  }
+  if (action === "amnezia-provision-apply") {
+    if (!exactFields(value, [...common, "target", "container", "container_id", "image_id",
+          "listen_port", "subnet", "route_mode", "recovery_required"]) ||
+        value.action !== "installed" || value.target !== "awg2" || value.container !== "amnezia-awg2" ||
+        typeof value.container_id !== "string" || !HEX_SHA.test(value.container_id) ||
+        typeof value.image_id !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.image_id) ||
+        !Number.isSafeInteger(value.listen_port) || value.listen_port < 1 || value.listen_port > 65535 ||
+        !canonicalPrivate24(value.subnet) || !["full", "split"].includes(value.route_mode) ||
+        value.recovery_required !== false) throw new Error("INSTALLER_UNAVAILABLE");
+    return { ...base, schema_version: 1, action: "installed", target: "awg2",
+      container: "amnezia-awg2", container_id: value.container_id, image_id: value.image_id,
+      listen_port: value.listen_port, subnet: value.subnet, route_mode: value.route_mode,
+      recovery_required: false };
+  }
+  if (!exactFields(value, [...common, "changed", "installed"]) &&
+      !exactFields(value, [...common, "changed", "installed", "container_id"]) ||
+      value.action !== "recovered" || typeof value.changed !== "boolean" ||
+      typeof value.installed !== "boolean" ||
+      (Object.hasOwn(value, "container_id") &&
+        (value.installed !== true || typeof value.container_id !== "string" || !HEX_SHA.test(value.container_id)))) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  return { ...base, schema_version: 1, action: "recovered", changed: value.changed,
+    installed: value.installed, ...(value.container_id ? { container_id: value.container_id } : {}) };
+}
+
 export function safeAgentResult(action, value) {
+  if (action.startsWith("amnezia-provision-")) return safeAmneziaProvisionResult(action, value);
   if (action.startsWith("wg-control-")) return safeWgControlResult(action, value);
   if (action.startsWith("vpn-source-")) return safeVpnSourceResult(action, value);
   if (action === "list") {
@@ -613,6 +733,9 @@ export function safeAgentResult(action, value) {
 }
 
 export function agentTimeoutMs(action) {
+  if (action === "amnezia-provision-preview") return 120000;
+  if (action === "amnezia-provision-apply") return 480000;
+  if (action === "amnezia-provision-recover") return 180000;
   if (action === "wg-control-preview") return 120000;
   if (action === "wg-control-apply") return 720000;
   if (action === "wg-control-recover") return 450000;
@@ -660,10 +783,16 @@ export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
         if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error();
         if (response.ok === true && Object.keys(response).length === 2 && Object.hasOwn(response, "result")) {
           const result = safeAgentResult(action, response.result);
-          if ((action.startsWith("vpn-source-") || action.startsWith("wg-control-")) &&
+          if ((action.startsWith("vpn-source-") || action.startsWith("wg-control-") ||
+               action.startsWith("amnezia-provision-")) &&
               (result.host !== payload.host || result.port !== payload.port ||
                result.host_key_fingerprint !== payload.fingerprint)) {
             throw new Error("INSTALLER_UNAVAILABLE");
+          }
+          if ((action === "amnezia-provision-preview" && result.state_revision !== undefined) ||
+              action === "amnezia-provision-apply") {
+            if (result.listen_port !== payload.listen_port || result.subnet !== payload.subnet ||
+                result.route_mode !== payload.route_mode) throw new Error("INSTALLER_UNAVAILABLE");
           }
           finish(null, result);
         } else if (response.ok === false && typeof response.error === "string" &&
@@ -1413,6 +1542,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   const attempts = new WindowLimit(5, 60);
   const stages = new WindowLimit(5, 60);
   const wgStages = new WindowLimit(8, 60);
+  const provisionStages = new WindowLimit(8, 60);
   let active = 0;
   return async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -1430,11 +1560,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
     const vpnSourceAction = /^\/api\/v1\/browser-ssh\/vpn-source\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const wgControlAction = /^\/api\/v1\/browser-ssh\/wg-control\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
+    const provisionAction = /^\/api\/v1\/browser-ssh\/amnezia-provision\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview ||
-      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction);
+      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) || Boolean(provisionAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -1444,7 +1575,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
+    if (!(isProbe ? probes : provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
           ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
       .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
@@ -1461,10 +1592,11 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (agentAction || vpnSourceAction || wgControlAction) {
+        if (agentAction || vpnSourceAction || wgControlAction || provisionAction) {
           const token = BEARER.exec(req.headers.authorization || "")?.[1];
           if (!token) throw new Error("AUTH_REQUIRED");
-          const action = agentAction || (vpnSourceAction ? `vpn-source-${vpnSourceAction}` : `wg-control-${wgControlAction}`);
+          const action = agentAction || (vpnSourceAction ? `vpn-source-${vpnSourceAction}` :
+            wgControlAction ? `wg-control-${wgControlAction}` : `amnezia-provision-${provisionAction}`);
           const selected = validateAgentPayload(action, value);
           try { json(res, 200, await agent(action, selected, token)); }
           finally { clearCredentials(selected); }
@@ -1509,10 +1641,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         code !== "INVALID_JOURNAL" ? 400 :
         ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "SETUP_CHANGED", "STALE_REVISION", "RESUME_REQUIRED",
           "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY", "SOURCE_CHANGED",
-          "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "CONTROL_ACTIVE",
+          "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "PREVIEW_STALE",
+          "ALREADY_INSTALLED", "CONTAINER_EXISTS", "UDP_PORT_BUSY", "SOURCE_BUSY", "CONTROL_ACTIVE",
           "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK"].includes(code) ? 409 :
         code === "NOT_FOUND" ? 404 :
-        ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED",
+        ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED",
+          "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "MANUAL_RECOVERY_REQUIRED",
           "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE"].includes(code) ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
           code === "ADMIN_FORBIDDEN" ? 403 : 503;

@@ -18,6 +18,7 @@ const amneziaSetup = { generation: 0, busy: false, fingerprint: null, changedPin
   controller: null, endpoint: null, setup: null, enrollment: null, identity: null,
   source: null, sourceIdentity: null, pendingAction: null };
 const wgControl = { preview: null, identity: null, pendingAction: null };
+const amneziaProvision = { preview: null, identity: null, config: null, pendingAction: null };
 const AMNEZIA_ENROLL_FIELDS = ["protocol", "action", "writes", "target", "container_id", "image_id",
   "config_sha256", "table_sha256", "configured_clients", "vpn_protocol", "interface", "listen_port",
   "server_subnet", "host_key_fingerprint", "reverify_required"].sort();
@@ -1124,6 +1125,7 @@ function amneziaSetupDiscardSource() {
   $("amneziaSourceDigest").textContent = "";
   $("amneziaSourceNotice").textContent = "";
   wgControlReset();
+  amneziaProvisionReset();
 }
 function amneziaSetupDiscardReview() {
   amneziaSetup.setup = null;
@@ -1187,6 +1189,7 @@ function amneziaSetupRender() {
     !setup?.can_arm || setup?.marker !== "absent";
   $("amneziaSetupEnroll").disabled = !safe || !amneziaSetup.enrollment || amneziaSetup.busy;
   wgControlRender();
+  amneziaProvisionRender();
 }
 function amneziaSetupReset() {
   amneziaSetup.generation++;
@@ -1842,6 +1845,284 @@ async function wgControlAction(action) {
   }
 }
 
+function amneziaProvisionConfig() {
+  const rawPort = $("amneziaProvisionPort").value;
+  const subnet = $("amneziaProvisionSubnet").value.trim();
+  const route_mode = $("amneziaProvisionRoute").value;
+  if (!/^[1-9][0-9]{0,4}$/.test(rawPort) || Number(rawPort) > 65535) throw new Error("INVALID_PORT");
+  const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.0\/24$/.exec(subnet);
+  if (!parts || parts.slice(1).some((part) => Number(part) > 255 || String(Number(part)) !== part)) {
+    throw new Error("INVALID_SUBNET");
+  }
+  const a = Number(parts[1]), b = Number(parts[2]);
+  if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168)) {
+    throw new Error("INVALID_SUBNET");
+  }
+  if (!["full", "split"].includes(route_mode)) throw new Error("INVALID_ROUTE");
+  return { listen_port: Number(rawPort), subnet, route_mode };
+}
+function amneziaProvisionIdentity() {
+  return { ...amneziaSetupIdentity(), ...amneziaProvisionConfig() };
+}
+function amneziaProvisionSameIdentity() {
+  try {
+    const current = amneziaProvisionIdentity(), reviewed = amneziaProvision.identity;
+    return reviewed && Object.keys(current).every((key) => current[key] === reviewed[key]);
+  } catch { return false; }
+}
+function amneziaProvisionPendingKey() {
+  let endpoint = amneziaSetup.endpoint;
+  if (!endpoint) {
+    try { endpoint = amneziaSetupEndpoint(); } catch { /* Target not selected yet. */ }
+  }
+  return `sovagrid.amnezia-provision-pending:${location.origin}:${endpoint
+    ? `${endpoint.host}:${endpoint.port}` : "unselected_target"}`;
+}
+function amneziaProvisionPending() {
+  try { return sessionStorage.getItem(amneziaProvisionPendingKey()) === "1"; } catch { return false; }
+}
+function amneziaProvisionMarkPending(pending) {
+  try {
+    if (pending) sessionStorage.setItem(amneziaProvisionPendingKey(), "1");
+    else sessionStorage.removeItem(amneziaProvisionPendingKey());
+  } catch { /* Private browsing may disable storage. */ }
+}
+function amneziaProvisionReady() { return wgControlReady(); }
+function amneziaProvisionRender() {
+  $("amneziaProvisionPanel").hidden = !amneziaSetupRemote();
+  const ready = amneziaProvisionReady();
+  const reviewed = ready && amneziaProvisionSameIdentity() && amneziaProvision.preview;
+  $("amneziaProvisionPreview").disabled = !ready;
+  $("amneziaProvisionReview").hidden = !reviewed;
+  $("amneziaProvisionApply").hidden = !reviewed || amneziaProvision.preview.can_apply !== true ||
+    amneziaProvisionPending();
+  $("amneziaProvisionRecover").hidden = !reviewed ||
+    !(amneziaProvision.preview.reason === "RECOVERY_REQUIRED" || amneziaProvisionPending());
+  for (const id of ["amneziaProvisionPort", "amneziaProvisionSubnet", "amneziaProvisionRoute"])
+    $(id).disabled = amneziaSetup.busy;
+  if (amneziaProvisionPending() && !amneziaProvision.preview && !$("amneziaProvisionNotice").textContent) {
+    $("amneziaProvisionNotice").textContent =
+      "Предыдущее создание могло продолжиться после потери связи. Сначала проверьте сервер заново.";
+  }
+}
+function amneziaProvisionReset() {
+  amneziaProvision.preview = null;
+  amneziaProvision.identity = null;
+  amneziaProvision.config = null;
+  amneziaProvision.pendingAction = null;
+  if ($("amneziaProvisionDialog").open) $("amneziaProvisionDialog").close();
+  $("amneziaProvisionReview").hidden = true;
+  $("amneziaProvisionSummary").textContent = "";
+  $("amneziaProvisionDetails").textContent = "";
+  $("amneziaProvisionDigest").textContent = "";
+  $("amneziaProvisionNotice").textContent = "";
+  clearError($("amneziaProvisionError"));
+  amneziaProvisionRender();
+}
+function amneziaProvisionScope(value) {
+  return value?.protocol === 1 && value.scope === "entered_target" &&
+    value.host === amneziaSetup.endpoint?.host && value.port === amneziaSetup.endpoint?.port &&
+    value.host_key_fingerprint === amneziaSetup.fingerprint;
+}
+const AMNEZIA_PROVISION_REASONS = new Set(["UNSUPPORTED_PLATFORM", "RECOVERY_REQUIRED",
+  "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE", "UDP_PORT_BUSY", "ROOT_REQUIRED", "UNSAFE_STATE",
+  "DOCKER_UNAVAILABLE", "DOCKER_OPERATION_FAILED", "IMAGE_IDENTITY_INVALID",
+  "CONTAINER_IDENTITY_INVALID", "DOCKER_RESPONSE_TOO_LARGE", "INVALID_PORT", "INVALID_SUBNET",
+  "INVALID_ROUTE", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED", "SOURCE_BUSY"]);
+function amneziaProvisionValidPreview(value, config) {
+  if (!amneziaProvisionScope(value) || value.schema_version !== 1 || value.action !== "preview" ||
+      value.writes !== false || value.target !== "awg2" || value.container !== "amnezia-awg2" ||
+      typeof value.can_apply !== "boolean" ||
+      (value.reason !== undefined && !AMNEZIA_PROVISION_REASONS.has(value.reason))) return false;
+  if (value.state_revision === undefined) return value.can_apply === false &&
+    typeof value.reason === "string";
+  return typeof value.state_revision === "string" && /^[0-9a-f]{64}$/.test(value.state_revision) &&
+    value.listen_port === config.listen_port && value.subnet === config.subnet &&
+    value.route_mode === config.route_mode &&
+    typeof value.image_digest === "string" && /^sha256:[0-9a-f]{64}$/.test(value.image_digest) &&
+    typeof value.image_cached === "boolean" &&
+    (value.can_apply ? value.reason === undefined : typeof value.reason === "string");
+}
+function amneziaProvisionReason(reason) {
+  const labels = {
+    RECOVERY_REQUIRED: "Осталась незавершённая установка SovaGrid. Проверьте и завершите её отдельной кнопкой.",
+    ALREADY_INSTALLED: "AmneziaWG уже установлен этим мастером. Проверьте существующий контейнер в шаге подключения брокера ниже.",
+    CONTAINER_EXISTS: "Контейнер с этим именем уже существует. Мастер его не меняет. Проверьте совместимость через существующий шаг подключения брокера.",
+    UNSUPPORTED_PLATFORM: "Сейчас поддерживается Ubuntu/Linux на x86-64 с Docker.",
+    TUN_UNAVAILABLE: "На сервере недоступно устройство /dev/net/tun.",
+    UDP_PORT_BUSY: "Выбранный UDP-порт уже занят на сервере. Введите другой порт и проверьте снова.",
+    ROOT_REQUIRED: "Нужен SSH-вход root или sudo без запроса пароля.",
+    DOCKER_UNAVAILABLE: "Docker недоступен на сервере. Проверьте установку и службу Docker.",
+    SOURCE_NOT_PREPARED: "Сначала подготовьте VPN-код в шаге выше, затем повторите проверку.",
+    SOURCE_UNTRUSTED: "Проверенный VPN-код изменился или небезопасен. Проверьте пакет и подготовьте его заново.",
+    SOURCE_BUSY: "Сейчас выполняется другая операция с VPN-кодом. Подождите и повторите проверку.",
+    UNSAFE_STATE: "Состояние установщика небезопасно. Нужна ручная проверка на сервере.",
+    INVALID_PORT: "Введите UDP-порт от 1 до 65535.",
+    INVALID_SUBNET: "Введите приватную сеть /24, например 10.44.0.0/24.",
+    INVALID_ROUTE: "Выберите полный или раздельный маршрут.",
+  };
+  return labels[reason] || "AmneziaWG пока нельзя создать. Проверьте сервер и повторите предпросмотр.";
+}
+function amneziaProvisionShowPreview(value, config) {
+  amneziaProvision.preview = value;
+  amneziaProvision.identity = amneziaProvisionIdentity();
+  amneziaProvision.config = config;
+  $("amneziaProvisionSummary").textContent = value.can_apply ?
+    `Сервер готов к созданию AmneziaWG 3.1: UDP ${config.listen_port}, ${config.subnet}, ` +
+      (config.route_mode === "full" ? "весь интернет через VPN." : "только VPN-подсеть сервера.") :
+    amneziaProvisionReason(value.reason);
+  $("amneziaProvisionDetails").textContent = value.state_revision ?
+    `Контейнер: ${value.container}. Образ ${value.image_cached ? "уже загружен" : "будет загружен при установке"}. ` +
+      (value.can_apply ? "Установка создаст и запустит контейнер, включит awg0 и опубликует UDP-порт." :
+        "Создание заблокировано до устранения причины выше.") :
+    "Подробный снимок пока недоступен. На сервере изменений не выполнено.";
+  $("amneziaProvisionRevisions").hidden = !value.state_revision;
+  $("amneziaProvisionDigest").textContent = value.state_revision ?
+    `Состояние: ${value.state_revision}\nОбраз: ${value.image_digest}` : "";
+  $("amneziaProvisionNotice").textContent = "";
+  amneziaProvisionRender();
+}
+function amneziaProvisionExplain(failure) {
+  if (["APPLY_UNCERTAIN", "RECOVERY_UNCERTAIN", "SSH_TIMEOUT", "INSTALLER_UNAVAILABLE",
+    "SSH_UNAVAILABLE", "AMNEZIA_PROVISION_FAILED", "DOCKER_OPERATION_FAILED",
+    "AWG_RUNTIME_UNVERIFIED"].includes(failure.message)) {
+    return "Ответ о создании AmneziaWG не подтверждён. Состояние могло измениться: проверьте сервер заново и при необходимости завершите установку, не повторяя создание вслепую.";
+  }
+  if (["PREVIEW_STALE", "STALE_PREVIEW"].includes(failure.message))
+    return "Состояние изменилось после проверки. Откройте новый предпросмотр.";
+  if (failure.message === "MANUAL_RECOVERY_REQUIRED") return "Автоматическое восстановление остановлено: нужна ручная проверка контейнера на сервере.";
+  if (AMNEZIA_PROVISION_REASONS.has(failure.message)) return amneziaProvisionReason(failure.message);
+  if (failure.message === "KEY_READ_FAILED") return "Не удалось прочитать выбранный файл ключа.";
+  return amneziaSetupExplain(failure);
+}
+async function amneziaProvisionPreview() {
+  if (!amneziaProvisionReady()) return;
+  let config;
+  try { config = amneziaProvisionConfig(); }
+  catch (failure) { showError($("amneziaProvisionError"), amneziaProvisionReason(failure.message)); return; }
+  const identity = amneziaProvisionIdentity(), endpoint = amneziaSetup.endpoint;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  amneziaProvisionReset();
+  $("amneziaProvisionNotice").textContent = "Проверяем сервер и существующий контейнер…";
+  amneziaSetupRender();
+  let login;
+  try {
+    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaProvisionIdentity()[key] !== identity[key])) return;
+    const { target: _target, ...selected } = credentials;
+    login = selected;
+    amneziaSetupClearSecrets();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
+    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
+        status.host !== endpoint.host || status.port !== endpoint.port ||
+        status.host_key_fingerprint !== identity.fingerprint ||
+        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    const result = await amneziaSetupApi("/api/v1/browser-ssh/amnezia-provision/preview",
+      { ...login, ...config }, token, 135000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaProvisionIdentity()[key] !== identity[key])) return;
+    if (!amneziaProvisionValidPreview(result, config)) throw new Error("INVALID_RESPONSE");
+    amneziaSetupSavePin(identity.fingerprint);
+    if (result.reason === "ALREADY_INSTALLED" || result.can_apply) amneziaProvisionMarkPending(false);
+    amneziaProvisionShowPreview(result, config);
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      $("amneziaProvisionNotice").textContent = "";
+      showError($("amneziaProvisionError"), amneziaProvisionExplain(failure));
+    }
+  } finally {
+    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+function amneziaProvisionConfirm(action) {
+  if (!amneziaProvisionReady() || !amneziaProvisionSameIdentity() || !amneziaProvision.preview ||
+      !(action === "apply" ? amneziaProvision.preview.can_apply && !amneziaProvisionPending() :
+        action === "recover" && (amneziaProvision.preview.reason === "RECOVERY_REQUIRED" ||
+          amneziaProvisionPending()))) return;
+  const host = `${amneziaSetup.endpoint.host}:${amneziaSetup.endpoint.port}`;
+  $("amneziaProvisionDialogTitle").textContent = action === "apply" ?
+    "Создать и запустить AmneziaWG 3.1?" : "Проверить и завершить установку AmneziaWG?";
+  $("amneziaProvisionDialogSummary").textContent = action === "apply" ?
+    `На ${host} будет создан и запущен контейнер amnezia-awg2, включён awg0, опубликован UDP ` +
+      `${amneziaProvision.config.listen_port}. Маршрут: ` +
+      (amneziaProvision.config.route_mode === "full" ? "весь интернет через VPN." : "только VPN-подсеть сервера.") :
+    `SovaGrid проверит и завершит только собственную прерванную установку на ${host}. ` +
+      "Если контейнер уже работает и совпадает с проверенным состоянием, он останется запущен.";
+  amneziaProvision.pendingAction = action;
+  $("amneziaProvisionDialog").showModal();
+}
+async function amneziaProvisionAction(action) {
+  const preview = amneziaProvision.preview, config = amneziaProvision.config;
+  if (!amneziaProvisionReady() || !amneziaProvisionSameIdentity() || !preview || !config ||
+      !(action === "apply" ? preview.can_apply && !amneziaProvisionPending() :
+        action === "recover" && (preview.reason === "RECOVERY_REQUIRED" || amneziaProvisionPending()))) return;
+  const identity = amneziaProvision.identity;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  clearError($("amneziaProvisionError"));
+  $("amneziaProvisionNotice").textContent = action === "apply" ?
+    "Создаём и проверяем контейнер. Это может занять несколько минут…" :
+    "Проверяем состояние прерванной установки…";
+  amneziaSetupRender();
+  let login;
+  try {
+    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaProvisionSameIdentity() ||
+        Object.keys(identity).some((key) => amneziaProvisionIdentity()[key] !== identity[key])) return;
+    const { target: _target, ...selected } = credentials;
+    login = selected;
+    amneziaSetupClearSecrets();
+    amneziaProvisionMarkPending(true);
+    const payload = action === "apply" ? { ...login, ...config,
+      expected_state: preview.state_revision, confirm: true } : { ...login, confirm: true };
+    const result = await amneziaSetupApi(`/api/v1/browser-ssh/amnezia-provision/${action}`,
+      payload, token, action === "apply" ? 495000 : 195000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaProvisionSameIdentity()) return;
+    if (!amneziaProvisionScope(result) || result.schema_version !== 1 ||
+        (action === "apply" ? result.action !== "installed" || result.target !== "awg2" ||
+          result.container !== "amnezia-awg2" || !/^[0-9a-f]{64}$/.test(result.container_id || "") ||
+          !/^sha256:[0-9a-f]{64}$/.test(result.image_id || "") ||
+          result.listen_port !== config.listen_port || result.subnet !== config.subnet ||
+          result.route_mode !== config.route_mode || result.recovery_required !== false :
+          result.action !== "recovered" || typeof result.changed !== "boolean" ||
+          typeof result.installed !== "boolean")) {
+      throw new Error(action === "apply" ? "APPLY_UNCERTAIN" : "RECOVERY_UNCERTAIN");
+    }
+    amneziaProvisionMarkPending(false);
+    amneziaProvisionReset();
+    amneziaSetupDiscardReview();
+    $("amneziaProvisionNotice").textContent = action === "apply" ?
+      `Контейнер AmneziaWG 3.1 работает; Docker опубликовал UDP ${config.listen_port}. ` +
+        "Проверьте сетевой экран провайдера и подключение клиента. Брокер подключается отдельно в шаге ниже." :
+      result.installed ?
+        "Контейнер AmneziaWG 3.1 работает. Проверьте состояние ниже, сетевой экран провайдера и подключение клиента; брокер подключается отдельно." :
+      "Прерванная установка очищена. Откройте новый предпросмотр перед созданием AmneziaWG.";
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      if (["INVALID_INPUT", "AUTH_FAILED", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HOST_KEY_CHANGED",
+        "PREVIEW_STALE", "STALE_PREVIEW", "CONFIRMATION_REQUIRED", "INVALID_REVISION", "CONTAINER_EXISTS",
+        "ALREADY_INSTALLED", "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "UDP_PORT_BUSY", "ROOT_REQUIRED",
+        "INVALID_PORT", "INVALID_SUBNET", "INVALID_ROUTE", "SOURCE_UNTRUSTED",
+        "SOURCE_BUSY", "SOURCE_NOT_PREPARED"].includes(failure.message)) {
+        amneziaProvisionMarkPending(false);
+      }
+      amneziaProvisionReset();
+      showError($("amneziaProvisionError"), amneziaProvisionExplain(failure));
+    }
+  } finally {
+    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+
 async function amneziaSetupAction(action) {
   if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupSameIdentity() ||
       !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
@@ -1950,6 +2231,19 @@ $("amneziaSetupForm").addEventListener("submit", (event) => { void amneziaSetupP
 $("amneziaSourcePreview").addEventListener("click", () => { void amneziaSourcePreview(); });
 $("amneziaSourceApply").addEventListener("click", () => amneziaSourceConfirm("apply"));
 $("amneziaSourceRecover").addEventListener("click", () => amneziaSourceConfirm("recover"));
+$("amneziaProvisionPreview").addEventListener("click", () => { void amneziaProvisionPreview(); });
+$("amneziaProvisionApply").addEventListener("click", () => amneziaProvisionConfirm("apply"));
+$("amneziaProvisionRecover").addEventListener("click", () => amneziaProvisionConfirm("recover"));
+$("amneziaProvisionDialogCancel").addEventListener("click", () => $("amneziaProvisionDialog").close());
+$("amneziaProvisionDialog").addEventListener("close", () => { amneziaProvision.pendingAction = null; });
+$("amneziaProvisionDialogConfirm").addEventListener("click", () => {
+  const action = amneziaProvision.pendingAction;
+  if (!action) return;
+  $("amneziaProvisionDialog").close();
+  void amneziaProvisionAction(action);
+});
+for (const id of ["amneziaProvisionPort", "amneziaProvisionSubnet", "amneziaProvisionRoute"])
+  $(id).addEventListener(id === "amneziaProvisionRoute" ? "change" : "input", amneziaProvisionReset);
 $("wgControlPreview").addEventListener("click", () => { void wgControlPreview(); });
 $("wgControlApply").addEventListener("click", () => wgControlConfirm("apply"));
 $("wgControlRecover").addEventListener("click", () => wgControlConfirm("recover"));

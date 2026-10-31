@@ -68,9 +68,10 @@ trees. A recovery request cleans up only its owned temporary state. A lost
 apply response or `cleanup_required:true` requires a fresh preview before
 further action. Source updates refuse an installed Amnezia or WireGuard control
 unit or enable marker, even if the unit is currently stopped.
-These routes do not create a VPN container, arm a broker, or create a jump
-tunnel. The Amnezia routes still require an existing compatible container and
-root or passwordless sudo access to their fixed installer.
+These source routes do not create a VPN container, arm a broker, or create a
+jump tunnel. The existing Amnezia broker enrollment routes still require a
+running compatible container and root or passwordless sudo access to their
+fixed installer.
 An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
 from the gateway container by this route; a separately configured reachable
 SSH endpoint is needed.
@@ -102,3 +103,37 @@ codes. The install may add Ubuntu packages and enables the root broker socket,
 service, and inventory timer. It does not create or activate a WireGuard
 interface, VPN instance, or client profile. See the
 [Web Agent contract](../../sovagrid-blueprint/deploy/WEB_WIREGUARD_CONTROL.md).
+
+## New AmneziaWG 3.1 container on an entered Ubuntu host
+
+After verified `sovagrid-vpn` source preparation, the independent AmneziaWG
+provisioner uses `POST /api/v1/browser-ssh/amnezia-provision/{preview,apply,recover}`.
+Only an unrestricted Hub admin on the same HTTPS origin or a loopback origin
+may use these routes. All three requests carry exactly the eight pinned SSH
+fields. Preview adds `listen_port` (integer UDP port 1–65535), `subnet`
+(canonical RFC1918 IPv4 `/24`) and `route_mode` (`full` or `split`). Apply adds
+`expected_state` (lowercase 64-character SHA-256) and `confirm: true`; recover
+adds only `confirm: true`. SSH port and VPN UDP port are separate fields.
+
+The fixed preview has `writes: false` and reports `can_apply`, source image
+digest/cache state, the selected network and route, and `state_revision` when
+the target can be observed. A degraded preview has no revision and cannot
+authorize apply. The bridge and root CLI recheck the revision before mutation.
+`full` is the default internet route; `split` permits only the server VPN
+subnet. Apply creates and starts the fixed `amnezia-awg2` Docker container,
+activates `awg0`, and publishes the chosen UDP port. It does not enroll,
+install, or arm the management broker. Existing containers are never replaced.
+After apply, the user must separately inspect and enroll the compatible
+running container through the existing broker flow.
+
+The gateway accepts only fixed, bounded result fields and error codes,
+compares the returned host, SSH port, fingerprint, and echoed VPN configuration
+to the request, and clears submitted SSH secrets. The browser retains only a
+tab-scoped uncertainty marker after an unconfirmed apply or recover. A fresh
+preview and separately confirmed recover action prevent blind repeats. Socket
+read deadlines include SSH preflight: 120 seconds for preview, 480 for apply,
+180 for recover; the browser waits slightly longer. Docker publishing a port
+does not prove external reachability: a cloud/provider firewall may need a
+rule, and a client connection must be tested. The full internet route has not
+yet been verified on a live Ubuntu host in this Web repo. See the
+[Web Agent contract](../../sovagrid-blueprint/deploy/WEB_AMNEZIA_PROVISION.md).

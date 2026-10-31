@@ -1111,6 +1111,104 @@ test("WireGuard broker route checks admin and origin, then wipes SSH credentials
   assert.equal(selected.passphrase, "");
 });
 
+test("AmneziaWG provision accepts only pinned SSH, canonical private /24 and confirmed CAS", () => {
+  const login = statusInput({ host: "remote.example" });
+  const config = { listen_port: 51820, subnet: "10.44.0.0/24", route_mode: "full" };
+  const state = "a".repeat(64);
+  assert.deepEqual(validateAgentPayload("amnezia-provision-preview", { ...login, ...config }),
+    { ...login, ...config });
+  assert.deepEqual(validateAgentPayload("amnezia-provision-apply", {
+    ...login, ...config, expected_state: state, confirm: true }),
+  { ...login, ...config, expected_state: state, confirm: true });
+  assert.deepEqual(validateAgentPayload("amnezia-provision-recover", { ...login, confirm: true }),
+    { ...login, confirm: true });
+  for (const bad of [
+    { ...config, listen_port: "51820" }, { ...config, listen_port: 0 },
+    { ...config, subnet: "10.44.0.1/24" }, { ...config, subnet: "010.44.0.0/24" },
+    { ...config, subnet: "100.64.0.0/24" }, { ...config, route_mode: "all" },
+    { ...config, command: "id" },
+  ]) assert.throws(() => validateAgentPayload("amnezia-provision-preview", { ...login, ...bad }),
+    /INVALID_INPUT/);
+  for (const bad of [
+    { expected_state: "A".repeat(64), confirm: true },
+    { expected_state: state, confirm: false },
+  ]) assert.throws(() => validateAgentPayload("amnezia-provision-apply", { ...login, ...config, ...bad }),
+    /INVALID_INPUT/);
+  assert.throws(() => validateAgentPayload("amnezia-provision-recover", { ...login,
+    confirm: "true" }), /INVALID_INPUT/);
+});
+
+test("AmneziaWG provision result is bounded to fixed fields and timeouts include SSH preflight", () => {
+  const scope = { protocol: 1, scope: "entered_target", host: "remote.example", port: 22022,
+    host_key_fingerprint: FINGERPRINT };
+  const config = { listen_port: 51820, subnet: "10.44.0.0/24", route_mode: "full" };
+  const full = { ...scope, schema_version: 1, action: "preview", writes: false,
+    target: "awg2", container: "amnezia-awg2", ...config,
+    image_digest: "sha256:" + "b".repeat(64), image_cached: false,
+    state_revision: "a".repeat(64), can_apply: true };
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", full), full);
+  assert.throws(() => safeAgentResult("amnezia-provision-preview", { ...full,
+    private_key: "secret" }), /INSTALLER_UNAVAILABLE/);
+  assert.throws(() => safeAgentResult("amnezia-provision-preview", { ...full,
+    reason: "password=secret" }), /INSTALLER_UNAVAILABLE/);
+  const blocked = { ...full, can_apply: false, reason: "UDP_PORT_BUSY" };
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", blocked), blocked);
+  const degraded = { ...scope, schema_version: 1, action: "preview", writes: false,
+    target: "awg2", container: "amnezia-awg2", can_apply: false, reason: "DOCKER_UNAVAILABLE" };
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", degraded), degraded);
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", { ...degraded,
+    reason: "SOURCE_UNTRUSTED" }).reason, "SOURCE_UNTRUSTED");
+  assert.deepEqual(safeAgentResult("amnezia-provision-preview", { ...degraded,
+    reason: "SOURCE_BUSY" }).reason, "SOURCE_BUSY");
+  assert.throws(() => safeAgentResult("amnezia-provision-preview", { ...degraded,
+    state_revision: "a".repeat(64) }), /INSTALLER_UNAVAILABLE/);
+  const installed = { ...scope, schema_version: 1, action: "installed", target: "awg2",
+    container: "amnezia-awg2", container_id: "c".repeat(64), image_id: "sha256:" + "d".repeat(64),
+    ...config, recovery_required: false };
+  assert.deepEqual(safeAgentResult("amnezia-provision-apply", installed), installed);
+  assert.throws(() => safeAgentResult("amnezia-provision-apply", { ...installed,
+    recovery_required: true }), /INSTALLER_UNAVAILABLE/);
+  assert.deepEqual(safeAgentResult("amnezia-provision-recover", { ...scope, schema_version: 1,
+    action: "recovered", changed: true, installed: false }).installed, false);
+  assert.equal(agentTimeoutMs("amnezia-provision-preview"), 120000);
+  assert.equal(agentTimeoutMs("amnezia-provision-apply"), 480000);
+  assert.equal(agentTimeoutMs("amnezia-provision-recover"), 180000);
+});
+
+test("AmneziaWG provision route checks admin and origin, then wipes SSH credentials", async () => {
+  const login = statusInput({ host: "remote.example" });
+  const config = { listen_port: 51820, subnet: "10.44.0.0/24", route_mode: "full" };
+  let forwarded = 0, selected;
+  const handler = createHandler({ admin: async (authorization) => {
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, agent: async (action, payload, token) => {
+    forwarded++;
+    assert.equal(action, "amnezia-provision-apply");
+    assert.equal(token, TOKEN);
+    assert.equal(payload.expected_state, "a".repeat(64));
+    assert.equal(payload.confirm, true);
+    assert.equal(payload.password, "server-secret");
+    selected = payload;
+    return { protocol: 1, scope: "entered_target", host: "remote.example", port: 22022,
+      host_key_fingerprint: FINGERPRINT, schema_version: 1, action: "installed", target: "awg2",
+      container: "amnezia-awg2", container_id: "c".repeat(64), image_id: "sha256:" + "d".repeat(64),
+      ...config, recovery_required: false };
+  } });
+  const path = "/api/v1/browser-ssh/amnezia-provision/apply";
+  const payload = { ...login, ...config, expected_state: "a".repeat(64), confirm: true };
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(forwarded, 0);
+  const result = await call(handler, { path, payload, headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.route_mode, "full");
+  assert.equal(forwarded, 1);
+  assert.equal(selected.password, "");
+  assert.equal(selected.private_key, "");
+  assert.equal(selected.passphrase, "");
+});
+
 test("Agent socket proxy sends one bounded request and accepts only a safe reply", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sovagrid-agent-proxy-"));
   const socketPath = join(directory, "control.sock");
@@ -1128,6 +1226,11 @@ test("Agent socket proxy sends one bounded request and accepts only a safe reply
             port: 22022, host_key_fingerprint: FINGERPRINT, schema_version: 1,
             action: "preview", writes: false, can_apply: false, pending_recovery: false,
             reason: "SOURCE_NOT_PREPARED" } } :
+        request.action === "amnezia-provision-preview" ?
+          { ok: true, result: { protocol: 1, scope: "entered_target", host: "other.example",
+            port: 22022, host_key_fingerprint: FINGERPRINT, schema_version: 1,
+            action: "preview", writes: false, target: "awg2", container: "amnezia-awg2",
+            can_apply: false, reason: "SOURCE_NOT_PREPARED" } } :
           { ok: true, result: { ...AGENT_RECORD, private_key: "must-not-appear" } }) + "\n");
     });
   });
@@ -1148,6 +1251,12 @@ test("Agent socket proxy sends one bounded request and accepts only a safe reply
     await assert.rejects(proxyAgent("wg-control-preview", validateAgentPayload("wg-control-preview",
       statusInput({ host: "remote.example" })), TOKEN, { socketPath, timeoutMs: 1000 }),
     /INSTALLER_UNAVAILABLE/, "a valid reply from another SSH endpoint must be rejected");
+    await assert.rejects(proxyAgent("amnezia-provision-preview",
+      validateAgentPayload("amnezia-provision-preview", {
+        ...statusInput({ host: "remote.example" }), listen_port: 51820,
+        subnet: "10.44.0.0/24", route_mode: "full" }), TOKEN,
+    { socketPath, timeoutMs: 1000 }), /INSTALLER_UNAVAILABLE/,
+    "provision status from another SSH endpoint must be rejected");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(directory, { recursive: true, force: true });
