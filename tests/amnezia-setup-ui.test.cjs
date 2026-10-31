@@ -96,8 +96,8 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
   assert.match(html, /amnezia\.js\?v=14/);
   assert.match(shell, /amnezia\.js\?v=14/);
-  assert.match(html, /styles\.css\?v=44/);
-  assert.match(shell, /styles\.css\?v=44/);
+  assert.match(html, /styles\.css\?v=45/);
+  assert.match(shell, /styles\.css\?v=45/);
 });
 
 test('Amnezia installation drift asks for manual review', () => {

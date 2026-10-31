@@ -32,6 +32,7 @@
     $("sshLoginError").hidden = true;
   }
   function updateButton() {
+    globalThis.sovagridSSHKeygen?.setBusy?.("login", busy);
     $("sshConnectButton").disabled = !secureOrigin() || busy || !reviewed || changedPin || !$("sshTrustHost").checked;
     $("sshInspectHost").disabled = !secureOrigin() || busy;
   }
@@ -146,9 +147,13 @@
     if ([...openServer].length > 80 || /[\x00-\x1f\x7f]/.test(openServer)) {
       error("Укажите имя или ID сервера из панели длиной до 80 символов."); return;
     }
-    const file = method === "private_key" ? $("sshPrivateKey").files?.[0] : null;
-    if (method === "private_key" && (!file || file.size < 1 || file.size > 65536)) {
-      error("Выберите файл приватного ключа размером до 64 КиБ."); return;
+    const generated = method === "private_key" ? globalThis.sovagridSSHKeygen?.get("login") : null;
+    if (generated && !generated.downloadRequested) {
+      error("Сначала нажмите «Скачать приватный» и сохраните файл ключа, затем подключитесь."); return;
+    }
+    const file = method === "private_key" && !generated ? $("sshPrivateKey").files?.[0] : null;
+    if (method === "private_key" && !generated && (!file || file.size < 1 || file.size > 65536)) {
+      error("Создайте ключ здесь или выберите файл приватного ключа размером до 64 КиБ."); return;
     }
     busy = true; // Reserve the reviewed key before the asynchronous file read.
     clearError();
@@ -157,14 +162,19 @@
     let sshAuthenticated = false;
     try {
       if (method === "private_key") {
-        try { private_key = await file.text(); }
-        catch { error("Не удалось прочитать выбранный файл ключа."); return; }
-        passphrase = $("sshPassphrase").value;
+        if (generated) private_key = generated.privateKey;
+        else {
+          try { private_key = await file.text(); }
+          catch { error("Не удалось прочитать выбранный файл ключа."); return; }
+          passphrase = $("sshPassphrase").value;
+        }
       } else {
         password = $("sshPassword").value;
       }
       if (!secureOrigin() || reviewed !== fingerprint || pin() !== previousPin || changedPin ||
-          !$("sshTrustHost").checked || authMethod() !== method) {
+          !$("sshTrustHost").checked || authMethod() !== method ||
+          (generated && globalThis.sovagridSSHKeygen?.get("login")?.revision !== generated.revision) ||
+          (!generated && method === "private_key" && $("sshPrivateKey").files?.[0] !== file)) {
         error("Параметры SSH-входа изменились. Сверьте отпечаток и попробуйте ещё раз."); return;
       }
       if (method === "password" && (!password || password.length > 1024)) {
@@ -184,6 +194,7 @@
       await globalThis.sovagridRedeemBrowserSSHGrant(result.grant,
         { server: openServer, commands: openCommands });
       savePin(fingerprint);
+      if (generated) globalThis.sovagridSSHKeygen?.clear?.("login", generated.revision);
     } catch (failure) {
       error(sshAuthenticated ? "SSH-вход выполнен, но панель не приняла одноразовый пропуск. Попробуйте снова или войдите по учётной записи панели."
         : explain(failure));

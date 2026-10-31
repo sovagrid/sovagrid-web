@@ -11,7 +11,7 @@ const CHANGED = `SHA256:${'B'.repeat(43)}`;
 const GRANT = 'c'.repeat(43);
 
 function harness({ fingerprint = FINGERPRINT, savedPin = null, responseStatus = 200,
-  url = 'https://relay.example/' } = {}) {
+  url = 'https://relay.example/', loginDelay = null } = {}) {
   const elements = new Map();
   const storage = new Map(savedPin ? [[`sovagrid.ssh-host-key:https://relay.example`, savedPin]] : []);
   const calls = [];
@@ -40,6 +40,7 @@ function harness({ fingerprint = FINGERPRINT, savedPin = null, responseStatus = 
     },
     fetch: async (path, options) => {
       calls.push({ path, options });
+      if (path.endsWith('/login') && loginDelay) await loginDelay;
       const value = path.endsWith('/host-key')
         ? { protocol: 1, port: 22, key_type: 'ssh-ed25519', fingerprint }
         : { protocol: 1, grant: GRANT };
@@ -55,7 +56,7 @@ function harness({ fingerprint = FINGERPRINT, savedPin = null, responseStatus = 
     handler({ preventDefault() {}, ...event });
     await new Promise((resolve) => setImmediate(resolve));
   };
-  return { element, storage, calls, redeemed, landings, dispatch };
+  return { context, element, storage, calls, redeemed, landings, dispatch };
 }
 
 test('SSH is the visible first option and the panel login remains reachable', async () => {
@@ -66,9 +67,9 @@ test('SSH is the visible first option and the panel login remains reachable', as
   const caddy = fs.readFileSync('deploy/Caddyfile.container', 'utf8');
   assert.match(html, /id="sshLoginMode"[^>]+aria-selected="true"/);
   assert.match(html, /id="hubLoginView"[^>]+hidden/);
-  assert.match(html, /browser-ssh\.js\?v=3/);
+  assert.match(html, /browser-ssh\.js\?v=4/);
   assert.match(image, /COPY[^\n]*browser-ssh\.js/);
-  assert.match(shell, /browser-ssh\.js\?v=3/);
+  assert.match(shell, /browser-ssh\.js\?v=4/);
   assert.match(html, /theme\.css\?v=6/);
   assert.match(shell, /theme\.css\?v=6/);
   assert.ok(caddy.indexOf('@browser_ssh path /api/v1/browser-ssh/*') < caddy.indexOf('@api path /api/*'));
@@ -162,6 +163,79 @@ test('private key and passphrase come from file picker and clear before network 
   assert.equal(h.element('sshPrivateKey').value, '');
   assert.equal(h.element('sshPassphrase').value, '');
   assert.deepEqual(h.redeemed, [GRANT]);
+});
+
+test('generated SSH key signs in without a file or passphrase', async () => {
+  const h = harness();
+  const privateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n';
+  const cleared = [];
+  h.context.sovagridSSHKeygen = {
+    get: (name) => name === 'login' ? { privateKey, revision: 7, downloadRequested: true } : null,
+    clear: (name, revision) => { cleared.push([name, revision]); },
+  };
+  h.element('sshUsername').value = 'root';
+  h.element('sshAuthPassword').checked = false;
+  h.element('sshAuthKey').checked = true;
+  await h.dispatch('sshAuthKey', 'change');
+  await h.dispatch('sshInspectHost', 'click');
+  h.element('sshTrustHost').checked = true;
+  await h.dispatch('sshTrustHost', 'change');
+  h.element('sshPassphrase').value = 'ignored for an unencrypted generated key';
+  await h.dispatch('browserSshForm', 'submit');
+  const payload = JSON.parse(h.calls[1].options.body);
+  assert.equal(payload.method, 'private_key');
+  assert.equal(payload.private_key, privateKey);
+  assert.equal(payload.passphrase, '');
+  assert.equal(h.element('sshPassphrase').value, '');
+  assert.deepEqual(h.redeemed, [GRANT]);
+  assert.deepEqual(cleared, [['login', 7]]);
+});
+
+test('generated key requires a private download before SSH login', async () => {
+  const h = harness();
+  h.context.sovagridSSHKeygen = { get: () => ({ privateKey: 'key', revision: 1,
+    downloadRequested: false }) };
+  h.element('sshUsername').value = 'root';
+  h.element('sshAuthPassword').checked = false;
+  h.element('sshAuthKey').checked = true;
+  await h.dispatch('sshAuthKey', 'change');
+  await h.dispatch('sshInspectHost', 'click');
+  h.element('sshTrustHost').checked = true;
+  await h.dispatch('browserSshForm', 'submit');
+  assert.equal(h.calls.length, 1);
+  assert.match(h.element('sshLoginError').textContent, /Скачать приватный/);
+});
+
+test('in-flight SSH login clears only its key revision after the response', async () => {
+  let releaseLogin;
+  const loginDelay = new Promise((resolve) => { releaseLogin = resolve; });
+  const h = harness({ loginDelay });
+  let current = { privateKey: 'old key', revision: 4, downloadRequested: true };
+  const busyStates = [], clearRevisions = [];
+  const keygen = {
+    get: () => current,
+    setBusy: (name, busy) => { busyStates.push([name, busy]); },
+    clear: (name, revision) => {
+      clearRevisions.push([name, revision]);
+      if (current?.revision === revision) current = null;
+    },
+  };
+  h.element('sshUsername').value = 'root';
+  h.element('sshAuthPassword').checked = false;
+  h.element('sshAuthKey').checked = true;
+  await h.dispatch('sshAuthKey', 'change');
+  await h.dispatch('sshInspectHost', 'click');
+  h.context.sovagridSSHKeygen = keygen;
+  h.element('sshTrustHost').checked = true;
+  await h.dispatch('browserSshForm', 'submit');
+  assert.equal(h.calls[1].path, '/api/v1/browser-ssh/login');
+  assert.deepEqual(busyStates, [['login', true]]);
+  current = { privateKey: 'new key', revision: 5, downloadRequested: false };
+  releaseLogin();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(clearRevisions, [['login', 4]]);
+  assert.equal(current.privateKey, 'new key');
+  assert.deepEqual(busyStates, [['login', true], ['login', false]]);
 });
 
 test('old server explains unavailable gateway and keeps Hub login usable', async () => {

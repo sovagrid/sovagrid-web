@@ -2715,6 +2715,7 @@ function serverSetupRenderJob() {
 }
 function serverSetupRender() {
   const ssh = serverSetup.mode === "ssh";
+  globalThis.sovagridSSHKeygen?.setBusy?.("setup", serverSetup.busy);
   $("serverSetupSshPanel").hidden = !ssh;
   $("serverSetupAgentPanel").hidden = ssh;
   $("serverSetupSshTab").setAttribute("aria-selected", String(ssh));
@@ -2777,6 +2778,7 @@ function serverSetupInvalidate() {
 }
 function serverSetupReset() {
   serverSetupInvalidate();
+  globalThis.sovagridSSHKeygen?.clear?.("setup");
   serverSetup.mode = "ssh";
   serverSetup.jobs = [];
   serverSetup.recovery = null;
@@ -2917,9 +2919,13 @@ async function serverSetupStatus(event) {
   if (!serverSetupUsernamePattern.test(username)) {
     serverSetupError("Введите имя пользователя SSH без пробелов и специальных символов."); return;
   }
-  const file = method === "private_key" ? $("serverSetupPrivateKey").files?.[0] : null;
-  if (method === "private_key" && (!file || file.size < 1 || file.size > 65536)) {
-    serverSetupError("Выберите файл приватного ключа размером до 64 КиБ."); return;
+  const generated = method === "private_key" ? globalThis.sovagridSSHKeygen?.get("setup") : null;
+  if (generated && !generated.downloadRequested) {
+    serverSetupError("Сначала нажмите «Скачать приватный» и сохраните файл ключа, затем проверьте сервер."); return;
+  }
+  const file = method === "private_key" && !generated ? $("serverSetupPrivateKey").files?.[0] : null;
+  if (method === "private_key" && !generated && (!file || file.size < 1 || file.size > 65536)) {
+    serverSetupError("Создайте ключ здесь или выберите файл приватного ключа размером до 64 КиБ."); return;
   }
   const priorPin = serverSetupPin(reviewed.host, reviewed.port);
   const seq = ++serverSetup.seq;
@@ -2932,15 +2938,19 @@ async function serverSetupStatus(event) {
   let password = "", private_key = "", passphrase = "";
   try {
     if (method === "private_key") {
-      try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
-      passphrase = $("serverSetupPassphrase").value;
+      if (generated) private_key = generated.privateKey;
+      else {
+        try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
+        passphrase = $("serverSetupPassphrase").value;
+      }
     } else password = $("serverSetupPassword").value;
     if (seq !== serverSetup.seq || !serverSetupAllowed() || !$("addServerDialog").open ||
         state.token !== token || serverSetupPin(reviewed.host, reviewed.port) !== priorPin ||
         !$("serverSetupTrust").checked || serverSetup.changedPin ||
         $("serverSetupUsername").value.trim() !== username ||
         (($("serverSetupAuthKey").checked ? "private_key" : "password") !== method) ||
-        (method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file)) {
+        (generated && globalThis.sovagridSSHKeygen?.get("setup")?.revision !== generated.revision) ||
+        (!generated && method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file)) {
       throw new Error("STALE_REQUEST");
     }
     if (method === "password" && (!password || password.length > 1024)) {
@@ -3022,12 +3032,17 @@ async function serverSetupReadCredentials(seq, reviewed) {
   if (!serverSetupUsernamePattern.test(username)) throw new Error("INVALID_USERNAME");
   if (username !== "root") throw new Error("ROOT_REQUIRED");
   let password = "", private_key = "", passphrase = "";
-  const file = method === "private_key" ? $("serverSetupPrivateKey").files?.[0] : null;
+  const generated = method === "private_key" ? globalThis.sovagridSSHKeygen?.get("setup") : null;
+  if (generated && !generated.downloadRequested) throw new Error("KEY_NOT_SAVED");
+  const file = method === "private_key" && !generated ? $("serverSetupPrivateKey").files?.[0] : null;
   try {
     if (method === "private_key") {
-      if (!file || file.size < 1 || file.size > 65536) throw new Error("INVALID_KEY");
-      try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
-      passphrase = $("serverSetupPassphrase").value;
+      if (generated) private_key = generated.privateKey;
+      else {
+        if (!file || file.size < 1 || file.size > 65536) throw new Error("INVALID_KEY");
+        try { private_key = await file.text(); } catch { throw new Error("FILE_READ_FAILED"); }
+        passphrase = $("serverSetupPassphrase").value;
+      }
       if (!private_key || new TextEncoder().encode(private_key).length > 65536 || passphrase.length > 1024)
         throw new Error("INVALID_KEY");
     } else {
@@ -3039,7 +3054,8 @@ async function serverSetupReadCredentials(seq, reviewed) {
         !$("serverSetupTrust").checked || serverSetup.changedPin ||
         $("serverSetupUsername").value.trim() !== username ||
         currentMethod !== method ||
-        (method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file))
+        (generated && globalThis.sovagridSSHKeygen?.get("setup")?.revision !== generated.revision) ||
+        (!generated && method === "private_key" && $("serverSetupPrivateKey").files?.[0] !== file))
       throw new Error("STALE_REQUEST");
     return { host: reviewed.host, port: reviewed.port, username, method,
       fingerprint: reviewed.fingerprint, password, private_key, passphrase };
@@ -3115,6 +3131,7 @@ async function serverSetupPrepare() {
       if (error.message === "HOST_KEY_CHANGED") serverSetupInvalidate();
       const guidance = error.message === "INVALID_USERNAME" ? "Введите пользователя SSH без пробелов." :
         error.message === "ROOT_REQUIRED" ? "Для автоматической установки нужен SSH-вход пользователя root." :
+        error.message === "KEY_NOT_SAVED" ? "Сначала нажмите «Скачать приватный» и сохраните файл ключа." :
         error.message === "INVALID_KEY" || error.message === "FILE_READ_FAILED" ? "Выберите читаемый приватный ключ до 64 КиБ и проверьте парольную фразу." :
         error.message === "PASSWORD_INVALID" ? "Введите пароль SSH длиной до 1024 символов." :
         error.message === "HUB_ROUTE_BLOCKED" ? "Новый сервер не может подключиться к SSH-порту Hub. Проверьте IP, порт и сеть." :

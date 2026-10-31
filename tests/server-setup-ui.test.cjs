@@ -95,10 +95,10 @@ test('add-server dialog has guided SSH path and separate manual Agent registrati
   assert.match(html, /Проверить состояние без изменений/);
   assert.match(html, /id="serverSetupInstallPanel"/);
   assert.match(html, /id="serverSetupRecovery"/);
-  assert.match(html, /app\.js\?v=50/);
-  assert.match(shell, /app\.js\?v=50/);
-  assert.match(html, /styles\.css\?v=44/);
-  assert.match(shell, /styles\.css\?v=44/);
+  assert.match(html, /app\.js\?v=51/);
+  assert.match(shell, /app\.js\?v=51/);
+  assert.match(html, /styles\.css\?v=45/);
+  assert.match(shell, /styles\.css\?v=45/);
 });
 
 test('manual Agent tab remains available and closing the dialog discards SSH credentials', async () => {
@@ -186,6 +186,67 @@ test('private-key status clears file and passphrase and labels agent-only result
   assert.equal(h.element('serverSetupPrivateKey').value, '');
   assert.equal(h.element('serverSetupPassphrase').value, '');
   assert.match(h.element('serverSetupResultTitle').textContent, /Agent/);
+});
+
+test('generated SSH key is used for both target status and installation credentials', async () => {
+  const h = harness();
+  const privateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n';
+  const cleared = [];
+  h.context.sovagridSSHKeygen = {
+    get: (name) => name === 'setup' ? { privateKey, revision: 3, downloadRequested: true } : null,
+    clear: (name) => { cleared.push(name); },
+  };
+  await h.context.serverSetupInspect();
+  h.element('serverSetupTrust').checked = true;
+  h.element('serverSetupAuthPassword').checked = false;
+  h.element('serverSetupAuthKey').checked = true;
+  h.element('serverSetupUsername').value = 'root';
+  h.element('serverSetupPassphrase').value = 'not used for generated key';
+  await h.context.serverSetupStatus({ preventDefault() {} });
+  const payload = JSON.parse(h.calls[1].options.body);
+  assert.equal(payload.method, 'private_key');
+  assert.equal(payload.private_key, privateKey);
+  assert.equal(payload.passphrase, '');
+  const reviewed = vm.runInContext('serverSetup.reviewed', h.context);
+  const seq = vm.runInContext('serverSetup.seq', h.context);
+  const installCredentials = await h.context.serverSetupReadCredentials(seq, reviewed);
+  assert.equal(installCredentials.private_key, privateKey);
+  assert.equal(installCredentials.passphrase, '');
+  h.element('addServerDialog').close();
+  assert.deepEqual(cleared, ['setup']);
+});
+
+test('generated key must be downloaded before target status', async () => {
+  const h = harness();
+  h.context.sovagridSSHKeygen = { get: () => ({ privateKey: 'key', revision: 1,
+    downloadRequested: false }) };
+  await h.context.serverSetupInspect();
+  h.element('serverSetupTrust').checked = true;
+  h.element('serverSetupAuthPassword').checked = false;
+  h.element('serverSetupAuthKey').checked = true;
+  h.element('serverSetupUsername').value = 'root';
+  await h.context.serverSetupStatus({ preventDefault() {} });
+  assert.equal(h.calls.length, 1);
+  assert.match(h.element('serverSetupError').textContent, /Скачать приватный/);
+  const reviewed = vm.runInContext('serverSetup.reviewed', h.context);
+  const seq = vm.runInContext('serverSetup.seq', h.context);
+  await assert.rejects(h.context.serverSetupReadCredentials(seq, reviewed), /KEY_NOT_SAVED/);
+});
+
+test('target status disables key generation for the full in-flight SSH request', async () => {
+  const waiting = deferred();
+  const h = harness({ statusReply: waiting.promise });
+  const busyStates = [];
+  h.context.sovagridSSHKeygen = { setBusy: (name, busy) => { busyStates.push([name, busy]); } };
+  await h.context.serverSetupInspect();
+  h.element('serverSetupTrust').checked = true;
+  h.element('serverSetupUsername').value = 'root';
+  h.element('serverSetupPassword').value = 'temporary';
+  const pending = h.context.serverSetupStatus({ preventDefault() {} });
+  assert.deepEqual(busyStates.at(-1), ['setup', true]);
+  waiting.resolve(status());
+  await pending;
+  assert.deepEqual(busyStates.at(-1), ['setup', false]);
 });
 
 test('remote Hub, plain remote HTTP and limited admin cannot inspect another server', async () => {
