@@ -146,7 +146,7 @@ const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILAB
   "SSH_UNAVAILABLE", "SOURCE_UNTRUSTED", "RUNTIME_UNAVAILABLE", "INVALID_JOURNAL",
   "INSTALLER_UNAVAILABLE", "ROOT_REQUIRED", "JOURNAL_UNAVAILABLE", "UNSAFE_LOCK",
   "INVALID_REQUEST", "SOURCE_CHANGED", "STATE_CONFLICT", "OWNERSHIP_CONFLICT",
-  "STALE_PREVIEW", "CONTROL_ACTIVE", "OPERATION_FAILED", "INTERNAL_ERROR",
+  "STALE_PREVIEW", "CONTROL_ACTIVE", "OPERATION_FAILED", "INTERNAL_ERROR", "INSUFFICIENT_SPACE", "RESTORE_RECOVERY",
   "STAGE_CLEANUP_REQUIRED", "RESPONSE_TOO_LARGE", "SOURCE_NOT_PREPARED",
   "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "RECOVERY_UNCERTAIN",
   "UNSUPPORTED_PLATFORM", "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE",
@@ -235,19 +235,27 @@ export function validateLogin(value) {
 }
 
 export function validateAmneziaPreview(value) {
-  const fields = ["username", "method", "fingerprint", "password", "private_key", "passphrase", "target"];
+  const fields = amneziaConnectionFields(value);
   const remote = value && typeof value === "object" && !Array.isArray(value) &&
     (Object.hasOwn(value, "host") || Object.hasOwn(value, "port"));
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      !exactFields(value, remote ? [...fields, "host", "port"] : fields) ||
+      !exactFields(value, fields) ||
       !["awg2", "wireguard"].includes(value.target)) {
     throw new Error("INVALID_INPUT");
   }
-  const login = Object.fromEntries(fields.slice(0, 6)
+  const login = Object.fromEntries(["username", "method", "fingerprint", "password", "private_key", "passphrase"]
     .map((key) => [key, value[key]]));
   validateLogin(login);
+  const route = Object.hasOwn(value, "jump") ? validateVpnActionRoute(value, ["target"]) : null;
   return { login, target: value.target,
-    ...(remote ? { endpoint: validateTargetHostKey({ host: value.host, port: value.port }) } : {}) };
+    ...(remote ? { endpoint: validateTargetHostKey({ host: value.host, port: value.port }) } : {}),
+    ...(route ? { jump: route.jump, host_key_blob: route.host_key_blob } : {}) };
+}
+
+function amneziaConnectionFields(value) {
+  return ["username", "method", "fingerprint", "password", "private_key", "passphrase", "target",
+    ...(Object.hasOwn(value ?? {}, "host") || Object.hasOwn(value ?? {}, "port") ? ["host", "port"] : []),
+    ...(Object.hasOwn(value ?? {}, "jump") ? ["host_key_blob", "jump"] : [])];
 }
 
 function canonicalSubnet(value) {
@@ -265,17 +273,29 @@ const ENROLL_PREVIEW_FIELDS = ["protocol", "action", "writes", "target", "contai
   "image_id", "config_sha256", "table_sha256", "configured_clients", "vpn_protocol",
   "interface", "listen_port", "server_subnet", "host_key_fingerprint", "reverify_required"];
 const REMOTE_REVIEW_FIELDS = ["scope", "host", "port"];
+const JUMP_REVIEW_FIELDS = ["jump_host", "jump_port", "jump_host_key_fingerprint"];
+
+function amneziaReviewRouteFields(selected) {
+  return [...(selected.endpoint ? REMOTE_REVIEW_FIELDS : []),
+    ...(selected.jump ? JUMP_REVIEW_FIELDS : [])];
+}
 
 function amneziaIdentity(value, selected) {
   if (!selected.endpoint) return value;
   return { ...value, scope: "entered_target", host: selected.endpoint.host,
-    port: selected.endpoint.port, host_key_fingerprint: selected.login.fingerprint };
+    port: selected.endpoint.port, host_key_fingerprint: selected.login.fingerprint,
+    ...(selected.jump ? { jump_host: selected.jump.host, jump_port: selected.jump.port,
+      jump_host_key_fingerprint: selected.jump.fingerprint } : {}) };
 }
 
 function exactAmneziaIdentity(reviewed, selected) {
   return !selected.endpoint || (reviewed.scope === "entered_target" &&
     reviewed.host === selected.endpoint.host && reviewed.port === selected.endpoint.port &&
-    reviewed.host_key_fingerprint === selected.login.fingerprint);
+    reviewed.host_key_fingerprint === selected.login.fingerprint &&
+    (selected.jump ? reviewed.jump_host === selected.jump.host &&
+      reviewed.jump_port === selected.jump.port &&
+      reviewed.jump_host_key_fingerprint === selected.jump.fingerprint :
+      JUMP_REVIEW_FIELDS.every((key) => !Object.hasOwn(reviewed, key))));
 }
 
 export function safeAmneziaEnrollmentPreview(raw, target, fingerprint, endpoint = null) {
@@ -304,8 +324,7 @@ export function safeAmneziaEnrollmentPreview(raw, target, fingerprint, endpoint 
 
 function validateEnrollmentReview(value, selected) {
   const { target, login, endpoint } = selected;
-  if (!exactFields(value, endpoint ? [...ENROLL_PREVIEW_FIELDS, ...REMOTE_REVIEW_FIELDS] :
-      ENROLL_PREVIEW_FIELDS) || value.protocol !== 1 ||
+  if (!exactFields(value, [...ENROLL_PREVIEW_FIELDS, ...amneziaReviewRouteFields(selected)]) || value.protocol !== 1 ||
       value.action !== "enroll_preview" || value.writes !== false ||
       value.reverify_required !== true || value.target !== target ||
       value.host_key_fingerprint !== login.fingerprint || !exactAmneziaIdentity(value, selected) ||
@@ -323,10 +342,7 @@ function validateEnrollmentReview(value, selected) {
 }
 
 export function validateAmneziaEnrollment(value) {
-  const fields = ["username", "method", "fingerprint", "password", "private_key", "passphrase", "target"];
-  const remote = value && typeof value === "object" && !Array.isArray(value) &&
-    (Object.hasOwn(value, "host") || Object.hasOwn(value, "port"));
-  const connectionFields = remote ? [...fields, "host", "port"] : fields;
+  const connectionFields = amneziaConnectionFields(value);
   if (!exactFields(value, [...connectionFields, "reviewed", "confirm"]) ||
       value.confirm !== "ENROLL_EXISTING_CONTAINER") {
     throw new Error("INVALID_INPUT");
@@ -493,7 +509,9 @@ export function validateAgentPayload(action, value) {
       source_revision: value.expected.source_revision }, confirm: true };
   }
   if (action.startsWith("vpn-source-")) {
-    const fields = action === "vpn-source-apply" ? ["expected"] : [];
+    const maintenance = Object.hasOwn(value ?? {}, "maintenance");
+    const fields = action === "vpn-source-apply" ? ["expected", ...(maintenance ? ["maintenance"] : [])] : [];
+    if (maintenance && value.maintenance !== true) throw new Error("INVALID_INPUT");
     const target = validateVpnActionRoute(value, fields);
     if (action !== "vpn-source-apply") return target;
     const expectedFields = ["source_manifest_sha256", "installed_sha256", "state_sha256", "candidate_sha256"];
@@ -501,7 +519,8 @@ export function validateAgentPayload(action, value) {
         expectedFields.some((key) => typeof value.expected[key] !== "string" || !HEX_SHA.test(value.expected[key]))) {
       throw new Error("INVALID_INPUT");
     }
-    return { ...target, expected: Object.fromEntries(expectedFields.map((key) => [key, value.expected[key]])) };
+    return { ...target, expected: Object.fromEntries(expectedFields.map((key) => [key, value.expected[key]])),
+      ...(maintenance ? { maintenance: true } : {}) };
   }
   if (action === "prepare") {
     const withJump = Object.hasOwn(value ?? {}, "jump");
@@ -613,8 +632,10 @@ function safeVpnSourceResult(action, value) {
   const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint", ...route.fields];
   if (action === "vpn-source-preview") {
     const hashes = ["source_manifest_sha256", "candidate_sha256", "installed_sha256", "state_sha256"];
+    const maintenance = Object.hasOwn(value, "maintenance_required");
     if (!exactFields(value, [...baseFields, ...hashes, "expected", "change",
-          "temporary_writes", "activation_writes", "cleanup_required"]) ||
+          "temporary_writes", "activation_writes", "cleanup_required", ...(maintenance ? ["maintenance_required"] : [])]) ||
+        (maintenance && (value.maintenance_required !== true || value.change !== "update")) ||
         hashes.some((key) => typeof value[key] !== "string" || !HEX_SHA.test(value[key])) ||
         !exactFields(value.expected, hashes) ||
         hashes.some((key) => value.expected[key] !== value[key]) ||
@@ -624,7 +645,7 @@ function safeVpnSourceResult(action, value) {
     return { ...base, ...Object.fromEntries(hashes.map((key) => [key, value[key]])),
       expected: Object.fromEntries(hashes.map((key) => [key, value[key]])),
       change: value.change, temporary_writes: true, activation_writes: false,
-      cleanup_required: value.cleanup_required };
+      cleanup_required: value.cleanup_required, ...(maintenance ? { maintenance_required: true } : {}) };
   }
   if (action === "vpn-source-apply") {
     if (!exactFields(value, [...baseFields, "installed", "changed", "cleanup_required",
@@ -1831,15 +1852,20 @@ export async function previewAmneziaSetup(raw, options = {}) {
       AMNEZIA_PREVIEW_COMMAND + selected.target;
     return await executeFixedAmnezia(login, exact,
       (output) => amneziaIdentity(safeAmneziaPreview(output, selected.target), selected),
-      { ...options, endpoint: selected.endpoint });
+      { ...options, endpoint: selected.endpoint, jump: selected.jump });
   } finally {
-    clearCredentials(selected?.login); clearCredentials(raw);
+    clearCredentials(selected?.login); clearCredentials(selected?.jump); clearCredentials(raw);
   }
 }
 
 function executeFixedAmnezia(login, exact, parse, { clientFactory = () => new Client(),
-  timeoutMs = 60000, mutation = false, endpoint = null } = {}) {
+  timeoutMs = 60000, mutation = false, endpoint = null, jump = null,
+  jumpClientFactory = clientFactory, sock = null } = {}) {
   validateLogin(login);
+  if (jump) return withJumpSocket({ ...jump }, endpoint,
+    { clientFactory, jumpClientFactory, timeoutMs }, (channel) => executeFixedAmnezia(
+      login, exact, parse, { clientFactory, timeoutMs, mutation, endpoint, sock: channel }))
+    .finally(() => clearCredentials(login));
   return new Promise((resolve, reject) => {
     const privateKey = login.method === "private_key" ? Buffer.from(login.private_key, "utf8") : null;
     let client;
@@ -1909,6 +1935,7 @@ function executeFixedAmnezia(login, exact, parse, { clientFactory = () => new Cl
     });
     try {
       client.connect({ host: endpoint?.host ?? TARGET, port: endpoint?.port ?? PORT,
+        ...(sock ? { sock } : {}),
         username: login.username,
         readyTimeout: Math.min(timeoutMs, 10000), tryKeyboard: login.method === "password",
         ...(login.method === "password" ? { password: login.password } :
@@ -1947,8 +1974,9 @@ async function enrollmentPreview(selected, options) {
   // adminCommand includes its own fixed sudo prefix after the fixed cd.
   const login = amneziaLogin(selected);
   return executeFixedAmnezia(login, adminCommand(login.username, "enroll-preview", selected.target),
-    (raw) => safeAmneziaEnrollmentPreview(raw, selected.target, login.fingerprint, selected.endpoint),
-    { ...options, endpoint: selected.endpoint });
+    (raw) => amneziaIdentity(safeAmneziaEnrollmentPreview(raw, selected.target,
+      login.fingerprint, selected.endpoint), selected),
+    { ...options, endpoint: selected.endpoint, jump: selected.jump });
 }
 
 export async function previewAmneziaEnrollment(raw, options = {}) {
@@ -1957,7 +1985,7 @@ export async function previewAmneziaEnrollment(raw, options = {}) {
     selected = validateAmneziaPreview(raw);
     return await enrollmentPreview(selected, options);
   } finally {
-    clearCredentials(selected?.login); clearCredentials(raw);
+    clearCredentials(selected?.login); clearCredentials(selected?.jump); clearCredentials(raw);
   }
 }
 
@@ -1975,7 +2003,7 @@ export async function enrollAmneziaSetup(raw, { recheckAdmin = async () => {}, .
   try {
     selected = validateAmneziaEnrollment(raw);
     const fresh = await enrollmentPreview(selected, options);
-    if ([...ENROLL_PREVIEW_FIELDS, ...(selected.endpoint ? REMOTE_REVIEW_FIELDS : [])]
+    if ([...ENROLL_PREVIEW_FIELDS, ...amneziaReviewRouteFields(selected)]
       .some((key) => fresh[key] !== selected.reviewed[key])) {
       throw new Error("SETUP_CHANGED");
     }
@@ -1984,9 +2012,8 @@ export async function enrollAmneziaSetup(raw, { recheckAdmin = async () => {}, .
     await executeFixedAmnezia(login, adminCommand(login.username, "enroll", selected.target,
       selected.reviewed), (output) => safeEnrollmentResult(output, selected.reviewed),
     { ...options, timeoutMs: options.timeoutMs ?? 120000, mutation: true,
-      endpoint: selected.endpoint });
-    const statusInput = { ...selected.login, target: selected.target,
-      ...(selected.endpoint ?? {}) };
+      endpoint: selected.endpoint, jump: selected.jump });
+    const statusInput = setupReadInput(selected);
     let after;
     try { after = await previewAmneziaSetup(statusInput, options); }
     catch { throw new Error("SETUP_UNCERTAIN"); }
@@ -1999,7 +2026,7 @@ export async function enrollAmneziaSetup(raw, { recheckAdmin = async () => {}, .
       container_id: after.container_id, configured_clients: after.configured_clients,
       setup: after }, selected);
   } finally {
-    clearCredentials(selected?.login); clearCredentials(raw);
+    clearCredentials(selected?.login); clearCredentials(selected?.jump); clearCredentials(raw);
   }
 }
 
@@ -2008,10 +2035,7 @@ const SETUP_REVIEW_FIELDS = ["protocol", "target", "enrolled", "marker", "other_
   "container_id", "configured_clients", "owned_clients"];
 
 export function validateAmneziaSetupAction(raw, action) {
-  const fields = ["username", "method", "fingerprint", "password", "private_key", "passphrase", "target"];
-  const remote = raw && typeof raw === "object" && !Array.isArray(raw) &&
-    (Object.hasOwn(raw, "host") || Object.hasOwn(raw, "port"));
-  const connectionFields = remote ? [...fields, "host", "port"] : fields;
+  const connectionFields = amneziaConnectionFields(raw);
   if (!["install", "arm"].includes(action) ||
       !exactFields(raw, [...connectionFields, "reviewed", "confirm"])) {
     throw new Error("INVALID_INPUT");
@@ -2021,8 +2045,8 @@ export function validateAmneziaSetupAction(raw, action) {
   const value = raw.reviewed;
   if (raw.confirm !== (action === "install" ? "INSTALL_AMNEZIA_BROKER" :
       AMNEZIA_CONFIRM[selected.target]) ||
-      !exactFields(value, selected.endpoint ? [...SETUP_REVIEW_FIELDS,
-        ...REMOTE_REVIEW_FIELDS, "host_key_fingerprint"] : SETUP_REVIEW_FIELDS) ||
+      !exactFields(value, [...SETUP_REVIEW_FIELDS, ...amneziaReviewRouteFields(selected),
+        ...(selected.endpoint ? ["host_key_fingerprint"] : [])]) ||
       !exactAmneziaIdentity(value, selected) ||
       value.protocol !== 1 || value.target !== selected.target || value.enrolled !== true ||
       !HEX_SHA.test(value.container_id) || !["absent", "valid", "unsafe"].includes(value.marker) ||
@@ -2043,7 +2067,8 @@ export function validateAmneziaSetupAction(raw, action) {
 }
 
 function setupReadInput(selected) {
-  return { ...selected.login, target: selected.target, ...(selected.endpoint ?? {}) };
+  return { ...selected.login, target: selected.target, ...(selected.endpoint ?? {}),
+    ...(selected.jump ? { host_key_blob: selected.host_key_blob, jump: { ...selected.jump } } : {}) };
 }
 
 async function setupPreview(selected, options) {
@@ -2053,8 +2078,9 @@ async function setupPreview(selected, options) {
 }
 
 function sameSetupReview(current, reviewed, selected) {
-  return [...SETUP_REVIEW_FIELDS, ...(selected.endpoint ? [...REMOTE_REVIEW_FIELDS,
-    "host_key_fingerprint"] : [])].every((key) => current[key] === reviewed[key]);
+  return [...SETUP_REVIEW_FIELDS, ...amneziaReviewRouteFields(selected),
+    ...(selected.endpoint ? ["host_key_fingerprint"] : [])]
+    .every((key) => current[key] === reviewed[key]);
 }
 
 function safeControlResult(raw, action, target) {
@@ -2089,7 +2115,7 @@ export async function mutateAmneziaSetup(raw, action,
     await executeFixedAmnezia(login, exact,
       (output) => safeControlResult(output, action, selected.target),
       { ...options, timeoutMs: options.timeoutMs ?? 150000, mutation: true,
-        endpoint: selected.endpoint });
+        endpoint: selected.endpoint, jump: selected.jump });
     let after;
     try { after = await setupPreview(selected, options); }
     catch { throw new Error("SETUP_UNCERTAIN"); }
@@ -2103,7 +2129,7 @@ export async function mutateAmneziaSetup(raw, action,
     return amneziaIdentity({ protocol: 1, action: action === "install" ? "installed" : "armed",
       target: selected.target, setup: after }, selected);
   } finally {
-    clearCredentials(selected?.login); clearCredentials(raw);
+    clearCredentials(selected?.login); clearCredentials(selected?.jump); clearCredentials(raw);
   }
 }
 
@@ -2232,7 +2258,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       if (isAdminRoute) await admin(req.headers.authorization);
       const value = await body(req, (isTargetStatus || isInstallPreview ||
         ["prepare", "resume"].includes(agentAction) || vpnSourceAction ||
-        wgControlAction || provisionAction || directAction === "open") ?
+        wgControlAction || provisionAction || vpnAction || directAction === "open") ?
         MAX_JUMP_BODY : MAX_BODY);
       clearTimeout(bodyTimer);
       try {

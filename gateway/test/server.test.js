@@ -1568,6 +1568,17 @@ test("VPN source setup accepts only pinned SSH credentials and the exact reviewe
     host_key_fingerprint: FINGERPRINT, ...hashes, expected: hashes,
     change: "install", temporary_writes: true, activation_writes: false,
     cleanup_required: false });
+  const maintenance = safeAgentResult("vpn-source-preview", { ...preview,
+    change: "update", maintenance_required: true });
+  assert.equal(maintenance.maintenance_required, true);
+  assert.equal(validateAgentPayload("vpn-source-apply", { ...login, expected: hashes,
+    maintenance: true }).maintenance, true);
+  for (const value of [false, "yes", 1]) {
+    assert.throws(() => validateAgentPayload("vpn-source-apply", { ...login,
+      expected: hashes, maintenance: value }), /INVALID_INPUT/);
+  }
+  assert.throws(() => safeAgentResult("vpn-source-preview", { ...preview,
+    maintenance_required: true }), /INSTALLER_UNAVAILABLE/);
   assert.equal(preview.private_key, undefined);
   assert.throws(() => safeAgentResult("vpn-source-preview", {
     ...preview, private_key: "must-not-leak" }), /INSTALLER_UNAVAILABLE/);

@@ -125,7 +125,7 @@ test('untrusted metadata and missing trust never enable the action', async () =>
   h.setFetchHook(() => Promise.resolve(reply(200, snapshot({ available_keys: {} }))));
   await h.context.releaseFeedRefresh(true);
   assert.equal(h.element('releaseFeedEnable').disabled, true);
-  assert.match(h.element('releaseFeedNotice').textContent, /Нет доверенного ключа/);
+  assert.match(h.element('releaseFeedNotice').textContent, /Нет доступного подписанного канала/);
   h.setFetchHook(() => Promise.resolve(reply(200, snapshot({
     available_keys: { '<script>': key },
   }))));
@@ -166,6 +166,48 @@ test('logout discards a pending response and panel contains no credential input'
   assert.ok(section);
   assert.match(section, /data-global-admin-only/);
   assert.doesNotMatch(section, /type="(?:text|password)"/);
-  assert.match(fs.readFileSync('sw.js', 'utf8'), /"\/updates\.js\?v=1"/);
+  assert.match(fs.readFileSync('sw.js', 'utf8'), /"\/updates\.js\?v=2"/);
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /updates\.js updates\.css/);
+});
+
+
+test('an enabled subscription with a changed layout or key requests review instead of claiming healthy updates', async () => {
+  const h = harness();
+  h.setFetchHook(() => Promise.resolve(reply(200, snapshot({ enabled: true,
+    key_id: 'sovagrid-2026-10', timer_enabled: true, timer_active: true, available_keys: {} }))));
+  await h.context.releaseFeedRefresh(true);
+  assert.equal(h.element('releaseFeedBadge').textContent, 'Нужна проверка');
+  assert.match(h.element('releaseFeedSummary').textContent, /проверки установки/);
+  assert.equal(h.element('releaseFeedEnable').disabled, true);
+  assert.equal(h.element('releaseFeedDisable').disabled, false);
+  assert.match(fs.readFileSync('index.html', 'utf8'), /поддерживаемого режима «только Hub»/);
+});
+
+
+test('losing the global admin role cancels a reviewed action before POST', async () => {
+  const h = harness();
+  h.setFetchHook(() => Promise.resolve(reply(200, snapshot())));
+  await h.context.releaseFeedRefresh(true);
+  h.context.releaseFeedReview('enable');
+  h.element('releaseFeedConfirm').checked = true;
+  h.state.access.unrestricted_admin = false;
+  h.context.releaseFeedAccessChanged();
+  await h.context.releaseFeedApply();
+  assert.equal(h.calls.filter(({ options }) => options.method === 'POST').length, 0);
+  assert.equal(h.element('releaseFeedReview').hidden, true);
+  assert.equal(h.element('releaseFeedApply').disabled, true);
+});
+
+test('a refreshed CAS revision discards the previous confirmation', async () => {
+  const h = harness();
+  h.setFetchHook(() => Promise.resolve(reply(200, snapshot())));
+  await h.context.releaseFeedRefresh(true);
+  h.context.releaseFeedReview('enable');
+  h.element('releaseFeedConfirm').checked = true;
+  h.setFetchHook(() => Promise.resolve(reply(200, snapshot({ state_revision: 'd'.repeat(64) }))));
+  await h.context.releaseFeedRefresh(true);
+  await h.context.releaseFeedApply();
+  assert.equal(h.calls.filter(({ options }) => options.method === 'POST').length, 0);
+  assert.equal(h.element('releaseFeedConfirm').checked, false);
+  assert.match(h.element('releaseFeedError').textContent, /изменилось/);
 });

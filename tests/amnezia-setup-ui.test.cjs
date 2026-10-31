@@ -84,8 +84,7 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /id="amneziaSetupRemoteHost"/);
   assert.match(html, /id="amneziaSetupRemotePort"/);
   assert.match(html, /id="amneziaSetupViaJump"/);
-  assert.match(html, /Подготовка VPN-кода, управление WireGuard и создание AmneziaWG поддерживают проверенный маршрут/);
-  assert.match(html, /Подключение существующего брокера ниже пока требует прямого SSH-доступа из Hub/);
+  assert.match(html, /создание AmneziaWG и подключение существующего брокера поддерживают проверенный маршрут/);
   assert.match(html, /id="amneziaSourcePreview"/);
   assert.match(html, /id="amneziaSourceApply"/);
   assert.match(html, /id="wgControlPanel"/);
@@ -97,8 +96,8 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=16/);
-  assert.match(shell, /amnezia\.js\?v=16/);
+  assert.match(html, /amnezia\.js\?v=17/);
+  assert.match(shell, /amnezia\.js\?v=17/);
   assert.match(html, /styles\.css\?v=46/);
   assert.match(shell, /styles\.css\?v=46/);
 });
@@ -883,4 +882,128 @@ test('failed or malformed repeat enrollment preview invalidates the earlier acti
     assert.equal(h.calls.filter(({ path }) => path.endsWith('/vpn-setup/enroll')).length, 0);
     assert.doesNotMatch(JSON.stringify([...h.storage.entries()]), /temporary-ssh-secret/);
   }
+});
+
+test('existing VPN broker can be enrolled and armed through a reviewed relay without retaining credentials', async () => {
+  const host = 'vpn.example', port = 2202, jumpHost = 'relay.example', jumpPin = `SHA256:${'C'.repeat(43)}`;
+  const route = { jump_host: jumpHost, jump_port: 22, jump_host_key_fingerprint: jumpPin };
+  const scope = { scope: 'entered_target', host, port, host_key_fingerprint: FINGERPRINT, ...route };
+  const enrolled = { ...preview(), ...scope, enrolled: true, container_id: 'a'.repeat(64),
+    configured_clients: 2, owned_clients: 0 };
+  delete enrolled.reason;
+  const enrollment = { protocol: 1, action: 'enroll_preview', writes: false, target: 'awg2',
+    container_id: 'a'.repeat(64), image_id: 'sha256:' + 'b'.repeat(64), config_sha256: 'c'.repeat(64),
+    table_sha256: 'd'.repeat(64), configured_clients: 2, vpn_protocol: 'amneziawg', interface: 'awg0',
+    listen_port: 51820, server_subnet: '10.44.0.0/24', reverify_required: true, ...scope };
+  let wrongRelay = false;
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-status': { protocol: 1, ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/vpn-setup/preview': { ...preview(), ...scope },
+    '/api/v1/browser-ssh/vpn-setup/enroll-preview': enrollment,
+    '/api/v1/browser-ssh/vpn-setup/enroll': { protocol: 1, action: 'enrolled', target: 'awg2',
+      ...scope, setup: enrolled },
+    '/api/v1/browser-ssh/vpn-setup/install': { protocol: 1, action: 'installed', target: 'awg2',
+      ...scope, setup: { ...enrolled, installed_current: true, can_arm: true } },
+    '/api/v1/browser-ssh/vpn-setup/arm': () => ({ protocol: 1, action: 'armed', target: 'awg2',
+      ...scope, jump_port: wrongRelay ? 23 : 22,
+      setup: { ...enrolled, installed_current: true, can_arm: false, marker: 'valid', socket_active: true } }),
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  h.element('amneziaSetupViaJump').checked = true;
+  h.context.vpnJumpRoutePins = () => ({ generation: 1,
+    target: { host, port, fingerprint: FINGERPRINT, key_type: 'ssh-ed25519', host_key_blob: 'target-key' },
+    jump: { host: jumpHost, port: 22, username: 'operator', method: 'password',
+      fingerprint: jumpPin, host_key_blob: 'relay-key' } });
+  h.context.vpnJumpRouteCredentials = async () => ({ host_key_blob: 'target-key',
+    jump: { host: jumpHost, port: 22, username: 'operator', method: 'password', fingerprint: jumpPin,
+      password: h.element('relayPassword').value, private_key: '', passphrase: '', host_key_blob: 'relay-key' } });
+  h.context.vpnJumpClearSecrets = () => { h.element('relayPassword').value = ''; };
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  const fill = () => {
+    h.element('amneziaSetupPassword').value = 'target-secret';
+    h.element('relayPassword').value = 'relay-secret';
+  };
+  fill();
+  await h.context.amneziaSetupPreview({ preventDefault() {} });
+  assert.equal(h.element('amneziaSetupEnrollPreview').hidden, false);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.equal(h.element('relayPassword').value, '');
+  fill();
+  await h.context.amneziaSetupAction('enroll-preview');
+  assert.equal(h.element('amneziaSetupEnroll').disabled, false);
+  fill();
+  await h.context.amneziaSetupAction('enroll');
+  assert.equal(h.element('amneziaSetupInstall').hidden, false);
+  fill();
+  await h.context.amneziaSetupAction('install');
+  assert.equal(h.element('amneziaSetupArm').hidden, false);
+  fill(); wrongRelay = true;
+  await h.context.amneziaSetupAction('arm');
+  assert.match(h.element('amneziaSetupError').textContent, /проверьте состояние перед повтором/);
+  assert.equal(h.context.amneziaSetupPending(), true);
+  for (const call of h.calls.filter((call) => call.path.includes('/vpn-setup/'))) {
+    const body = JSON.parse(call.options.body);
+    assert.equal(body.host_key_blob, 'target-key');
+    assert.equal(body.jump.host_key_blob, 'relay-key');
+    assert.equal(body.password, 'target-secret');
+    assert.equal(body.jump.password, 'relay-secret');
+  }
+  assert.equal(h.element('relayPassword').value, '');
+  assert.doesNotMatch([...h.storage, ...h.session].join(' '), /target-secret|relay-secret/);
+});
+
+test('VPN source maintenance requires a separate checked confirmation before pausing existing management', async () => {
+  const host = 'vpn.example', port = 22;
+  const scope = { protocol: 1, scope: 'entered_target', host, port, host_key_fingerprint: FINGERPRINT };
+  const hashes = { source_manifest_sha256: 'a'.repeat(64), candidate_sha256: 'b'.repeat(64),
+    installed_sha256: 'c'.repeat(64), state_sha256: 'd'.repeat(64) };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/vpn-source/preview': { ...scope, ...hashes, expected: hashes,
+      change: 'update', temporary_writes: true, activation_writes: false,
+      cleanup_required: false, maintenance_required: true },
+    '/api/v1/browser-ssh/vpn-source/apply': { ...scope, installed: true, changed: true,
+      cleanup_required: false, source_manifest_sha256: hashes.source_manifest_sha256,
+      candidate_sha256: hashes.candidate_sha256 },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'preview-secret';
+  await h.context.amneziaSourcePreview();
+  assert.match(h.element('amneziaSourceSummary').textContent, /временно остановит управление VPN/);
+  h.context.amneziaSourceConfirm('apply');
+  assert.equal(h.element('amneziaSetupMaintenanceLabel').hidden, false);
+  assert.match(h.element('amneziaSetupDialogSummary').textContent, /предыдущую версию/);
+  assert.equal(h.element('amneziaSetupDialog').open, true);
+  const before = h.calls.length;
+  h.element('amneziaSetupDialogConfirm').listeners.get('click')();
+  assert.equal(h.calls.length, before);
+  assert.equal(h.element('amneziaSetupDialog').open, true);
+  await h.context.amneziaSourceAction('apply');
+  assert.equal(h.calls.length, before, 'a programmatic call cannot bypass maintenance consent');
+  h.element('amneziaSetupPassword').value = 'apply-secret';
+  h.element('amneziaSetupMaintenance').checked = true;
+  h.element('amneziaSetupDialogConfirm').listeners.get('click')();
+  await until(() => h.calls.length === before + 1);
+  await until(() => /VPN-код подготовлен/.test(h.element('amneziaSourceNotice').textContent));
+  const request = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(request.maintenance, true);
+  assert.deepEqual(request.expected, hashes);
+  assert.equal(request.password, 'apply-secret');
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.equal(h.element('amneziaSetupDialog').open, false);
 });

@@ -54,7 +54,7 @@ function releaseFeedExplain(error, action = false) {
   if (error?.status === 409 && code === "STATE_CHANGED")
     return "Состояние обновлений изменилось. Загрузите его заново и повторите подтверждение.";
   if (error?.status === 409 && code === "HUB_ONLY_UNSUPPORTED")
-    return "Этот узел работает в режиме «только Hub». Автоматическая подписка для него пока недоступна; существующий Agent не затронут.";
+    return "Настройка режима «только Hub» не завершена или его текущие параметры не поддерживают автоматическое обновление. Существующий Agent не затронут.";
   if (error?.status === 503 && code === "UNCONFIGURED_TRUST")
     return "На сервере нет проверенного ключа подписи для этого канала. Обновите SovaGrid и попробуйте снова.";
   if (error?.status === 503 && code === "TIMER_UNAVAILABLE")
@@ -74,13 +74,15 @@ function releaseFeedRender() {
   const client = releaseFeedClient, value = client.status;
   const ready = Boolean(state.token) && hubCanGlobalAdmin();
   const badge = document.getElementById("releaseFeedBadge");
-  badge.className = "status-badge " + (value?.enabled && value.timer_active ? "ok" :
+  const eligible = value && Boolean(value.available_keys[value.key_id || Object.keys(value.available_keys)[0]]);
+  badge.className = "status-badge " + (value?.enabled && value.timer_active && eligible ? "ok" :
     value?.enabled ? "warning" : value ? "waiting" : "waiting");
   badge.textContent = client.loading && !value ? "Проверяем" :
-    value?.enabled && value.timer_active ? "Включено" : value?.enabled ? "Нужна проверка" :
+    value?.enabled && value.timer_active && eligible ? "Включено" : value?.enabled ? "Нужна проверка" :
       value ? "Выключено" : "Нет данных";
   const summary = document.getElementById("releaseFeedSummary");
   summary.textContent = !value ? "Состояние подписки пока недоступно." :
+    value.enabled && !eligible ? "Подписка требует проверки установки или доверенного ключа. После проверки выключите и заново включите её с подтверждением." :
     value.enabled && value.timer_active ? "Сервер проверяет подписанные выпуски автоматически." :
       value.enabled ? "Подписка включена, но таймер проверки не работает. Проверьте состояние сервера." :
         "Автоматическая проверка подписанных выпусков выключена.";
@@ -98,9 +100,9 @@ function releaseFeedRender() {
         ? Object.values(value.available_keys)[0] : "—";
   const notes = [];
   if (value && !value.timer_installed) notes.push("Службы обновления на этом сервере ещё не установлены.");
-  if (value && !Object.keys(value.available_keys).length) notes.push("Нет доверенного ключа подписи.");
+  if (value && !Object.keys(value.available_keys).length) notes.push("Нет доступного подписанного канала для текущей установки или доверенного ключа подписи.");
   if (value?.manual_candidate_active) notes.push("Уже подготовлено отдельное ручное обновление; подписка его не заменит.");
-  if (client.blockReason === "HUB_ONLY_UNSUPPORTED") notes.push("Режим «только Hub» не поддерживает эту подписку.");
+  if (client.blockReason === "HUB_ONLY_UNSUPPORTED") notes.push("Текущая конфигурация режима «только Hub» требует проверки перед включением подписки.");
   if (value && !value.enabled && value.timer_installed && Object.keys(value.available_keys).length &&
       client.blockReason !== "HUB_ONLY_UNSUPPORTED")
     notes.push("При включении панель проверит доступность ленты, подпись и совместимость пакета. Пока подтверждение не выполнено, ничего не меняется.");
@@ -118,7 +120,7 @@ function releaseFeedRender() {
     document.getElementById("releaseFeedReviewTitle").textContent =
       enable ? "Включить автоматическую проверку?" : "Отключить автоматическую проверку?";
     document.getElementById("releaseFeedReviewText").textContent = enable
-      ? "Сервер проверит подпись и совместимость текущего выпуска. После включения новые подходящие выпуски смогут устанавливаться автоматически; службы могут кратко перезапускаться."
+      ? "Сервер проверит подпись, совместимость выпуска и свой режим установки. При обновлении режима «только Hub» внешний Agent и SSH-туннели сохраняются. После включения новые подходящие выпуски смогут устанавливаться автоматически; службы могут кратко перезапускаться."
       : "Проверка новых выпусков остановится. Уже подготовленное ручное обновление останется отдельно.";
   }
   document.getElementById("releaseFeedApply").disabled = !client.pending || !ready ||

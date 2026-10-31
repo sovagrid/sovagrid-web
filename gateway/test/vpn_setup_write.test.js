@@ -377,3 +377,118 @@ test("HTTP setup routes map stale and uncertain results without returning SSH se
   assert.equal(parsed.every((value) => value.password === ""), true);
   assert.deepEqual(actions, ["install", "arm"]);
 });
+
+const JUMP_KEY = Buffer.from(KEY);
+JUMP_KEY[JUMP_KEY.length - 1] ^= 1;
+const JUMP_PIN = "SHA256:" + createHash("sha256").update(JUMP_KEY).digest("base64").replace(/=+$/, "");
+function jumpedCredentials(overrides = {}) {
+  return credentials({ host: "127.0.0.1", port: 22022, host_key_blob: KEY.toString("base64"),
+    jump: { host: "relay.example", port: 2222, username: "operator", method: "password",
+      fingerprint: JUMP_PIN, password: "relay-secret", private_key: "", passphrase: "",
+      host_key_blob: JUMP_KEY.toString("base64") }, ...overrides });
+}
+function jumpedClients(replies, commands, { jumpKey = JUMP_KEY, targetKey = KEY } = {}) {
+  const target = clients(replies, commands, targetKey);
+  const channels = [];
+  return {
+    clientFactory: () => {
+      const client = target(), connect = client.connect;
+      client.connect = (config) => {
+        assert.ok(channels.includes(config.sock), "target SSH must use the verified relay channel");
+        connect(config);
+      };
+      return client;
+    },
+    jumpClientFactory: () => {
+      const client = new EventEmitter();
+      client.end = client.destroy = () => {};
+      client.connect = (config) => {
+        assert.equal(config.host, "relay.example");
+        assert.equal(config.port, 2222);
+        assert.equal(config.password, "relay-secret");
+        queueMicrotask(() => config.hostVerifier(jumpKey) ? client.emit("ready") :
+          client.emit("error", new Error("key changed")));
+      };
+      client.forwardOut = (sourceHost, sourcePort, host, port, callback) => {
+        assert.deepEqual([sourceHost, sourcePort, host, port], ["127.0.0.1", 0, "127.0.0.1", 22022]);
+        const channel = new EventEmitter();
+        channel.destroy = () => { channel.destroyed = true; };
+        channels.push(channel);
+        callback(null, channel);
+      };
+      return client;
+    },
+    channels,
+  };
+}
+
+test("existing broker preview, enrollment, install and arm recheck both SSH hosts on every step", async () => {
+  const identity = { jump_host: "relay.example", jump_port: 2222, jump_host_key_fingerprint: JUMP_PIN };
+  const previewCommands = [], previewOptions = jumpedClients([ENROLL_RAW], previewCommands);
+  const input = jumpedCredentials();
+  const reviewed = await previewAmneziaEnrollment(input, previewOptions);
+  for (const [key, value] of Object.entries(identity)) assert.equal(reviewed[key], value);
+  assert.equal(input.password, "");
+  assert.equal(input.jump.password, "");
+  assert.equal(previewOptions.channels.every((channel) => channel.destroyed), true);
+  const commands = [], options = jumpedClients([ENROLL_RAW,
+    { target: "awg2", enrolled: true, configured_clients: 2 }, SETUP_RAW], commands);
+  let checked = 0;
+  const enrolled = await enrollAmneziaSetup({ ...jumpedCredentials(), reviewed,
+    confirm: "ENROLL_EXISTING_CONTAINER" }, { ...options, recheckAdmin: async () => checked++ });
+  assert.equal(checked, 1);
+  assert.equal(options.channels.length, 3);
+  assert.equal(enrolled.setup.jump_host, identity.jump_host);
+  const installedRaw = { ...SETUP_RAW, installed_current: true, can_arm: true };
+  const installOptions = jumpedClients([SETUP_RAW,
+    { action: "installed", socket_active: false, marker: "absent", target_changed: false }, installedRaw], []);
+  const installed = await mutateAmneziaSetup({ ...jumpedCredentials(), reviewed: enrolled.setup,
+    confirm: "INSTALL_AMNEZIA_BROKER" }, "install", installOptions);
+  assert.equal(installOptions.channels.length, 3);
+  assert.equal(installed.setup.jump_host_key_fingerprint, JUMP_PIN);
+  const armedRaw = { ...installedRaw, marker: "valid", socket_active: true, can_arm: false };
+  const armOptions = jumpedClients([installedRaw,
+    { action: "armed", socket_active: true, marker: "valid", selected_target: "awg2",
+      target_changed: false }, armedRaw], []);
+  const armed = await mutateAmneziaSetup({ ...jumpedCredentials(), reviewed: installed.setup,
+    confirm: "I_HAVE_A_MAINTENANCE_WINDOW_FOR_AMNEZIA_AWG2" }, "arm", armOptions);
+  assert.equal(armOptions.channels.length, 3);
+  assert.equal(armed.setup.marker, "valid");
+  assert.equal(armed.jump_port, 2222);
+  assert.equal(armOptions.channels.every((channel) => channel.destroyed), true);
+});
+
+test("broker writes reject a different relay review or either changed key before a command", async () => {
+  const reviewed = await previewAmneziaEnrollment(jumpedCredentials(), jumpedClients([ENROLL_RAW], []));
+  for (const changed of [{ ...reviewed, jump_host: "other.example" },
+    { ...reviewed, jump_port: 22 }, { ...reviewed, jump_host_key_fingerprint: FINGERPRINT }]) {
+    assert.throws(() => validateAmneziaEnrollment({ ...jumpedCredentials(), reviewed: changed,
+      confirm: "ENROLL_EXISTING_CONTAINER" }), /INVALID_INPUT/);
+  }
+  for (const keyChange of [{ jumpKey: KEY }, { targetKey: JUMP_KEY }]) {
+    const commands = [], input = jumpedCredentials();
+    await assert.rejects(previewAmneziaSetup(input, jumpedClients([], commands, keyChange)), /HOST_KEY_CHANGED/);
+    assert.equal(commands.some((item) => item.kind === "exec"), false);
+    assert.equal(input.password, "");
+    assert.equal(input.jump.password, "");
+  }
+  const missingBlob = jumpedCredentials();
+  delete missingBlob.host_key_blob;
+  assert.throws(() => validateAmneziaPreview(missingBlob), /INVALID_INPUT/);
+  const forgedBlob = jumpedCredentials({ host_key_blob: JUMP_KEY.toString("base64") });
+  assert.throws(() => validateAmneziaPreview(forgedBlob), /HOST_KEY_CHANGED/);
+});
+
+test("jumped broker routes accept two bounded private keys and clear both after handling", async () => {
+  let parsed;
+  const handler = createHandler({ admin: async () => {}, preview: async (input) => {
+    parsed = input;
+    validateAmneziaPreview(input);
+    return { protocol: 1 };
+  } });
+  const input = jumpedCredentials({ method: "private_key", password: "", private_key: "k".repeat(65536) });
+  input.jump.method = "private_key"; input.jump.password = ""; input.jump.private_key = "r".repeat(65536);
+  assert.equal((await call(handler, "/api/v1/browser-ssh/vpn-setup/preview", input)).status, 200);
+  assert.equal(parsed.private_key, "");
+  assert.equal(parsed.jump.private_key, "");
+});

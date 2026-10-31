@@ -66,11 +66,21 @@ fields in `expected`, the `install|update|current` decision, and
 The helper checks the target files again before installing both fixed source
 trees. A recovery request cleans up only its owned temporary state. A lost
 apply response or `cleanup_required:true` requires a fresh preview before
-further action. Source updates refuse an installed Amnezia or WireGuard control
-unit or enable marker, even if the unit is currently stopped.
-These source routes do not create a VPN container or arm a broker. The existing
+further action. For an update with an existing current managed broker, preview
+additionally returns `maintenance_required: true`. Its opaque `state_sha256`
+binds exact broker files, runtime/enablement and protected VPN data. Apply then
+requires a separately confirmed `maintenance: true`; omitting it refuses with
+`CONTROL_ACTIVE`. The target drains broker sockets/services and inventory,
+replaces verified source/control files, checks imports and systemd state, and
+restores their previous activity under a durable recovery journal. Temporary
+startup guards survive a reboot during replacement. The VPN container,
+interface and peer configuration are preserved. Recover rolls back an
+unfinished transaction, or finishes cleanup after commit. The admin role is
+rechecked after SSH staging immediately before apply/recover. See the
+[maintenance contract](../../sovagrid-blueprint/deploy/WEB_VPN_SOURCE_MAINTENANCE.md).
+These source routes do not create a VPN container or arm a new broker. The existing
 Amnezia broker enrollment routes still require a running compatible container,
-root or passwordless sudo access, and a directly reachable SSH target.
+root or passwordless sudo access, and a reviewed SSH route to the target.
 A reverse SSH tunnel bound to a jump host's loopback is supported when the
 administrator supplies that jump host as an explicit, reviewed ProxyJump.
 
@@ -84,7 +94,7 @@ login fields. The gateway authenticates to the pinned jump, opens one
 inventory script. Neither probe accepts arbitrary commands.
 
 For `vpn-source/{preview,apply,recover}`, `wg-control/{preview,apply,recover}`
-and `amnezia-provision/{preview,apply,recover}`, a jumped request additionally
+and `amnezia-provision/{preview,apply,recover}`, and all `vpn-setup/*` routes, a jumped request additionally
 contains a target `host_key_blob` and an exact nine-field `jump` object (the
 eight login fields plus its `host_key_blob`). The gateway and root worker check
 both public blobs against their reviewed SHA-256 fingerprints. Every jumped
@@ -93,8 +103,12 @@ alongside the target identity. The gateway and browser compare all pins to the
 request before accepting a result. Review and confirmation are bound to the
 route identity; editing it invalidates pending actions. Only public host-key
 blobs stay in tab memory. Passwords and private keys are read for each request
-and cleared immediately after serialization. The existing `vpn-setup/*`
-enrollment routes remain direct-only.
+and cleared immediately after serialization. Existing-container enrollment, broker installation,
+and broker arming support the same one-hop route. Each read, mutation and final
+verification opens a new independently pinned relay and target connection. Their
+reviewed snapshots include all three relay identity fields; snapshots from another
+relay address, port or key cannot authorize a mutation. The original direct Hub-host
+and entered-host request shapes remain supported.
 
 ## Plain WireGuard broker on an entered Agent
 
