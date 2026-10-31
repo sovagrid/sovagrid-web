@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="install.css?v=1">
   <script src="install.js?v=3" defer></script>
   <link rel="stylesheet" href="vendor/xterm.css?v=1">
-  <link rel="stylesheet" href="styles.css?v=45">
+  <link rel="stylesheet" href="styles.css?v=46">
   <link rel="stylesheet" href="theme.css?v=6">
   <link rel="stylesheet" href="users.css?v=2">
   <link rel="stylesheet" href="backups.css?v=2">
@@ -27,10 +27,12 @@
   <link rel="stylesheet" href="updates.css?v=1">
   <link rel="stylesheet" href="public-web.css?v=2">
   <link rel="stylesheet" href="vpn-jump.css?v=1">
+  <link rel="stylesheet" href="direct-ssh.css?v=1">
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="ssh-keygen.js?v=1" defer></script>
-  <script src="app.js?v=52" defer></script>
+  <script src="app.js?v=53" defer></script>
+  <script src="direct-ssh.js?v=1" defer></script>
   <script src="browser-ssh.js?v=4" defer></script>
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
@@ -41,7 +43,7 @@
   <script src="checks.js?v=5" defer></script>
   <link rel="stylesheet" href="checks.css?v=3">
   <script src="files.js?v=4" defer></script>
-  <script src="amnezia.js?v=14" defer></script>
+  <script src="amnezia.js?v=15" defer></script>
   <script src="vpn-jump.js?v=1" defer></script>
   <script src="process-inventory.js?v=1" defer></script>
   <script src="container-logs.js?v=1" defer></script>
@@ -118,7 +120,7 @@
           <p id="sshLoginError" class="form-error" role="alert" hidden></p>
           <button id="sshConnectButton" class="primary-button" type="submit" disabled>Подключиться <span aria-hidden="true">→</span></button>
         </form>
-        <p class="ssh-hint">Браузер проверяет SSH этого Ubuntu-хоста через защищённый сайт. Ключ и пароль не сохраняются. Добавленные серверы доступны через Hub и установленный Agent; прямой SSH-вход на них через этот сайт не выполняется.</p>
+        <p class="ssh-hint">Эта форма подключает к SSH хоста панели. После входа администратор может открыть «Добавить сервер» и подключиться по SSH к другому хосту без Agent. Ключи и пароли не сохраняются.</p>
       </section>
       <section id="hubLoginView" role="tabpanel" aria-labelledby="hubLoginMode" hidden>
       <form id="loginForm" autocomplete="on">
@@ -618,10 +620,11 @@
           <h3 class="vpn-form-heading" id="amneziaAddHeading">Создать профиль AmneziaWG 3.1</h3>
           <form id="amneziaAddForm" class="vpn-control-form">
             <label for="amneziaAddClient">Имя клиента</label><input id="amneziaAddClient" required pattern="[a-z][a-z0-9_-]{0,31}" maxlength="32" placeholder="my-iphone" autocomplete="off">
-            <label for="amneziaAddAddress">IPv4-адрес клиента в подсети VPN</label><input id="amneziaAddAddress" required inputmode="decimal" placeholder="10.0.0.42" autocomplete="off" spellcheck="false">
+            <label for="amneziaAddAddressMode">IPv4-адрес клиента<select id="amneziaAddAddressMode"><option value="auto" selected>Выбрать свободный автоматически</option><option value="manual">Указать вручную</option></select></label>
+            <label id="amneziaAddManualAddress" for="amneziaAddAddress" hidden>IPv4-адрес в подсети VPN<input id="amneziaAddAddress" inputmode="decimal" placeholder="10.0.0.42" autocomplete="off" spellcheck="false"></label>
             <label for="amneziaAddEndpoint">Публичный IP или DNS сервера</label><input id="amneziaAddEndpoint" required placeholder="server.example.com" autocomplete="off" spellcheck="false">
             <label for="amneziaAddRoute">Маршрутизация</label><select id="amneziaAddRoute"><option value="split">Только подсеть VPN</option><option value="full">Весь трафик · нужен NAT сервера</option></select>
-            <p class="field-help">Адрес должен быть свободен в существующей подсети. Профиль будет создан и зашифрован для этой вкладки. Для всего трафика заранее настройте IP forwarding и NAT самого контейнера/хоста Amnezia: SovaGrid меняет маршрут профиля, но не настраивает их за вас.</p>
+            <p class="field-help">SovaGrid выберет свободный адрес в существующей подсети. При ручном выборе укажите свободный адрес. Профиль будет создан и зашифрован для этой вкладки. Для всего трафика заранее настройте IP forwarding и NAT самого контейнера/хоста Amnezia: SovaGrid меняет маршрут профиля, но не настраивает их за вас.</p>
             <button id="amneziaAddButton" class="primary-button" type="submit">Создать профиль</button>
           </form>
           <h3 class="vpn-form-heading">Существующий профиль</h3>
@@ -869,7 +872,7 @@
       <button id="serverSetupAgentTab" type="button" role="tab" aria-controls="serverSetupAgentPanel" aria-selected="false">Agent вручную</button>
     </div>
     <section id="serverSetupSshPanel" role="tabpanel" aria-labelledby="serverSetupSshTab">
-      <p class="server-setup-intro">Сверьте SSH-ключ, проверьте Ubuntu, затем подтвердите установку Agent. Данные SSH не сохраняются в браузере.</p>
+      <p class="server-setup-intro">Сверьте SSH-ключ и подключитесь к терминалу сразу. Если нужен мониторинг, затем проверьте Ubuntu и установите Agent. Данные SSH не сохраняются в браузере.</p>
       <section id="serverSetupRecovery" class="server-setup-recovery" hidden aria-labelledby="serverSetupRecoveryHeading">
         <div class="server-setup-section-heading"><strong id="serverSetupRecoveryHeading">Незавершённые установки</strong><button id="serverSetupReloadJobs" class="text-button" type="button">Обновить</button></div>
         <p>Выберите запись, затем заново укажите тот же сервер и проверьте его SSH-ключ. Пароль или приватный ключ потребуется ввести снова.</p>
@@ -877,10 +880,20 @@
         <p id="serverSetupRecoveryChoice" class="field-help" role="status"></p>
       </section>
       <p id="serverSetupNotice" class="field-help" role="status" hidden></p>
-      <div class="server-setup-target">
+      <div id="serverSetupTarget" class="server-setup-target">
         <label for="serverSetupHost">Адрес сервера<input id="serverSetupHost" type="text" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="253" placeholder="server.example.org или IP"></label>
         <label for="serverSetupPort">Порт SSH<input id="serverSetupPort" type="number" min="1" max="65535" step="1" value="22" inputmode="numeric"></label>
       </div>
+      <label id="directSshJumpToggle" class="direct-ssh-jump-toggle"><input id="directSshUseJump" type="checkbox"> Подключиться через промежуточный SSH-хост (ProxyJump)</label>
+      <section id="directSshJumpPanel" class="direct-ssh-jump-panel" aria-labelledby="directSshJumpHeading" hidden>
+        <h3 id="directSshJumpHeading">Промежуточный SSH-хост</h3>
+        <p class="field-help">Сначала сверьте ключ этого хоста. Затем укажите его SSH-доступ и проверьте ключ целевого сервера через него. Установка Agent через ProxyJump пока недоступна.</p>
+        <div class="server-setup-target"><label for="directSshJumpHost">Адрес промежуточного хоста<input id="directSshJumpHost" type="text" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="253" placeholder="jump.example.org или IP"></label><label for="directSshJumpPort">Порт SSH<input id="directSshJumpPort" type="number" min="1" max="65535" step="1" value="22" inputmode="numeric"></label></div>
+        <button id="directSshJumpInspect" class="secondary-button" type="button">Проверить ключ промежуточного хоста</button>
+        <div id="directSshJumpReview" class="server-setup-review" hidden><strong>Ключ промежуточного хоста <span id="directSshJumpReviewedHost"></span></strong><code id="directSshJumpFingerprint"></code><span id="directSshJumpKeyType" class="field-help"></span><p id="directSshJumpChangedKey" class="server-setup-changed" hidden>Закреплённый ключ изменился. Сверьте новый отпечаток независимо.</p><button id="directSshJumpReplaceKey" class="secondary-button" type="button" hidden>Я сверил новый ключ</button><label class="server-setup-trust"><input id="directSshJumpTrust" type="checkbox"> Я независимо сверил отпечаток промежуточного хоста</label></div>
+        <div id="directSshJumpCredentials" hidden><label for="directSshJumpUsername">Пользователь SSH на промежуточном хосте<input id="directSshJumpUsername" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" placeholder="ubuntu"></label><fieldset class="server-setup-method"><legend>Способ входа на промежуточный хост</legend><label><input id="directSshJumpAuthPassword" name="directSshJumpAuth" type="radio" value="password" checked> Пароль SSH</label><label><input id="directSshJumpAuthKey" name="directSshJumpAuth" type="radio" value="private_key"> Приватный ключ</label></fieldset><div id="directSshJumpPasswordFields"><label for="directSshJumpPassword">Пароль SSH<input id="directSshJumpPassword" type="password" autocomplete="off"></label></div><div id="directSshJumpKeyFields" hidden><label for="directSshJumpPrivateKey">Файл приватного ключа<input id="directSshJumpPrivateKey" type="file" accept=".pem,.key,.txt,.openssh,text/plain"></label><label for="directSshJumpPassphrase">Парольная фраза ключа, если есть<input id="directSshJumpPassphrase" type="password" autocomplete="off"></label></div><p class="field-help">Для проверки целевого хоста и открытия терминала SSH-доступ к промежуточному хосту вводится заново. Он не сохраняется.</p></div>
+        <p id="directSshJumpError" class="form-error" role="alert" hidden></p>
+      </section>
       <button id="serverSetupInspect" class="secondary-button" type="button">1. Проверить SSH-ключ</button>
       <div id="serverSetupReview" class="server-setup-review" hidden>
         <strong>Ключ сервера <span id="serverSetupReviewedHost"></span></strong>
@@ -911,8 +924,16 @@
           <label for="serverSetupPassphrase">Парольная фраза ключа, если есть<input id="serverSetupPassphrase" type="password" autocomplete="off"></label>
         </div>
         <p class="field-help">Данные SSH используются только для этой проверки и удаляются из формы после запроса. Двухфакторный вход пока не поддерживается. Для точного результата нужен root или sudo без интерактивного запроса пароля.</p>
-        <button id="serverSetupStatusButton" class="primary-button" type="submit" disabled>2. Проверить состояние без изменений</button>
+        <div class="direct-ssh-entry-actions"><button id="serverSetupDirectTerminalButton" class="primary-button" type="button" disabled>2. Открыть SSH-терминал</button><button id="serverSetupStatusButton" class="secondary-button" type="submit" disabled>Проверить состояние без изменений (для Agent)</button></div>
       </form>
+      <section id="directSshPanel" class="direct-ssh-panel" aria-labelledby="directSshHeading" hidden>
+        <div class="direct-ssh-heading"><div><p class="eyebrow">Прямое подключение</p><h3 id="directSshHeading">SSH-терминал · <span id="directSshTarget"></span></h3></div><div class="direct-ssh-heading-actions"><button id="directSshReconnect" class="secondary-button" type="button" hidden>Продолжить вывод</button><button id="directSshClose" class="secondary-button" type="button">Отключиться</button></div></div>
+        <p id="directSshStatus" class="field-help" role="status">Подключаемся…</p>
+        <div id="directSshScreen" class="direct-ssh-screen" aria-label="Вывод SSH-терминала"></div>
+        <div class="direct-ssh-keys" aria-label="Клавиши терминала"><button type="button" data-direct-ssh-key="escape">Esc</button><button type="button" data-direct-ssh-key="tab">Tab</button><button type="button" data-direct-ssh-key="ctrl-c">Ctrl C</button><button type="button" data-direct-ssh-key="ctrl-d">Ctrl D</button><button type="button" data-direct-ssh-key="up">↑</button><button type="button" data-direct-ssh-key="down">↓</button><button type="button" data-direct-ssh-key="enter">Enter</button></div>
+        <form id="directSshLineForm" class="direct-ssh-line" autocomplete="off"><label for="directSshLine">Ввод с экранной клавиатуры</label><div><input id="directSshLine" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Команда или текст"><button id="directSshLineVisibility" class="secondary-button" type="button" aria-pressed="false" aria-label="Скрыть ввод">Скрыть</button><button id="directSshLineSend" class="primary-button" type="submit">Ввести</button></div><p id="directSshLineError" class="form-error" role="alert" hidden></p></form>
+        <p id="directSshError" class="form-error" role="alert" hidden></p>
+      </section>
       <p id="serverSetupError" class="form-error" role="alert" hidden></p>
       <div id="serverSetupResult" class="server-setup-result" role="status" hidden><strong id="serverSetupResultTitle"></strong><p id="serverSetupResultText"></p></div>
       <section id="serverSetupInstallPanel" class="server-setup-install" aria-labelledby="serverSetupInstallHeading" hidden>

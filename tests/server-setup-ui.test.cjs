@@ -95,10 +95,10 @@ test('add-server dialog has guided SSH path and separate manual Agent registrati
   assert.match(html, /Проверить состояние без изменений/);
   assert.match(html, /id="serverSetupInstallPanel"/);
   assert.match(html, /id="serverSetupRecovery"/);
-  assert.match(html, /app\.js\?v=52/);
-  assert.match(shell, /app\.js\?v=52/);
-  assert.match(html, /styles\.css\?v=45/);
-  assert.match(shell, /styles\.css\?v=45/);
+  assert.match(html, /app\.js\?v=53/);
+  assert.match(shell, /app\.js\?v=53/);
+  assert.match(html, /styles\.css\?v=46/);
+  assert.match(shell, /styles\.css\?v=46/);
 });
 
 test('manual Agent tab remains available and closing the dialog discards SSH credentials', async () => {

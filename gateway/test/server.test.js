@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
-import { agentTimeoutMs, createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
+import { agentTimeoutMs, createHandler, DirectTerminalSessions, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
   previewAmneziaSetup, previewTargetInstall, probeTargetStatus, proxyAgent, requireUnrestrictedAdmin,
   safeAgentResult, validateAgentPayload,
   safeAmneziaPreview, validateAmneziaPreview, validateLogin, validateTargetHostKey,
@@ -713,6 +713,322 @@ async function call(handler, { path = "/api/v1/browser-ssh/host-key", payload = 
   await handler(request, response);
   return result;
 }
+
+function fakeDirectClient(state, key = KEY) {
+  const client = new EventEmitter();
+  const stream = new EventEmitter();
+  stream.stderr = new EventEmitter();
+  stream.writableLength = 0;
+  stream.close = () => { state.channelClosed = true; };
+  stream.pause = () => { state.paused = true; };
+  stream.resume = () => { state.paused = false; state.resumed = true; };
+  stream.write = (bytes, callback) => {
+    state.input.push(Buffer.from(bytes));
+    callback?.();
+    return true;
+  };
+  stream.setWindow = (rows, cols) => { state.size = { rows, cols }; };
+  client.connect = (options) => {
+    state.connectOptions = options;
+    queueMicrotask(() => {
+      state.keyAccepted = options.hostVerifier(key);
+      if (state.keyAccepted) client.emit("ready");
+      else client.emit("close");
+    });
+  };
+  client.shell = (options, callback) => {
+    state.shellOptions = options;
+    callback(null, stream);
+    queueMicrotask(() => stream.emit("data", Buffer.from("ready\r\n")));
+  };
+  client.end = () => { state.ended = true; };
+  client.destroy = () => { state.destroyed = true; };
+  state.stream = stream;
+  return client;
+}
+
+test("direct SSH terminal pins the host, binds the admin token, and erases buffered output", async () => {
+  const state = { input: [] };
+  const sessions = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(state) });
+  const authorization = "Bearer " + TOKEN;
+  const opened = await sessions.open(statusInput({ host: "ubuntu.example", password: "secret" }),
+    authorization);
+  assert.match(opened.session_id, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(opened.host_key_fingerprint, FINGERPRINT);
+  assert.equal(state.connectOptions.host, "ubuntu.example");
+  assert.equal(state.keyAccepted, true);
+  assert.deepEqual(state.shellOptions, { term: "xterm-256color", cols: 80, rows: 24 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const first = sessions.operate("events", { session_id: opened.session_id, cursor: 0 }, authorization);
+  assert.equal(Buffer.from(first.events[0].data, "base64").toString(), "ready\r\n");
+  assert.equal(first.next_cursor, 1);
+  assert.equal(first.closed, false);
+  assert.throws(() => sessions.operate("events", { session_id: opened.session_id, cursor: 0 },
+    "Bearer " + "x".repeat(43)), /DIRECT_SESSION_NOT_FOUND/);
+  assert.deepEqual(sessions.operate("input", { session_id: opened.session_id,
+    data: Buffer.from("whoami\n").toString("base64") }, authorization), { accepted: true });
+  assert.equal(state.input[0].toString(), "whoami\n");
+  assert.deepEqual(sessions.operate("resize", { session_id: opened.session_id,
+    cols: 120, rows: 40 }, authorization), { accepted: true });
+  assert.deepEqual(state.size, { rows: 40, cols: 120 });
+  const retained = sessions.sessions.get(opened.session_id).events[0].bytes;
+  assert.deepEqual(sessions.operate("close", { session_id: opened.session_id }, authorization),
+    { closed: true });
+  assert.equal(sessions.sessions.size, 0);
+  assert.ok(retained.every((byte) => byte === 0));
+  assert.equal(state.destroyed, true);
+});
+
+test("direct SSH terminal rejects a changed host key before opening a shell and bounds input/output", async () => {
+  const state = { input: [] };
+  const sessions = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(state) });
+  const authorization = "Bearer " + TOKEN;
+  await assert.rejects(sessions.open(statusInput({ fingerprint: "SHA256:" + "A".repeat(43) }),
+    authorization), /HOST_KEY_CHANGED/);
+  assert.equal(state.keyAccepted, false);
+  assert.equal(state.shellOptions, undefined);
+  assert.equal(sessions.sessions.size, 0);
+
+  const live = { input: [] };
+  const bounded = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(live) });
+  const opened = await bounded.open(statusInput(), authorization);
+  assert.throws(() => bounded.operate("input", { session_id: opened.session_id,
+    data: Buffer.alloc(4097).toString("base64") }, authorization), /INVALID_INPUT/);
+  assert.throws(() => bounded.operate("input", { session_id: opened.session_id,
+    data: "%%%" }, authorization), /INVALID_INPUT/);
+  assert.throws(() => bounded.operate("resize", { session_id: opened.session_id,
+    cols: 1000, rows: 24 }, authorization), /INVALID_INPUT/);
+  live.stream.emit("data", Buffer.alloc(256 * 1024 + 1));
+  assert.equal(bounded.operate("events", { session_id: opened.session_id,
+    cursor: 0 }, authorization).reason, "OUTPUT_LIMIT");
+  assert.equal(live.destroyed, true);
+  bounded.remove(opened.session_id);
+});
+
+test("direct terminal pauses large output until the browser acknowledges buffered events", async () => {
+  const state = { input: [] };
+  const sessions = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(state) });
+  const authorization = "Bearer " + TOKEN;
+  const opened = await sessions.open(statusInput(), authorization);
+  const session = sessions.sessions.get(opened.session_id);
+  await new Promise((resolve) => setImmediate(resolve));
+  state.stream.emit("data", Buffer.alloc(200 * 1024, 65));
+  assert.equal(state.paused, true);
+  let cursor = 0;
+  for (let attempt = 0; attempt < 5 && !state.resumed; attempt++) {
+    const reply = sessions.operate("events", { session_id: opened.session_id, cursor },
+      authorization);
+    assert.ok(reply.events.length > 0);
+    cursor = reply.next_cursor;
+  }
+  assert.equal(state.resumed, true);
+  assert.equal(session.closed, false);
+  sessions.remove(opened.session_id);
+});
+
+test("direct terminal coalesces tiny SSH chunks into bounded output events", async () => {
+  const state = { input: [] };
+  const sessions = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(state) });
+  const authorization = "Bearer " + TOKEN;
+  const opened = await sessions.open(statusInput(), authorization);
+  await new Promise((resolve) => setImmediate(resolve));
+  for (let count = 0; count < 10000; count++) state.stream.emit("data", Buffer.from("x"));
+  const session = sessions.sessions.get(opened.session_id);
+  assert.ok(session.events.length <= 2);
+  const reply = sessions.operate("events", { session_id: opened.session_id, cursor: 0 },
+    authorization);
+  assert.ok(reply.events.length <= 2);
+  assert.equal(reply.events.map((event) => Buffer.from(event.data, "base64").length)
+    .reduce((sum, length) => sum + length, 0), 10007);
+  sessions.remove(opened.session_id);
+});
+
+test("real direct SSH PTY sends commands only after the pinned host key is verified", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } });
+  let authentications = 0;
+  let shells = 0;
+  const server = new ssh2.Server({ hostKeys: [privateKey] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (context) => {
+      if (context.method === "password") authentications++;
+      if (context.method === "password" && context.username === "root" &&
+          context.password === "secret") context.accept();
+      else context.reject();
+    }).on("ready", () => client.on("session", (accept) => {
+      const session = accept();
+      session.on("pty", (accept) => accept());
+      session.on("shell", (accept) => {
+        shells++;
+        const channel = accept();
+        channel.write("ready\r\n");
+        channel.on("data", (chunk) => channel.write(Buffer.concat([Buffer.from("echo:"), chunk])));
+      });
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const sessions = new DirectTerminalSessions();
+  const authorization = "Bearer " + TOKEN;
+  let opened;
+  try {
+    const host = "127.0.0.1";
+    const port = server.address().port;
+    const key = await inspectTargetHostKey({ host, port });
+    assert.equal(authentications, 0);
+    await assert.rejects(sessions.open(statusInput({ host, port,
+      fingerprint: "SHA256:" + "A".repeat(43), password: "secret" }), authorization),
+    /HOST_KEY_CHANGED/);
+    assert.equal(authentications, 0);
+    opened = await sessions.open(statusInput({ host, port,
+      fingerprint: key.fingerprint, password: "secret" }), authorization);
+    assert.equal(authentications, 1);
+    assert.equal(shells, 1);
+    let cursor = 0;
+    let output = "";
+    const receive = async (expected) => {
+      for (let attempt = 0; attempt < 25; attempt++) {
+        const result = sessions.operate("events", { session_id: opened.session_id, cursor },
+          authorization);
+        output += result.events.map((event) => Buffer.from(event.data, "base64").toString()).join("");
+        cursor = result.next_cursor;
+        if (output.includes(expected)) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.fail(`missing terminal output: ${expected}`);
+    };
+    await receive("ready\r\n");
+    sessions.operate("input", { session_id: opened.session_id,
+      data: Buffer.from("ping\n").toString("base64") }, authorization);
+    await receive("echo:ping\n");
+  } finally {
+    if (opened) sessions.remove(opened.session_id);
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("real direct SSH PTY keeps a pinned one-hop ProxyJump open for the session", async () => {
+  const makeKey = () => generateKeyPairSync("rsa", { modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  let targetAuth = 0;
+  const targetServer = new ssh2.Server({ hostKeys: [makeKey()] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (context) => {
+      if (context.method === "password") targetAuth++;
+      if (context.method === "password" && context.username === "root" &&
+          context.password === "target-secret") context.accept();
+      else context.reject();
+    }).on("ready", () => client.on("session", (accept) => {
+      const session = accept();
+      session.on("pty", (accept) => accept());
+      session.on("shell", (accept) => {
+        const channel = accept();
+        channel.write("via-jump\r\n");
+        channel.on("data", (chunk) => channel.write(Buffer.concat([Buffer.from("echo:"), chunk])));
+      });
+    }));
+  });
+  await new Promise((resolve) => targetServer.listen(0, "127.0.0.1", resolve));
+  const jumpServer = new ssh2.Server({ hostKeys: [makeKey()] }, (client) => {
+    client.on("error", () => {});
+    client.on("authentication", (context) => {
+      if (context.method === "password" && context.username === "operator" &&
+          context.password === "jump-secret") context.accept();
+      else context.reject();
+    }).on("ready", () => client.on("tcpip", (accept, reject, info) => {
+      if (info.destIP !== "127.0.0.1" || info.destPort !== targetServer.address().port) {
+        reject(); return;
+      }
+      const upstream = net.connect({ host: "127.0.0.1", port: targetServer.address().port });
+      upstream.once("connect", () => { const channel = accept(); channel.pipe(upstream).pipe(channel); });
+      upstream.once("error", () => { reject(); upstream.destroy(); });
+    }));
+  });
+  await new Promise((resolve) => jumpServer.listen(0, "127.0.0.1", resolve));
+  const sessions = new DirectTerminalSessions();
+  const authorization = "Bearer " + TOKEN;
+  let opened;
+  try {
+    const jumpAddress = { host: "127.0.0.1", port: jumpServer.address().port };
+    const targetAddress = { host: "127.0.0.1", port: targetServer.address().port };
+    const jumpKey = await inspectTargetHostKey(jumpAddress);
+    const jump = { ...jumpAddress, username: "operator", method: "password",
+      fingerprint: jumpKey.fingerprint, password: "jump-secret", private_key: "", passphrase: "" };
+    const targetKey = await inspectTargetHostKey({ ...targetAddress, jump: { ...jump } });
+    const target = { ...targetAddress, username: "root", method: "password",
+      fingerprint: targetKey.fingerprint, password: "target-secret", private_key: "", passphrase: "" };
+    await assert.rejects(sessions.open({ ...target, jump: { ...jump,
+      fingerprint: "SHA256:" + "A".repeat(43) } }, authorization), /HOST_KEY_CHANGED/);
+    assert.equal(targetAuth, 0);
+    await assert.rejects(sessions.open({ ...target,
+      fingerprint: "SHA256:" + "A".repeat(43), jump: { ...jump } }, authorization),
+    /HOST_KEY_CHANGED/);
+    assert.equal(targetAuth, 0);
+    opened = await sessions.open({ ...target, jump: { ...jump } }, authorization);
+    assert.equal(opened.jump_host_key_fingerprint, jumpKey.fingerprint);
+    assert.equal(targetAuth, 1);
+    sessions.operate("input", { session_id: opened.session_id,
+      data: Buffer.from("ping\n").toString("base64") }, authorization);
+    let output = "", cursor = 0;
+    for (let attempt = 0; attempt < 25 && !output.includes("echo:ping\n"); attempt++) {
+      const reply = sessions.operate("events", { session_id: opened.session_id, cursor },
+        authorization);
+      output += reply.events.map((event) => Buffer.from(event.data, "base64").toString()).join("");
+      cursor = reply.next_cursor;
+      if (!output.includes("echo:ping\n")) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(output, /via-jump\r\n/);
+    assert.match(output, /echo:ping\n/);
+  } finally {
+    if (opened) sessions.remove(opened.session_id);
+    await new Promise((resolve) => jumpServer.close(resolve));
+    await new Promise((resolve) => targetServer.close(resolve));
+  }
+});
+
+test("direct terminal HTTP operations require secure same-origin unrestricted admin every time", async () => {
+  const state = { input: [] };
+  const sessions = new DirectTerminalSessions({ clientFactory: () => fakeDirectClient(state) });
+  let adminChecks = 0;
+  let allowed = true;
+  const handler = createHandler({ directTerminals: sessions, admin: async () => {
+    adminChecks++;
+    if (!allowed) throw new Error("ADMIN_FORBIDDEN");
+  } });
+  const path = "/api/v1/browser-ssh/direct-terminal/";
+  const headers = { authorization: "Bearer " + TOKEN };
+  assert.equal((await call(handler, { path: path + "open", payload: statusInput(),
+    headers: { ...headers, origin: "https://attacker.example" } })).status, 404);
+  assert.equal((await call(handler, { path: path + "open", payload: statusInput(),
+    headers: { ...headers, host: "example.com", origin: "http://example.com",
+      "x-forwarded-proto": "http" } })).status, 404);
+  assert.equal(adminChecks, 0);
+  const opened = await call(handler, { path: path + "open", payload: statusInput(), headers });
+  assert.equal(opened.status, 200);
+  assert.equal(adminChecks, 2);
+  assert.equal((await call(handler, { path: path + "events", payload: {
+    session_id: opened.body.session_id, cursor: 0 }, headers: {
+    authorization: "Bearer " + "x".repeat(43) } })).status, 404);
+  assert.equal(adminChecks, 3);
+  allowed = false;
+  assert.equal((await call(handler, { path: path + "events", payload: {
+    session_id: opened.body.session_id, cursor: 0 }, headers })).status, 403);
+  assert.equal(adminChecks, 4);
+  assert.equal(sessions.sessions.size, 0);
+
+  const revokedState = { input: [] };
+  const revokedSessions = new DirectTerminalSessions({
+    clientFactory: () => fakeDirectClient(revokedState) });
+  let openChecks = 0;
+  const revokedDuringHandshake = createHandler({ directTerminals: revokedSessions,
+    admin: async () => { if (++openChecks === 2) throw new Error("ADMIN_FORBIDDEN"); } });
+  assert.equal((await call(revokedDuringHandshake, { path: path + "open",
+    payload: statusInput(), headers })).status, 403);
+  assert.equal(openChecks, 2);
+  assert.equal(revokedSessions.sessions.size, 0);
+  assert.equal(revokedState.destroyed, true);
+});
 
 test("pre-auth HTTP route refuses cross-site origins and limits credential attempts", async () => {
   let logins = 0;

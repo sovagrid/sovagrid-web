@@ -1,0 +1,34 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.server-setup-modal.direct-ssh-active{width:min(1050px,calc(100vw - 28px));max-height:96vh}
+.direct-ssh-entry-actions{display:flex;flex-wrap:wrap;gap:9px}
+.server-setup-modal .direct-ssh-jump-toggle{display:flex;align-items:flex-start;gap:9px;margin:13px 0;color:var(--sg-text);font-size:.78rem;line-height:1.45}
+.direct-ssh-jump-toggle input{width:18px;min-height:18px;flex:none;margin:1px 0 0;accent-color:var(--sg-accent)}
+.direct-ssh-jump-panel[hidden],.direct-ssh-jump-panel [hidden]{display:none!important}
+.direct-ssh-jump-panel{margin:13px 0 18px;padding:15px;border:1px solid var(--sg-border);border-radius:11px;background:var(--sg-surface-soft)}
+.direct-ssh-jump-panel h3{margin:0 0 7px;font-size:.9rem}
+.direct-ssh-jump-panel .server-setup-target{margin:12px 0}
+.direct-ssh-jump-panel #directSshJumpCredentials{display:grid;gap:10px;margin-top:13px}
+.direct-ssh-jump-panel .server-setup-review{margin:13px 0}
+.direct-ssh-jump-panel #directSshJumpError{margin:9px 0 0}
+.direct-ssh-entry-actions button{min-height:44px;padding:10px 14px}
+.direct-ssh-panel[hidden]{display:none}
+.direct-ssh-panel{margin:17px 0 0;min-width:0}
+.direct-ssh-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:8px}
+.direct-ssh-heading h3{font-size:1rem;line-height:1.4;margin:0;overflow-wrap:anywhere;color:var(--sg-text)}
+.direct-ssh-heading .eyebrow{margin-bottom:5px}
+.direct-ssh-heading-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.direct-ssh-heading-actions button{min-height:40px;padding:8px 12px;white-space:nowrap}
+.direct-ssh-panel #directSshStatus{margin:4px 0 10px;color:var(--sg-muted)}
+.direct-ssh-screen{width:100%;height:min(54vh,540px);min-height:260px;overflow:hidden;padding:7px;border:1px solid var(--sg-border);border-radius:11px;background:#071018}
+.direct-ssh-screen .xterm{height:100%}
+.direct-ssh-keys{display:flex;gap:7px;overflow-x:auto;padding:11px 0;scrollbar-width:thin}
+.direct-ssh-keys button{flex:0 0 auto;min-width:48px;min-height:43px;padding:8px 10px;border:1px solid var(--sg-border);border-radius:9px;background:var(--sg-surface-soft);color:var(--sg-text);font-weight:700;font-size:.78rem}
+.direct-ssh-keys button:hover{border-color:var(--sg-accent);color:var(--sg-accent)}
+.direct-ssh-line{display:grid;gap:6px;margin:2px 0 10px}
+.direct-ssh-line>div{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:stretch}
+.server-setup-modal .direct-ssh-line input{margin:0;min-width:0}
+.direct-ssh-line button{min-height:43px;padding:8px 12px}
+.direct-ssh-line .form-error{margin:0}
+@media(max-width:640px){.direct-ssh-entry-actions{display:grid}.direct-ssh-entry-actions button{width:100%}.direct-ssh-heading{display:grid}.direct-ssh-heading-actions{justify-content:stretch}.direct-ssh-heading-actions button{flex:1}.direct-ssh-screen{height:43vh;min-height:220px}.direct-ssh-line>div{grid-template-columns:minmax(0,1fr) auto}.direct-ssh-line #directSshLineSend{grid-column:1/-1}}

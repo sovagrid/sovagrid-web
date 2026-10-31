@@ -3,7 +3,7 @@
  * Additional author attribution terms: see ../ATTRIBUTION.md. */
 "use strict";
 
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
@@ -125,6 +125,12 @@ const IMAGE_SHA = /^sha256:[0-9a-f]{64}$/;
 const USERNAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const GRANT = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
+const DIRECT_SESSION_ID = /^[A-Za-z0-9_-]{43}$/;
+const DIRECT_OPEN_FIELDS = ["host", "port", "username", "method", "fingerprint", "password",
+  "private_key", "passphrase"];
+const DIRECT_MAX_INPUT = 4096;
+const DIRECT_MAX_OUTPUT = 256 * 1024;
+const DIRECT_RESPONSE_OUTPUT = 64 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list",
   "vpn-source-preview", "vpn-source-apply", "vpn-source-recover",
@@ -1008,7 +1014,7 @@ export async function inspectTargetHostKey(raw, options = {}) {
 
 function clearCredentials(value) {
   if (!value || typeof value !== "object") return;
-  for (const key of ["password", "private_key", "passphrase"]) {
+  for (const key of ["password", "private_key", "passphrase", "data"]) {
     if (Object.hasOwn(value, key)) value[key] = "";
   }
   if (Object.hasOwn(value, "jump")) clearCredentials(value.jump);
@@ -1151,6 +1157,440 @@ export function probeTargetStatus(raw, options = {}) {
             jump_host_key_fingerprint: route.jump.fingerprint } : {}) }) });
   return (route.jump ? withJumpSocket(route.jump, route.target, options, run) : run())
     .finally(() => clearCredentials(raw));
+}
+
+function directTokenHash(authorization) {
+  const token = BEARER.exec(authorization || "")?.[1];
+  if (!token) throw new Error("AUTH_REQUIRED");
+  return createHash("sha256").update(token).digest();
+}
+
+function directDimensions(cols, rows) {
+  if (!Number.isSafeInteger(cols) || cols < 20 || cols > 400 ||
+      !Number.isSafeInteger(rows) || rows < 5 || rows > 150) {
+    throw new Error("INVALID_INPUT");
+  }
+  return { cols, rows };
+}
+
+function directSessionId(value, fields) {
+  if (!exactFields(value, fields) || typeof value.session_id !== "string" ||
+      !DIRECT_SESSION_ID.test(value.session_id)) throw new Error("INVALID_INPUT");
+  return value.session_id;
+}
+
+function directBytes(data) {
+  if (typeof data !== "string" || data.length < 4 || data.length > 5464 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new Error("INVALID_INPUT");
+  const result = Buffer.from(data, "base64");
+  if (result.length < 1 || result.length > DIRECT_MAX_INPUT ||
+      result.toString("base64") !== data) {
+    result.fill(0);
+    throw new Error("INVALID_INPUT");
+  }
+  return result;
+}
+
+class DirectTerminalSession {
+  constructor(manager, id, ownerHash, dimensions) {
+    this.manager = manager;
+    this.id = id;
+    this.ownerHash = ownerHash;
+    this.dimensions = dimensions;
+    this.createdAt = Date.now();
+    this.expiresAt = this.createdAt + manager.lifetimeMs;
+    this.events = [];
+    this.nextSeq = 0;
+    this.outputBytes = 0;
+    this.pendingOutput = Buffer.alloc(8192);
+    this.pendingBytes = 0;
+    this.outputPaused = false;
+    this.closed = false;
+    this.reason = null;
+    this.client = null;
+    this.stream = null;
+    this.jumpClient = null;
+    this.jumpSocket = null;
+    this.idleTimer = null;
+    this.lifeTimer = null;
+    this.retentionTimer = null;
+  }
+
+  async connectJump(jump, target) {
+    const privateKey = jump.method === "private_key" ? Buffer.from(jump.private_key, "utf8") : null;
+    try { this.jumpClient = this.manager.clientFactory(); }
+    catch {
+      privateKey?.fill(0);
+      throw new Error("SSH_UNAVAILABLE");
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false, keyChanged = false, keyVerified = false, keyboardAnswered = false;
+      const fail = (code) => {
+        if (settled) { this.markClosed("SSH_DISCONNECTED"); return; }
+        settled = true;
+        clearTimeout(timer);
+        privateKey?.fill(0);
+        this.destroyTransport();
+        reject(new Error(code));
+      };
+      const timer = setTimeout(() => fail("SSH_UNAVAILABLE"), this.manager.connectTimeoutMs);
+      timer.unref?.();
+      this.jumpClient.on("error", () => fail(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE"));
+      this.jumpClient.on("close", () => fail(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE"));
+      if (jump.method === "password") {
+        this.jumpClient.on("keyboard-interactive", (_name, _instructions, _language, prompts, done) => {
+          const accepted = !keyboardAnswered && Array.isArray(prompts) && prompts.length === 1 &&
+            prompts[0]?.echo === false && passwordChallenge(prompts[0].prompt);
+          if (accepted) keyboardAnswered = true;
+          done(accepted ? [jump.password] : []);
+        });
+      }
+      this.jumpClient.on("ready", () => {
+        try {
+          this.jumpClient.forwardOut("127.0.0.1", 0, target.host, target.port, (error, socket) => {
+            if (settled) { socket?.destroy?.(); return; }
+            if (error || !socket) { fail("SSH_UNAVAILABLE"); return; }
+            this.jumpSocket = socket;
+            settled = true;
+            clearTimeout(timer);
+            privateKey?.fill(0);
+            resolve();
+          });
+        } catch { fail("SSH_UNAVAILABLE"); }
+      });
+      try {
+        this.jumpClient.connect({ host: jump.host, port: jump.port, username: jump.username,
+          readyTimeout: Math.min(this.manager.connectTimeoutMs, 10000),
+          tryKeyboard: jump.method === "password",
+          ...(jump.method === "password" ? { password: jump.password } :
+            { privateKey, passphrase: jump.passphrase || undefined }),
+          hostVerifier: (key) => {
+            try {
+              if (sameFingerprint(hostKey(key).fingerprint, jump.fingerprint)) {
+                keyVerified = true;
+                return true;
+              }
+            } catch { /* Malformed keys are never trusted. */ }
+            keyChanged = true;
+            return false;
+          },
+        });
+      } catch { fail("SSH_UNAVAILABLE"); }
+    });
+  }
+
+  async connect(value, jump = null) {
+    if (jump) await this.connectJump(jump, value);
+    if (this.closed) throw new Error("SSH_UNAVAILABLE");
+    const privateKey = value.method === "private_key" ? Buffer.from(value.private_key, "utf8") : null;
+    try { this.client = this.manager.clientFactory(); }
+    catch {
+      privateKey?.fill(0);
+      throw new Error("SSH_UNAVAILABLE");
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false, keyChanged = false, keyVerified = false;
+      let keyboardAnswered = false;
+      const fail = (code) => {
+        if (settled) { this.markClosed("SSH_DISCONNECTED"); return; }
+        settled = true;
+        clearTimeout(timer);
+        privateKey?.fill(0);
+        this.destroyTransport();
+        reject(new Error(code));
+      };
+      const timer = setTimeout(() => fail("SSH_UNAVAILABLE"), this.manager.connectTimeoutMs);
+      timer.unref?.();
+      this.client.on("error", () => fail(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE"));
+      this.client.on("close", () => fail(keyChanged ? "HOST_KEY_CHANGED" :
+        keyVerified ? "AUTH_FAILED" : "SSH_UNAVAILABLE"));
+      if (value.method === "password") {
+        this.client.on("keyboard-interactive", (_name, _instructions, _language, prompts, done) => {
+          const accepted = !keyboardAnswered && Array.isArray(prompts) && prompts.length === 1 &&
+            prompts[0]?.echo === false && passwordChallenge(prompts[0].prompt);
+          if (accepted) keyboardAnswered = true;
+          done(accepted ? [value.password] : []);
+        });
+      }
+      this.client.on("ready", () => {
+        try {
+          this.client.shell({ term: "xterm-256color", ...this.dimensions }, (error, stream) => {
+            if (settled) { try { stream?.close?.(); } catch { /* Timed-out shell. */ } return; }
+            if (error || !stream) { fail("SSH_UNAVAILABLE"); return; }
+            this.stream = stream;
+            stream.on("data", (chunk) => this.append(chunk));
+            stream.stderr?.on("data", (chunk) => this.append(chunk));
+            stream.on("error", () => this.markClosed("SSH_DISCONNECTED"));
+            stream.on("close", () => this.markClosed("REMOTE_CLOSED"));
+            settled = true;
+            clearTimeout(timer);
+            privateKey?.fill(0);
+            this.touch();
+            this.lifeTimer = setTimeout(() => this.markClosed("LIFETIME_LIMIT"),
+              this.manager.lifetimeMs);
+            this.lifeTimer.unref?.();
+            resolve(this);
+          });
+        } catch { fail("SSH_UNAVAILABLE"); }
+      });
+      try {
+        this.client.connect({ host: value.host, port: value.port,
+          ...(this.jumpSocket ? { sock: this.jumpSocket } : {}), username: value.username,
+          readyTimeout: Math.min(this.manager.connectTimeoutMs, 10000),
+          tryKeyboard: value.method === "password",
+          ...(value.method === "password" ? { password: value.password } :
+            { privateKey, passphrase: value.passphrase || undefined }),
+          hostVerifier: (key) => {
+            try {
+              if (sameFingerprint(hostKey(key).fingerprint, value.fingerprint)) {
+                keyVerified = true;
+                return true;
+              }
+            } catch { /* Malformed keys are never trusted. */ }
+            keyChanged = true;
+            return false;
+          },
+        });
+      } catch { fail("SSH_UNAVAILABLE"); }
+    });
+  }
+
+  touch() {
+    if (this.closed) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => this.markClosed("IDLE_TIMEOUT"), this.manager.idleMs);
+    this.idleTimer.unref?.();
+  }
+
+  flushPending() {
+    if (!this.pendingBytes) return;
+    const piece = Buffer.from(this.pendingOutput.subarray(0, this.pendingBytes));
+    this.pendingOutput.fill(0, 0, this.pendingBytes);
+    this.pendingBytes = 0;
+    this.events.push({ cursor: ++this.nextSeq, bytes: piece });
+  }
+
+  append(chunk) {
+    if (this.closed) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (this.outputBytes + bytes.length > DIRECT_MAX_OUTPUT) {
+      this.markClosed("OUTPUT_LIMIT");
+      return;
+    }
+    for (let offset = 0; offset < bytes.length;) {
+      const count = Math.min(this.pendingOutput.length - this.pendingBytes, bytes.length - offset);
+      bytes.copy(this.pendingOutput, this.pendingBytes, offset, offset + count);
+      this.pendingBytes += count;
+      this.outputBytes += count;
+      offset += count;
+      if (this.pendingBytes === this.pendingOutput.length) this.flushPending();
+    }
+    if (this.outputBytes >= 192 * 1024 && !this.outputPaused) {
+      this.outputPaused = true;
+      try { this.stream?.pause?.(); }
+      catch { this.markClosed("SSH_DISCONNECTED"); }
+    }
+  }
+
+  read(cursor) {
+    this.flushPending();
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > this.nextSeq) {
+      throw new Error("INVALID_INPUT");
+    }
+    if (this.events.length && cursor < this.events[0].cursor - 1 ||
+        !this.events.length && cursor < this.nextSeq) {
+      throw new Error("DIRECT_CURSOR_EXPIRED");
+    }
+    while (this.events.length && this.events[0].cursor <= cursor) {
+      const event = this.events.shift();
+      this.outputBytes -= event.bytes.length;
+      event.bytes.fill(0);
+    }
+    if (this.outputPaused && this.outputBytes <= 64 * 1024 && !this.closed) {
+      this.outputPaused = false;
+      try { this.stream?.resume?.(); }
+      catch { this.markClosed("SSH_DISCONNECTED"); }
+    }
+    let nextCursor = cursor;
+    let responseBytes = 0;
+    const events = [];
+    for (const event of this.events) {
+      if (responseBytes + event.bytes.length > DIRECT_RESPONSE_OUTPUT) break;
+      responseBytes += event.bytes.length;
+      nextCursor = event.cursor;
+      events.push({ cursor: event.cursor, data: event.bytes.toString("base64") });
+    }
+    this.touch();
+    const drained = nextCursor === this.nextSeq;
+    return { events, next_cursor: nextCursor, closed: this.closed && drained,
+      ...(this.closed && drained ? { reason: this.reason } : {}) };
+  }
+
+  input(data) {
+    if (this.closed || !this.stream) throw new Error("DIRECT_SESSION_CLOSED");
+    const bytes = directBytes(data);
+    if (this.stream.writableLength + bytes.length > 32768) {
+      bytes.fill(0);
+      throw new Error("BUSY");
+    }
+    try {
+      this.stream.write(bytes, (error) => {
+        bytes.fill(0);
+        if (error) this.markClosed("SSH_DISCONNECTED");
+      });
+    } catch {
+      bytes.fill(0);
+      this.markClosed("SSH_DISCONNECTED");
+      throw new Error("DIRECT_SESSION_CLOSED");
+    }
+    this.touch();
+    return { accepted: true };
+  }
+
+  resize(cols, rows) {
+    if (this.closed || !this.stream) throw new Error("DIRECT_SESSION_CLOSED");
+    directDimensions(cols, rows);
+    try { this.stream.setWindow(rows, cols, 0, 0); }
+    catch {
+      this.markClosed("SSH_DISCONNECTED");
+      throw new Error("DIRECT_SESSION_CLOSED");
+    }
+    this.touch();
+    return { accepted: true };
+  }
+
+  destroyTransport() {
+    try { this.stream?.close?.(); } catch { /* Already closed. */ }
+    try { this.client?.end?.(); } catch { /* Continue cleanup. */ }
+    try { this.client?.destroy?.(); } catch { /* A stalled socket must not retain credentials. */ }
+    try { this.jumpSocket?.destroy?.(); } catch { /* The forwarded channel may already be closed. */ }
+    try { this.jumpClient?.end?.(); } catch { /* Continue cleanup. */ }
+    try { this.jumpClient?.destroy?.(); } catch { /* A stalled jump must not retain credentials. */ }
+  }
+
+  markClosed(reason) {
+    if (this.closed) return;
+    this.closed = true;
+    this.reason = reason;
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.lifeTimer);
+    this.destroyTransport();
+    this.retentionTimer = setTimeout(() => this.manager.remove(this.id),
+      this.manager.closedRetentionMs);
+    this.retentionTimer.unref?.();
+  }
+
+  dispose() {
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.lifeTimer);
+    clearTimeout(this.retentionTimer);
+    this.closed = true;
+    this.destroyTransport();
+    for (const event of this.events) event.bytes.fill(0);
+    this.events.length = 0;
+    this.pendingOutput.fill(0);
+    this.pendingBytes = 0;
+    this.outputBytes = 0;
+    this.outputPaused = false;
+    this.ownerHash.fill(0);
+  }
+}
+
+export class DirectTerminalSessions {
+  constructor({ clientFactory = () => new Client(), connectTimeoutMs = 12000,
+    idleMs = 5 * 60 * 1000, lifetimeMs = 30 * 60 * 1000,
+    closedRetentionMs = 60 * 1000 } = {}) {
+    this.clientFactory = clientFactory;
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.idleMs = idleMs;
+    this.lifetimeMs = lifetimeMs;
+    this.closedRetentionMs = closedRetentionMs;
+    this.sessions = new Map();
+    this.pending = 0;
+  }
+
+  async open(raw, authorization) {
+    let route, ownerHash, session, pending = false;
+    try {
+      const dimensionsProvided = Object.hasOwn(raw ?? {}, "cols") || Object.hasOwn(raw ?? {}, "rows");
+      const jumpProvided = Object.hasOwn(raw ?? {}, "jump");
+      if (!exactFields(raw, [...DIRECT_OPEN_FIELDS, ...(jumpProvided ? ["jump"] : []),
+        ...(dimensionsProvided ? ["cols", "rows"] : [])])) {
+        throw new Error("INVALID_INPUT");
+      }
+      route = validateTargetRouteStatus(Object.fromEntries([...DIRECT_OPEN_FIELDS,
+        ...(jumpProvided ? ["jump"] : [])].map((key) => [key, raw[key]])));
+      const target = route.target;
+      const dimensions = directDimensions(dimensionsProvided ? raw.cols : 80,
+        dimensionsProvided ? raw.rows : 24);
+      ownerHash = directTokenHash(authorization);
+      if (this.sessions.size + this.pending >= 4 ||
+          [...this.sessions.values()].filter((live) =>
+            timingSafeEqual(live.ownerHash, ownerHash)).length >= 2) throw new Error("BUSY");
+      this.pending++;
+      pending = true;
+      const id = randomBytes(32).toString("base64url");
+      session = new DirectTerminalSession(this, id, ownerHash, dimensions);
+      await session.connect(target, route.jump);
+      if (session.closed) throw new Error("SSH_UNAVAILABLE");
+      this.sessions.set(id, session);
+      ownerHash = null; // The live session owns the hash until close.
+      return { session_id: id, next_cursor: 0,
+        expires_at: Math.floor(session.expiresAt / 1000),
+        host_key_fingerprint: target.fingerprint,
+        ...(route.jump ? { jump_host_key_fingerprint: route.jump.fingerprint } : {}) };
+    } catch (error) {
+      session?.dispose();
+      ownerHash?.fill(0);
+      throw error;
+    } finally {
+      if (pending) this.pending--;
+      clearCredentials(route?.target);
+      clearCredentials(route?.jump);
+    }
+  }
+
+  owned(id, authorization) {
+    const session = this.sessions.get(id);
+    const ownerHash = directTokenHash(authorization);
+    const matches = session && timingSafeEqual(ownerHash, session.ownerHash);
+    ownerHash.fill(0);
+    if (!matches) throw new Error("DIRECT_SESSION_NOT_FOUND");
+    return session;
+  }
+
+  remove(id) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    this.sessions.delete(id);
+    session.dispose();
+  }
+
+  closeOwned(authorization) {
+    let ownerHash;
+    try { ownerHash = directTokenHash(authorization); }
+    catch { return; }
+    for (const [id, session] of this.sessions) {
+      if (timingSafeEqual(ownerHash, session.ownerHash)) this.remove(id);
+    }
+    ownerHash.fill(0);
+  }
+
+  operate(action, value, authorization) {
+    const fields = action === "events" ? ["session_id", "cursor"] :
+      action === "input" ? ["session_id", "data"] :
+        action === "resize" ? ["session_id", "cols", "rows"] : ["session_id"];
+    const id = directSessionId(value, fields);
+    const session = this.owned(id, authorization);
+    if (action === "events") return session.read(value.cursor);
+    if (action === "input") return session.input(value.data);
+    if (action === "resize") return session.resize(value.cols, value.rows);
+    this.remove(id);
+    return { closed: true };
+  }
 }
 
 function probeTargetHubRoute(raw, endpoint, options = {}) {
@@ -1634,13 +2074,16 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   preview = previewAmneziaSetup, enrollPreview = previewAmneziaEnrollment,
   enroll = enrollAmneziaSetup, vpnMutate = mutateAmneziaSetup,
   installPreview = previewTargetInstall,
-  agent = proxyAgent, admin = requireUnrestrictedAdmin } = {}) {
+  agent = proxyAgent, admin = requireUnrestrictedAdmin,
+  directTerminals = new DirectTerminalSessions() } = {}) {
   const probes = new WindowLimit(20, 60);
   const reads = new WindowLimit(60, 60);
   const attempts = new WindowLimit(5, 60);
   const stages = new WindowLimit(5, 60);
   const wgStages = new WindowLimit(8, 60);
   const provisionStages = new WindowLimit(8, 60);
+  const terminalReads = new WindowLimit(360, 60);
+  const terminalWrites = new WindowLimit(1200, 60);
   let active = 0;
   return async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -1659,11 +2102,13 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const vpnSourceAction = /^\/api\/v1\/browser-ssh\/vpn-source\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const wgControlAction = /^\/api\/v1\/browser-ssh\/wg-control\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const provisionAction = /^\/api\/v1\/browser-ssh\/amnezia-provision\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
+    const directAction = /^\/api\/v1\/browser-ssh\/direct-terminal\/(open|events|input|resize|close)$/.exec(req.url || "")?.[1];
     const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview ||
-      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) || Boolean(provisionAction);
+      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) ||
+      Boolean(provisionAction) || Boolean(directAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction && !directAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -1673,7 +2118,9 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
+    if (!(isProbe ? probes : directAction === "events" ? terminalReads :
+          directAction && directAction !== "open" ? terminalWrites :
+          provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
           ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
       .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
@@ -1690,7 +2137,17 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (agentAction || vpnSourceAction || wgControlAction || provisionAction) {
+        if (directAction) {
+          if (directAction === "open") {
+            const opened = await directTerminals.open(value, req.headers.authorization);
+            // The SSH handshake can take seconds. Recheck the role before returning
+            // a live shell in case the administrator lost access meanwhile.
+            await admin(req.headers.authorization);
+            json(res, 200, opened);
+          } else {
+            json(res, 200, directTerminals.operate(directAction, value, req.headers.authorization));
+          }
+        } else if (agentAction || vpnSourceAction || wgControlAction || provisionAction) {
           const token = BEARER.exec(req.headers.authorization || "")?.[1];
           if (!token) throw new Error("AUTH_REQUIRED");
           const action = agentAction || (vpnSourceAction ? `vpn-source-${vpnSourceAction}` :
@@ -1731,22 +2188,27 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         clearCredentials(value);
       }
     } catch (error) {
+      if (directAction && ["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE"].includes(error?.message)) {
+        directTerminals.closeOwned(req.headers.authorization);
+      }
       if (res.destroyed) return;
       const code = ["INVALID_INPUT", "SSH_UNAVAILABLE", "HOST_KEY_CHANGED", "AUTH_FAILED",
         "GRANT_UNAVAILABLE", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE",
         "SETUP_UNAVAILABLE", "SETUP_CHANGED", "SETUP_UNCERTAIN", "STATUS_UNAVAILABLE",
-        "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD",
+        "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD", "DIRECT_SESSION_NOT_FOUND",
+        "DIRECT_SESSION_CLOSED", "DIRECT_CURSOR_EXPIRED",
         ...AGENT_ERRORS]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
       const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") &&
         code !== "INVALID_JOURNAL" ? 400 :
-        ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "SETUP_CHANGED", "STALE_REVISION", "RESUME_REQUIRED",
+        ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "DIRECT_SESSION_CLOSED", "DIRECT_CURSOR_EXPIRED",
+          "SETUP_CHANGED", "STALE_REVISION", "RESUME_REQUIRED",
           "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY", "SOURCE_CHANGED",
           "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "PREVIEW_STALE",
           "ALREADY_INSTALLED", "CONTAINER_EXISTS", "UDP_PORT_BUSY", "SOURCE_BUSY", "CONTROL_ACTIVE",
           "INSTALLATION_DRIFT",
           "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK"].includes(code) ? 409 :
-        code === "NOT_FOUND" ? 404 :
+        ["NOT_FOUND", "DIRECT_SESSION_NOT_FOUND"].includes(code) ? 404 :
         ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED",
           "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "MANUAL_RECOVERY_REQUIRED",
           "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE"].includes(code) ? 422 :

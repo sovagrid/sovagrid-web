@@ -119,6 +119,7 @@ function applyHubPermissions() {
   globalThis.publicWebAccessChanged?.();
   globalThis.localWebAccessChanged?.();
   globalThis.releaseFeedAccessChanged?.();
+  globalThis.sovagridDirectSSH?.accessChanged?.();
 }
 const SEALED_PROFILE_INFO = "SovaGrid sealed WireGuard profile v1";
 let sealedPrepareSeq = 0;
@@ -784,6 +785,7 @@ function setView(view) {
       (!hubCanGlobalAdmin() && GLOBAL_ADMIN_VIEWS.has(view)) ||
       (!hubCanAudit() && ADMIN_AUDIT_VIEWS.has(view))) return;
   if (state.view === "commands") $("terminalInput").value = "";
+  globalThis.sovagridDirectSSH?.reset?.();
   if (state.view === "journal") globalThis.journalReset?.();
   if (state.view === "vpn") globalThis.vpnJumpReset?.();
   if (state.view === "overview") {
@@ -2761,8 +2763,10 @@ function serverSetupRender() {
   }
   for (const id of ["serverSetupInstallName", "serverSetupHubHost", "serverSetupHubPort", "serverSetupLocalPort"])
     $(id).disabled = serverSetup.busy;
+  globalThis.sovagridDirectSSH?.render?.();
 }
 function serverSetupInvalidate() {
+  globalThis.sovagridDirectSSH?.reset?.({ render: false });
   serverSetup.seq++;
   for (const controller of serverSetup.controllers) controller.abort();
   serverSetup.controllers.clear();
@@ -2783,6 +2787,7 @@ function serverSetupInvalidate() {
 }
 function serverSetupReset() {
   serverSetupInvalidate();
+  globalThis.sovagridDirectSSH?.clearJump?.();
   globalThis.sovagridSSHKeygen?.clear?.("setup");
   serverSetup.mode = "ssh";
   serverSetup.jobs = [];
@@ -2802,6 +2807,7 @@ function serverSetupReset() {
 function serverSetupMode(mode) {
   if (serverSetup.busy) return;
   serverSetupInvalidate();
+  if (mode !== "ssh") globalThis.sovagridDirectSSH?.clearJump?.();
   serverSetup.mode = mode;
   serverSetupRender();
   (mode === "ssh" ? $("serverSetupHost") : $("newServerName")).focus?.();
@@ -2850,6 +2856,8 @@ async function serverSetupApi(path, value, timeoutMs, seq) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const body = JSON.stringify(value);
   for (const key of ["password", "private_key", "passphrase"]) if (Object.hasOwn(value, key)) value[key] = "";
+  if (value.jump && typeof value.jump === "object")
+    for (const key of ["password", "private_key", "passphrase"]) if (Object.hasOwn(value.jump, key)) value.jump[key] = "";
   try {
     const response = await fetch(path, { method: "POST", credentials: "omit", cache: "no-store",
       redirect: "error", referrerPolicy: "no-referrer",
@@ -2870,6 +2878,7 @@ async function serverSetupApi(path, value, timeoutMs, seq) {
   } finally { clearTimeout(timer); serverSetup.controllers.delete(controller); }
 }
 async function serverSetupInspect() {
+  if (globalThis.sovagridDirectSSH?.jumpEnabled?.()) return globalThis.sovagridDirectSSH.inspectTargetViaJump();
   if (serverSetup.busy) return;
   if (!serverSetupAllowed()) { serverSetupError(serverSetupReason()); return; }
   let target;
@@ -2911,6 +2920,7 @@ function serverSetupCredentialsChanged(clearOther = false) {
 }
 async function serverSetupStatus(event) {
   event.preventDefault();
+  if (globalThis.sovagridDirectSSH?.jumpEnabled?.()) return;
   if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed || serverSetup.changedPin ||
       !$("serverSetupTrust").checked || !$("addServerDialog").open) return;
   const reviewed = { ...serverSetup.reviewed };
@@ -3082,6 +3092,7 @@ function serverSetupInstallFields() {
   return { name, hub_host, hub_port, local_port };
 }
 async function serverSetupPrepare() {
+  if (globalThis.sovagridDirectSSH?.jumpEnabled?.()) return;
   if (serverSetup.busy || !serverSetupAllowed() || !serverSetup.reviewed ||
       !$("serverSetupTrust").checked || serverSetup.changedPin || serverSetup.job) return;
   const recovery = serverSetup.recovery;

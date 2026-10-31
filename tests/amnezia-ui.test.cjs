@@ -533,6 +533,8 @@ test('add-profile confirms exact target, decrypts nested AWG3 envelope, download
   h.context.renderVpnControls();
   await until(() => h.amnezia.control?.source_status === 'ok');
   h.element('amneziaAddClient').value = 'phone_1';
+  h.element('amneziaAddAddressMode').value = 'manual';
+  h.context.amneziaAddAddressModeChange();
   h.element('amneziaAddAddress').value = '10.0.0.42';
   h.element('amneziaAddEndpoint').value = 'vpn.example.org';
   h.element('amneziaAddRoute').value = 'split';
@@ -543,6 +545,7 @@ test('add-profile confirms exact target, decrypts nested AWG3 envelope, download
     ['action', 'address', 'client', 'endpoint_host', 'public_key', 'route', 'target']);
   assert.equal(pending.privateKey.extractable, false);
   assert.equal(pending.payload.target, 'awg2');
+  assert.equal(pending.payload.address, '10.0.0.42');
   assert.equal(h.downloads.length, 0);
   const text = '[Interface]\nPrivateKey = CLIENT_SECRET\n[Peer]\nPublicKey = SERVER_PUBLIC\n';
   const sealed = await envelope(pending.payload.public_key, text);
@@ -662,10 +665,33 @@ test('uncertain POST retains the same Amnezia payload and idempotency key', asyn
   assert.equal(sent[0].body, sent[1].body);
 });
 
+test('Amnezia profile selects a free IPv4 automatically unless manual mode is chosen', async () => {
+  const h = harness();
+  h.setFetchHook((url) => {
+    assert.ok(url.endsWith('/amnezia/control'));
+    return Promise.resolve(response(200, { control: control() }));
+  });
+  h.context.renderVpnControls();
+  await until(() => h.amnezia.control?.source_status === 'ok');
+  h.element('amneziaAddClient').value = 'phone_auto';
+  h.element('amneziaAddEndpoint').value = 'vpn.example.org';
+  h.element('amneziaAddRoute').value = 'split';
+  assert.equal(h.element('amneziaAddManualAddress').hidden, true);
+  assert.equal(h.element('amneziaAddAddress').required, false);
+  h.context.amneziaAdd({ preventDefault() {} });
+  await until(() => h.element('amneziaDialog').open);
+  assert.equal(h.amnezia.pending.payload.address, 'auto');
+  assert.match(h.element('amneziaDialogSummary').textContent, /IPv4 автоматически/);
+  h.element('amneziaAddAddressMode').value = 'manual';
+  h.context.amneziaAddAddressModeChange();
+  assert.equal(h.element('amneziaAddManualAddress').hidden, false);
+  assert.equal(h.element('amneziaAddAddress').required, true);
+});
+
 test('container image includes Amnezia script and service worker caches its version', () => {
-  assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY index\.html app\.js browser-ssh\.js files\.js amnezia\.js/);
-  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=14/);
-  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=14/);
+  assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY index\.html app\.js .*amnezia\.js/);
+  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=15/);
+  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=15/);
 });
 
 test('WireGuard container selection binds status, action, and profile AAD to target', async () => {
@@ -678,6 +704,8 @@ test('WireGuard container selection binds status, action, and profile AAD to tar
   h.context.renderVpnControls();
   await until(() => h.amnezia.control?.target === 'wireguard');
   h.element('amneziaAddClient').value = 'phone_1';
+  h.element('amneziaAddAddressMode').value = 'manual';
+  h.context.amneziaAddAddressModeChange();
   h.element('amneziaAddAddress').value = '10.0.0.42';
   h.element('amneziaAddEndpoint').value = 'vpn.example.org';
   h.element('amneziaAddRoute').value = 'full';

@@ -485,7 +485,7 @@ function amneziaOpenConfirmation(payload, privateKey = null) {
     payload.action === "sealed-export" ? `Получить профиль ${label}` :
       payload.action === "settings-apply" ? "Применить настройки AWG3" : `Отозвать профиль ${label}`;
   $("amneziaDialogSummary").textContent = payload.action === "add-profile"
-    ? `${payload.client} · ${payload.address} · ${payload.endpoint_host} · ${payload.route === "full" ? "весь трафик" : "только VPN"}`
+    ? `${payload.client} · ${payload.address === "auto" ? "IPv4 автоматически" : payload.address} · ${payload.endpoint_host} · ${payload.route === "full" ? "весь трафик" : "только VPN"}`
     : payload.action === "settings-apply" ? "Проверьте изменение и подтвердите его для выбранного сервера." :
       `Клиент: ${payload.client}`;
   $("amneziaDialogServer").textContent = `Сервер: ${String(server.name || server.id)}`;
@@ -557,14 +557,25 @@ async function amneziaPrepareSealed(action, fields) {
   }
 }
 
+function amneziaAddAddressModeChange() {
+  const manual = $("amneziaAddAddressMode").value === "manual";
+  $("amneziaAddManualAddress").hidden = !manual;
+  $("amneziaAddAddress").required = manual;
+}
+
 function amneziaAdd(event) {
   event.preventDefault();
   clearError($("amneziaError"));
-  const client = $("amneziaAddClient").value.trim(), address = $("amneziaAddAddress").value.trim();
+  const client = $("amneziaAddClient").value.trim();
+  const addressMode = $("amneziaAddAddressMode").value || "auto";
+  const address = addressMode === "manual" ? $("amneziaAddAddress").value.trim() : "auto";
   const endpoint_host = $("amneziaAddEndpoint").value.trim(), route = $("amneziaAddRoute").value;
-  if (!amneziaValidClient(client) || !/^[0-9.]{7,15}$/.test(address) ||
+  const validManualAddress = /^(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}$/.test(address) &&
+    address.split(".").every((octet) => Number(octet) <= 255);
+  if (!amneziaValidClient(client) || !["auto", "manual"].includes(addressMode) ||
+      addressMode === "manual" && !validManualAddress ||
       !/^[A-Za-z0-9.:-]{1,253}$/.test(endpoint_host) || !["split", "full"].includes(route)) {
-    showError($("amneziaError"), "Проверьте имя клиента, IPv4-адрес, адрес сервера и маршрут.");
+    showError($("amneziaError"), "Проверьте имя клиента, IPv4-адрес (если указан), адрес сервера и маршрут.");
     return;
   }
   void amneziaPrepareSealed("add-profile", { client, address, endpoint_host, route });
@@ -2332,6 +2343,8 @@ $("amneziaPlanReset").addEventListener("click", amneziaPlanReset);
 $("amneziaPlanPrepareApply").addEventListener("click", () => { void amneziaPrepareSettingsApply(); });
 for (const name of AMNEZIA_AWG_FIELDS) $("amneziaPlan" + name).addEventListener("input", amneziaPlanInputChanged);
 $("amneziaTarget").addEventListener("change", amneziaTargetChanged);
+$("amneziaAddAddressMode").addEventListener("change", amneziaAddAddressModeChange);
+amneziaAddAddressModeChange();
 $("amneziaAddForm").addEventListener("submit", amneziaAdd);
 $("amneziaExportForm").addEventListener("submit", amneziaExport);
 $("amneziaRevokeForm").addEventListener("submit", amneziaRevoke);
