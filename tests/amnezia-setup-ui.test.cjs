@@ -83,6 +83,9 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /id="amneziaSetupScopeRemote"/);
   assert.match(html, /id="amneziaSetupRemoteHost"/);
   assert.match(html, /id="amneziaSetupRemotePort"/);
+  assert.match(html, /id="amneziaSetupViaJump"/);
+  assert.match(html, /Подготовка VPN-кода, управление WireGuard и создание AmneziaWG поддерживают проверенный маршрут/);
+  assert.match(html, /Подключение существующего брокера ниже пока требует прямого SSH-доступа из Hub/);
   assert.match(html, /id="amneziaSourcePreview"/);
   assert.match(html, /id="amneziaSourceApply"/);
   assert.match(html, /id="wgControlPanel"/);
@@ -94,8 +97,8 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=15/);
-  assert.match(shell, /amnezia\.js\?v=15/);
+  assert.match(html, /amnezia\.js\?v=16/);
+  assert.match(shell, /amnezia\.js\?v=16/);
   assert.match(html, /styles\.css\?v=46/);
   assert.match(shell, /styles\.css\?v=46/);
 });
@@ -477,6 +480,8 @@ test('entered host prepares verified VPN code through preview and separate confi
     '/api/v1/browser-ssh/target-status',
     '/api/v1/browser-ssh/vpn-source/preview',
   ]);
+  assert.equal(JSON.parse(h.calls[1].options.body).password, 'one-use-password');
+  assert.equal(JSON.parse(h.calls[2].options.body).password, 'one-use-password');
   assert.equal(h.element('amneziaSourceReview').hidden, false);
   assert.equal(h.element('amneziaSourceApply').hidden, false);
   assert.equal(h.element('amneziaSourceDigest').textContent, hashes.candidate_sha256);
@@ -494,6 +499,103 @@ test('entered host prepares verified VPN code through preview and separate confi
   h.element('amneziaSetupRemoteHost').listeners.get('input')();
   assert.equal(h.element('amneziaSourceNotice').textContent, '');
   assert.equal(h.element('amneziaSourcePreview').disabled, true);
+});
+
+test('reviewed ProxyJump gates VPN writes and pins both hosts in every request', async () => {
+  const host = 'vpn.example', port = 2202, jumpHost = 'relay.example';
+  const jumpPin = `SHA256:${'C'.repeat(43)}`;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT, jump_host: jumpHost, jump_port: 22,
+    jump_host_key_fingerprint: jumpPin };
+  const hashes = { source_manifest_sha256: 'a'.repeat(64), candidate_sha256: 'b'.repeat(64),
+    installed_sha256: '0'.repeat(64), state_sha256: '0'.repeat(64) };
+  let routeReady = true, responsePort = 23;
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-status': () => ({ ...scope, jump_port: responsePort,
+      kind: 'agent_only' }),
+    '/api/v1/browser-ssh/vpn-source/preview': { ...scope, ...hashes, expected: hashes,
+      change: 'install', temporary_writes: true, activation_writes: false,
+      cleanup_required: false },
+    '/api/v1/browser-ssh/vpn-source/apply': { ...scope, installed: true, changed: true,
+      cleanup_required: false, source_manifest_sha256: hashes.source_manifest_sha256,
+      candidate_sha256: hashes.candidate_sha256 },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  h.element('amneziaSetupViaJump').checked = true;
+  h.context.vpnJumpRoutePins = (endpoint, fingerprint) =>
+    routeReady && endpoint?.host === host && endpoint.port === port &&
+    (!fingerprint || fingerprint === FINGERPRINT) ? {
+      generation: 1,
+      target: { host, port, fingerprint: FINGERPRINT, key_type: 'ssh-ed25519',
+        host_key_blob: 'target-public-host-key' },
+      jump: { host: jumpHost, port: 22, username: 'operator', method: 'password',
+        fingerprint: jumpPin, host_key_blob: 'jump-public-host-key' },
+    } : null;
+  h.context.vpnJumpRouteCredentials = async () => ({
+    host_key_blob: 'target-public-host-key',
+    jump: { host: jumpHost, port: 22, username: 'operator', method: 'password',
+      fingerprint: jumpPin, password: h.element('relayPassword').value,
+      private_key: '', passphrase: '', host_key_blob: 'jump-public-host-key' },
+  });
+  h.context.vpnJumpClearSecrets = () => { h.element('relayPassword').value = ''; };
+  await h.context.amneziaSetupInspect();
+  assert.equal(h.calls.length, 0, 'reviewed route supplies the target host key');
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'target-preview-secret';
+  h.element('relayPassword').value = 'relay-preview-secret';
+  await h.context.amneziaSourcePreview();
+  assert.equal(h.calls.length, 1, 'changed relay pin blocks the VPN preview');
+  assert.equal(h.element('amneziaSourceApply').hidden, true);
+  const statusBody = JSON.parse(h.calls[0].options.body);
+  assert.equal(statusBody.host_key_blob, undefined);
+  assert.equal(statusBody.jump.host_key_blob, undefined);
+  assert.equal(statusBody.jump.password, 'relay-preview-secret');
+  responsePort = 22;
+  h.element('amneziaSetupPassword').value = 'target-preview-secret-2';
+  h.element('relayPassword').value = 'relay-preview-secret-2';
+  await h.context.amneziaSourcePreview();
+  assert.equal(h.element('amneziaSourceApply').hidden, false);
+  const previewBody = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(previewBody.host_key_blob, 'target-public-host-key');
+  assert.equal(previewBody.jump.host_key_blob, 'jump-public-host-key');
+  assert.equal(previewBody.jump.password, 'relay-preview-secret-2');
+  assert.equal(h.element('relayPassword').value, '');
+  h.element('amneziaSetupPassword').value = 'target-apply-secret';
+  h.element('relayPassword').value = 'relay-apply-secret';
+  await h.context.amneziaSourceAction('apply');
+  const applyBody = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(applyBody.password, 'target-apply-secret');
+  assert.equal(applyBody.jump.password, 'relay-apply-secret');
+  assert.deepEqual(applyBody.expected, hashes);
+  routeReady = false;
+  h.context.amneziaVpnJumpChanged();
+  assert.equal(h.element('amneziaSourcePreview').disabled, true);
+  assert.equal(h.element('amneziaSourceApply').hidden, true);
+});
+
+test('VPN request serialization clears target and relay secrets before a slow reply', async () => {
+  const h = harness();
+  let release, sent;
+  h.context.fetch = async (_path, options) => {
+    sent = JSON.parse(options.body);
+    return new Promise((resolve) => { release = resolve; });
+  };
+  const credentials = { host: 'vpn.example', port: 22, password: 'target-secret',
+    private_key: '', passphrase: '', jump: { host: 'relay.example', port: 22,
+      password: 'relay-secret', private_key: '', passphrase: '' } };
+  const pending = h.context.amneziaSetupApi('/api/v1/browser-ssh/vpn-source/preview',
+    credentials, TOKEN, 30000);
+  assert.equal(sent.password, 'target-secret');
+  assert.equal(sent.jump.password, 'relay-secret');
+  assert.equal(credentials.password, '');
+  assert.equal(credentials.jump.password, '');
+  release({ ok: true, json: async () => ({ protocol: 1 }) });
+  await pending;
 });
 
 test('VPN source preview exposes only reviewed recovery and never reuses a stale endpoint', async () => {

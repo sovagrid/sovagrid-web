@@ -68,38 +68,33 @@ trees. A recovery request cleans up only its owned temporary state. A lost
 apply response or `cleanup_required:true` requires a fresh preview before
 further action. Source updates refuse an installed Amnezia or WireGuard control
 unit or enable marker, even if the unit is currently stopped.
-These source routes do not create a VPN container, arm a broker, or create a
-jump tunnel. The existing Amnezia broker enrollment routes still require a
-running compatible container and root or passwordless sudo access to their
-fixed installer.
-An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
-from the gateway container by this route; a separately configured reachable
-SSH endpoint is needed.
+These source routes do not create a VPN container or arm a broker. The existing
+Amnezia broker enrollment routes still require a running compatible container,
+root or passwordless sudo access, and a directly reachable SSH target.
+A reverse SSH tunnel bound to a jump host's loopback is supported when the
+administrator supplies that jump host as an explicit, reviewed ProxyJump.
 
-## Read-only one-hop SSH route check
+## Reviewed one-hop SSH route
 
-The VPN tab has a separate read-only route check for a target reachable only
-from an intermediate SSH host. The existing administrator-only
-`target-host-key` accepts `{host, port, jump}` where `jump` contains exactly
-the eight pinned target SSH fields (`host`, `port`, `username`, `method`,
-`fingerprint`, `password`, `private_key`, `passphrase`). The user first probes
-the jump host directly with `target-host-key`, independently verifies and
-accepts its fingerprint, then probes the target through it. The gateway
-authenticates to the pinned jump, opens one `direct-tcpip` channel to the
-specified target host and port, and inspects the target key without target
-authentication. The response includes the target fingerprint and the jump
-host, port and fingerprint. `target-status` accepts the eight target fields
-plus the same `jump` object, checks both keys again, and runs only the fixed
-read-only Ubuntu inventory script. It returns only the fixed status category
-and both route identities. Neither endpoint accepts a command or persists
-SSH credentials. The browser keeps only the two accepted fingerprints; its
-credential inputs are cleared after each request.
+The VPN tab verifies one intermediate SSH host and the target separately.
+`target-host-key` accepts `{host, port, jump}` with the jump's exact eight SSH
+login fields. The gateway authenticates to the pinned jump, opens one
+`direct-tcpip` channel, and inspects the target host key before target login.
+`target-status` repeats both host-key checks and runs only the fixed Ubuntu
+inventory script. Neither probe accepts arbitrary commands.
 
-This route check does not authorize VPN source preparation, broker enrollment,
-WireGuard control or Amnezia provisioning through the jump. Those write paths
-still require a directly reachable target from their respective SSH workers.
-The UI presents the check separately so a successful route probe cannot be
-mistaken for permission to run a write over the hop.
+For `vpn-source/{preview,apply,recover}`, `wg-control/{preview,apply,recover}`
+and `amnezia-provision/{preview,apply,recover}`, a jumped request additionally
+contains a target `host_key_blob` and an exact nine-field `jump` object (the
+eight login fields plus its `host_key_blob`). The gateway and root worker check
+both public blobs against their reviewed SHA-256 fingerprints. Every jumped
+response includes `jump_host`, `jump_port`, and `jump_host_key_fingerprint`
+alongside the target identity. The gateway and browser compare all pins to the
+request before accepting a result. Review and confirmation are bound to the
+route identity; editing it invalidates pending actions. Only public host-key
+blobs stay in tab memory. Passwords and private keys are read for each request
+and cleared immediately after serialization. The existing `vpn-setup/*`
+enrollment routes remain direct-only.
 
 ## Plain WireGuard broker on an entered Agent
 

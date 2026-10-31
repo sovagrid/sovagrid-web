@@ -5,9 +5,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const test = require('node:test');
+const { createHash, webcrypto } = require('node:crypto');
 
-const PIN = 'SHA256:' + 'A'.repeat(43);
-const TARGET_PIN = 'SHA256:' + 'B'.repeat(43);
+function hostKey(seed) {
+  const type = Buffer.from('ssh-ed25519');
+  const raw = Buffer.concat([Buffer.from([0, 0, 0, type.length]), type,
+    Buffer.from([0, 0, 0, 32]), Buffer.alloc(32, seed)]);
+  return { blob: raw.toString('base64'),
+    fingerprint: 'SHA256:' + createHash('sha256').update(raw).digest('base64').replace(/=+$/, '') };
+}
+const JUMP_KEY = hostKey(1), TARGET_KEY = hostKey(2);
+const PIN = JUMP_KEY.fingerprint, TARGET_PIN = TARGET_KEY.fingerprint;
 
 function element(value = '') {
   return { value, textContent: '', hidden: false, disabled: false, checked: false,
@@ -25,8 +33,11 @@ test('VPN jump panel verifies both keys and one read-only status, then clears in
   };
   const saved = new Map(), calls = [];
   const context = vm.createContext({
-    AbortController, TextEncoder, setTimeout, clearTimeout,
-    document: { getElementById: get },
+    AbortController, TextEncoder, URL, setTimeout, clearTimeout,
+    document: { getElementById: get, addEventListener() {}, hidden: false },
+    crypto: webcrypto, atob, btoa,
+    serverSetupHostKeyBlobValid: (value) => typeof value === 'string' &&
+      value.length >= 12 && value.length <= 10924 && /^[A-Za-z0-9+/]+={0,2}$/.test(value),
     location: { origin: 'https://panel.example' },
     localStorage: { getItem: (key) => saved.get(key) ?? null,
       setItem: (key, value) => saved.set(key, value) },
@@ -38,11 +49,13 @@ test('VPN jump panel verifies both keys and one read-only status, then clears in
       if (path.endsWith('/target-host-key') && !body.jump)
         return { ok: true, json: async () => ({ protocol: 1, scope: 'entered_target',
           host: 'gateway.example', port: 22, key_type: 'ssh-ed25519', fingerprint: PIN,
+          host_key_blob: JUMP_KEY.blob,
           reverify_required: true }) };
       if (path.endsWith('/target-host-key')) {
         assert.equal(body.jump.password, 'jump-secret');
         return { ok: true, json: async () => ({ protocol: 1, scope: 'entered_target',
           host: '127.0.0.1', port: 22022, key_type: 'ssh-ed25519', fingerprint: TARGET_PIN,
+          host_key_blob: TARGET_KEY.blob,
           jump_host: 'gateway.example', jump_port: 22, jump_host_key_fingerprint: PIN,
           reverify_required: true }) };
       }
@@ -58,12 +71,14 @@ test('VPN jump panel verifies both keys and one read-only status, then clears in
   await get('vpnJumpInspect').listeners.click();
   assert.equal(get('vpnJumpFingerprint').textContent, PIN);
   assert.equal(get('vpnJumpInspectTarget').disabled, true);
+  assert.equal(context.vpnJumpRoutePins({ host: '127.0.0.1', port: 22022 }), null);
   get('vpnJumpTrust').checked = true;
   get('vpnJumpTrust').listeners.change();
   get('vpnJumpPassword').value = 'jump-secret';
   await get('vpnJumpInspectTarget').listeners.click();
   assert.equal(get('vpnJumpTargetFingerprint').textContent, TARGET_PIN);
   assert.equal(get('vpnJumpPassword').value, '');
+  assert.equal(context.vpnJumpRoutePins({ host: '127.0.0.1', port: 22022 }), null);
   get('vpnJumpTargetTrust').checked = true;
   get('vpnJumpTargetTrust').listeners.change();
   assert.equal(get('vpnJumpStatus').disabled, false);
@@ -76,10 +91,24 @@ test('VPN jump panel verifies both keys and one read-only status, then clears in
   assert.equal(calls.length, 3);
   assert.equal(saved.size, 2);
   assert.doesNotMatch([...saved].join(' '), /secret/);
+  const pins = context.vpnJumpRoutePins({ host: '127.0.0.1', port: 22022 }, TARGET_PIN);
+  assert.equal(pins.jump.host_key_blob, JUMP_KEY.blob);
+  assert.equal(pins.target.host_key_blob, TARGET_KEY.blob);
+  get('vpnJumpPassword').value = 'jump-secret';
+  const route = await context.vpnJumpRouteCredentials({ host: '127.0.0.1', port: 22022 }, TARGET_PIN);
+  assert.equal(route.jump.password, 'jump-secret');
+  assert.equal(route.host_key_blob, TARGET_KEY.blob);
+  const state = vm.runInContext('vpnJump', context);
+  state.targetKeyBlob = JUMP_KEY.blob;
+  await assert.rejects(() => context.vpnJumpRouteCredentials(
+    { host: '127.0.0.1', port: 22022 }, TARGET_PIN), /HOST_KEY_CHANGED/);
+  state.targetKeyBlob = TARGET_KEY.blob;
   get('vpnJumpPassword').value = 'pending-secret';
   context.vpnJumpReset();
   assert.equal(get('vpnJumpPassword').value, '');
   assert.equal(get('vpnJumpTrust').checked, false);
   assert.equal(get('vpnJumpTargetTrust').checked, false);
   assert.equal(get('vpnJumpStatus').disabled, true);
+  get('vpnJumpHost').value = '2001:0db8:0000:0000:0000:0000:0000:0001';
+  assert.equal(context.vpnJumpEndpoint('vpnJump').host, '2001:db8::1');
 });

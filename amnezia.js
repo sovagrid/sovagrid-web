@@ -1058,6 +1058,14 @@ function amneziaSetupAllowed() {
 }
 
 function amneziaSetupRemote() { return $("amneziaSetupScopeRemote").checked; }
+function amneziaCanonicalHost(host) {
+  if (!host.includes(":")) return host;
+  try {
+    const canonical = new URL(`http://[${host}]/`).hostname;
+    if (!canonical.startsWith("[") || !canonical.endsWith("]")) throw new Error();
+    return canonical.slice(1, -1);
+  } catch { throw new Error("INVALID_TARGET"); }
+}
 function amneziaSetupEndpoint() {
   if (!amneziaSetupRemote()) return null;
   const host = $("amneziaSetupRemoteHost").value.trim().toLowerCase();
@@ -1066,7 +1074,7 @@ function amneziaSetupEndpoint() {
       !/^[0-9]{1,5}$/.test(rawPort)) throw new Error("INVALID_TARGET");
   const port = Number(rawPort);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("INVALID_TARGET");
-  return { host, port };
+  return { host: amneziaCanonicalHost(host), port };
 }
 function amneziaSetupSameEndpoint() {
   if (!amneziaSetupRemote()) return amneziaSetup.endpoint === null;
@@ -1091,6 +1099,79 @@ function amneziaSetupSavePin(fingerprint) {
 function amneziaSetupClearSecrets() {
   for (const id of ["amneziaSetupPassword", "amneziaSetupPrivateKey", "amneziaSetupPassphrase"]) $(id).value = "";
 }
+function amneziaSetupViaJump() {
+  return amneziaSetupRemote() && $("amneziaSetupViaJump").checked;
+}
+function amneziaVpnRoutePins() {
+  return amneziaSetupViaJump() ?
+    globalThis.vpnJumpRoutePins?.(amneziaSetup.endpoint, amneziaSetup.fingerprint) ?? null : null;
+}
+function amneziaVpnRouteValid(value) {
+  const fields = ["jump_host", "jump_port", "jump_host_key_fingerprint"];
+  if (!amneziaSetupViaJump()) return fields.every((key) => !Object.hasOwn(value ?? {}, key));
+  const pins = amneziaVpnRoutePins();
+  return !!pins && value?.jump_host === pins.jump.host && value.jump_port === pins.jump.port &&
+    value.jump_host_key_fingerprint === pins.jump.fingerprint;
+}
+function amneziaVpnStatusValid(value, endpoint, fingerprint) {
+  return value?.protocol === 1 && value.scope === "entered_target" &&
+    value.host === endpoint?.host && value.port === endpoint?.port &&
+    value.host_key_fingerprint === fingerprint && amneziaVpnRouteValid(value) &&
+    ["managed", "agent_only"].includes(value.kind);
+}
+async function amneziaVpnCredentials() {
+  const credentials = await amneziaSetupCredentials({ requireReview: false });
+  try {
+    const { target: _target, ...login } = credentials;
+    if (!amneziaSetupViaJump()) return login;
+    const route = await globalThis.vpnJumpRouteCredentials?.(amneziaSetup.endpoint,
+      amneziaSetup.fingerprint);
+    if (!route) throw new Error("HOST_KEY_CHANGED");
+    return { ...login, ...route };
+  } finally { amneziaVpnClearCredentials(credentials); }
+}
+function amneziaVpnStatusPayload(login) {
+  if (!login.jump) return { ...login };
+  const { host_key_blob: _targetBlob, jump, ...target } = login;
+  const { host_key_blob: _jumpBlob, ...relay } = jump;
+  return { ...target, jump: relay };
+}
+function amneziaVpnOperationPayload(login, extra = {}) {
+  return { ...login, ...(login.jump ? { jump: { ...login.jump } } : {}), ...extra };
+}
+function amneziaVpnClearCredentials(login) {
+  if (!login) return;
+  for (const key of ["password", "private_key", "passphrase"])
+    if (Object.hasOwn(login, key)) login[key] = "";
+  if (login.jump) for (const key of ["password", "private_key", "passphrase"])
+    if (Object.hasOwn(login.jump, key)) login.jump[key] = "";
+}
+function amneziaVpnHostKeyChanged(failure, element) {
+  if (failure?.message !== "HOST_KEY_CHANGED" || !amneziaSetupViaJump()) return false;
+  globalThis.vpnJumpInvalidateRoute?.();
+  showError(element, amneziaSetupExplain(failure));
+  return true;
+}
+function amneziaSetupRouteChanged(force = false) {
+  if (!force && !amneziaSetupViaJump()) return;
+  amneziaSetup.generation++;
+  amneziaSetup.controller?.abort();
+  amneziaSetup.controller = null;
+  amneziaSetup.busy = false;
+  amneziaSetup.fingerprint = null;
+  amneziaSetup.endpoint = null;
+  amneziaSetup.changedPin = false;
+  amneziaSetup.pendingAction = null;
+  if ($("amneziaSetupDialog").open) $("amneziaSetupDialog").close();
+  $("amneziaSetupTrust").checked = false;
+  $("amneziaSetupHostKeyReview").hidden = true;
+  $("amneziaSetupReplaceKey").hidden = true;
+  amneziaSetupDiscardSource();
+  amneziaSetupDiscardReview();
+  amneziaSetupClearSecrets();
+  amneziaSetupRender();
+}
+globalThis.amneziaVpnJumpChanged = () => amneziaSetupRouteChanged();
 function amneziaSetupPendingKey() {
   if (!amneziaSetupRemote()) return `sovagrid.amnezia-setup-pending:${location.origin}`;
   let endpoint = amneziaSetup.endpoint;
@@ -1111,10 +1192,16 @@ function amneziaSetupMarkPending(pending) {
 }
 function amneziaSetupIdentity() {
   const endpoint = amneziaSetupRemote() ? amneziaSetupEndpoint() : null;
+  const route = amneziaSetupViaJump() ? amneziaVpnRoutePins() : null;
   return { target: $("amneziaSetupTarget").value, username: $("amneziaSetupUsername").value.trim(),
     method: $("amneziaSetupAuthKey").checked ? "private_key" : "password",
     fingerprint: amneziaSetup.fingerprint, scope: endpoint ? "entered_target" : "hub_host",
-    host: endpoint?.host ?? null, port: endpoint?.port ?? null };
+    host: endpoint?.host ?? null, port: endpoint?.port ?? null,
+    via_jump: amneziaSetupViaJump(), jump_route: route ? JSON.stringify({
+      generation: route.generation, host: route.jump.host, port: route.jump.port,
+      username: route.jump.username, method: route.jump.method,
+      fingerprint: route.jump.fingerprint, host_key_blob: route.jump.host_key_blob,
+      target_host_key_blob: route.target.host_key_blob }) : null };
 }
 function amneziaSetupSameIdentity() {
   try {
@@ -1165,18 +1252,20 @@ function amneziaSetupRender() {
   $("amneziaSetupHost").textContent = location.hostname || "этот хост";
   const remote = amneziaSetupRemote();
   $("amneziaSetupRemoteFields").hidden = !remote;
+  const viaJump = amneziaSetupViaJump(), routeReady = !viaJump || !!amneziaVpnRoutePins();
   const allowed = amneziaSetupAllowed();
   $("amneziaSetupAvailability").textContent = !state.user ? "Войдите как администратор этого Hub." :
     !hubCanGlobalAdmin() ? "Для проверки нужен администратор со свободным доступом ко всем серверам Hub." :
       !allowed ? "Откройте этот Hub по HTTPS или через локальный SSH-туннель и войдите в него напрямую." :
         amneziaSetupPending() ? "Предыдущее действие могло продолжиться после потери связи. Проверьте состояние заново перед следующим шагом." :
+          viaJump ? "Сначала проверьте оба SSH-ключа в разделе «Маршрут через хост», затем подтвердите целевой ключ здесь. Перед каждым шагом введите SSH-данные обоих серверов." :
           remote ? "Сначала проверьте SSH-ключ удалённого сервера, затем войдите в него. Пароль и файл ключа не сохраняются." :
             "Сначала проверьте SSH-ключ хоста панели, затем выберите способ входа. Пароль и файл ключа не сохраняются.";
   $("amneziaSetupInspect").disabled = !allowed || amneziaSetup.busy;
-  $("amneziaSetupSubmit").disabled = !allowed || amneziaSetup.busy || !amneziaSetup.fingerprint ||
+  $("amneziaSetupSubmit").disabled = viaJump || !allowed || amneziaSetup.busy || !amneziaSetup.fingerprint ||
     amneziaSetup.changedPin || !$("amneziaSetupTrust").checked || !amneziaSetupSameEndpoint();
   const sourceSafe = remote && allowed && !amneziaSetup.busy && !!amneziaSetup.fingerprint &&
-    !amneziaSetup.changedPin && $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint();
+    !amneziaSetup.changedPin && $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint() && routeReady;
   $("amneziaSourcePreview").disabled = !sourceSafe;
   $("amneziaSourceReview").hidden = !sourceSafe || !amneziaSourceSameIdentity() || !amneziaSetup.source;
   $("amneziaSourceApply").hidden = !amneziaSetup.source || !sourceSafe ||
@@ -1185,20 +1274,20 @@ function amneziaSetupRender() {
   $("amneziaSourceRecover").hidden = !amneziaSetup.source || !sourceSafe ||
     !amneziaSourceSameIdentity() || !amneziaSetup.source.cleanup_required;
   for (const id of ["amneziaSetupTarget", "amneziaSetupScopeLocal", "amneziaSetupScopeRemote",
-    "amneziaSetupRemoteHost", "amneziaSetupRemotePort", "amneziaSetupUsername", "amneziaSetupAuthPassword",
+    "amneziaSetupRemoteHost", "amneziaSetupRemotePort", "amneziaSetupViaJump", "amneziaSetupUsername", "amneziaSetupAuthPassword",
     "amneziaSetupAuthKey", "amneziaSetupPassword", "amneziaSetupPrivateKey", "amneziaSetupPassphrase",
     "amneziaSetupTrust"]) $(id).disabled = amneziaSetup.busy;
   const setup = amneziaSetup.setup, exact = amneziaSetupSameIdentity();
   const safe = allowed && exact && !amneziaSetup.busy && !amneziaSetup.changedPin &&
     $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint() &&
     setup?.marker !== "unsafe" && setup?.other_marker !== "unsafe";
-  $("amneziaSetupEnrollPreview").hidden = !safe || setup?.enrolled !== false;
-  $("amneziaSetupInstall").hidden = !safe || setup?.enrolled !== true || !setup?.installer_ready ||
+  $("amneziaSetupEnrollPreview").hidden = viaJump || !safe || setup?.enrolled !== false;
+  $("amneziaSetupInstall").hidden = viaJump || !safe || setup?.enrolled !== true || !setup?.installer_ready ||
     setup?.installed_current || setup?.marker !== "absent" || setup?.other_marker !== "absent" ||
     setup?.socket_active || setup?.service_active;
-  $("amneziaSetupArm").hidden = !safe || setup?.enrolled !== true || !setup?.installed_current ||
+  $("amneziaSetupArm").hidden = viaJump || !safe || setup?.enrolled !== true || !setup?.installed_current ||
     !setup?.can_arm || setup?.marker !== "absent";
-  $("amneziaSetupEnroll").disabled = !safe || !amneziaSetup.enrollment || amneziaSetup.busy;
+  $("amneziaSetupEnroll").disabled = viaJump || !safe || !amneziaSetup.enrollment || amneziaSetup.busy;
   wgControlRender();
   amneziaProvisionRender();
 }
@@ -1243,11 +1332,14 @@ async function amneziaSetupApi(path, value, token, timeoutMs) {
   amneziaSetup.controller = controller;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    let serialized;
+    try { serialized = JSON.stringify(value); }
+    finally { amneziaVpnClearCredentials(value); }
     const response = await fetch(path, { method: "POST", credentials: "omit", cache: "no-store",
       redirect: "error", referrerPolicy: "no-referrer",
       headers: { "Content-Type": "application/json", Accept: "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify(value), signal: controller.signal });
+      body: serialized, signal: controller.signal });
     let payload;
     try { payload = await response.json(); } catch { throw new Error("INVALID_RESPONSE"); }
     if (!response.ok) {
@@ -1314,8 +1406,13 @@ async function amneziaSetupInspect() {
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
   try {
-    const result = await amneziaSetupApi(endpoint ? "/api/v1/browser-ssh/target-host-key" :
-      "/api/v1/browser-ssh/host-key", endpoint ?? {}, endpoint ? token : "", 12000);
+    const route = amneziaSetupViaJump() ? globalThis.vpnJumpRoutePins?.(endpoint) : null;
+    if (amneziaSetupViaJump() && !route) throw new Error("HOST_KEY_CHANGED");
+    const result = route ? { protocol: 1, scope: "entered_target", reverify_required: true,
+      host: route.target.host, port: route.target.port, fingerprint: route.target.fingerprint,
+      key_type: route.target.key_type } :
+      await amneziaSetupApi(endpoint ? "/api/v1/browser-ssh/target-host-key" :
+        "/api/v1/browser-ssh/host-key", endpoint ?? {}, endpoint ? token : "", 12000);
     if (!amneziaSetupCurrent(generation, token, base, origin)) return;
     if (result?.protocol !== 1 || !Number.isSafeInteger(result.port) || result.port < 1 || result.port > 65535 ||
         typeof result.key_type !== "string" || !/^[A-Za-z0-9@._-]{4,96}$/.test(result.key_type) ||
@@ -1368,7 +1465,7 @@ function amneziaSetupValidResult(result, target) {
 }
 async function amneziaSetupPreview(event) {
   event.preventDefault();
-  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetup.fingerprint ||
+  if (amneziaSetupViaJump() || !amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetup.fingerprint ||
       amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
       !amneziaSetupSameEndpoint()) return;
   const fingerprint = amneziaSetup.fingerprint, previousPin = amneziaSetupPin();
@@ -1496,7 +1593,7 @@ function amneziaSourceValid(result) {
   const hashes = ["source_manifest_sha256", "candidate_sha256", "installed_sha256", "state_sha256"];
   return !!endpoint && result?.protocol === 1 && result.scope === "entered_target" &&
     result.host === endpoint.host && result.port === endpoint.port &&
-    result.host_key_fingerprint === amneziaSetup.fingerprint &&
+    result.host_key_fingerprint === amneziaSetup.fingerprint && amneziaVpnRouteValid(result) &&
     hashes.every((key) => typeof result[key] === "string" && /^[0-9a-f]{64}$/.test(result[key]) &&
       result.expected?.[key] === result[key]) &&
     Object.keys(result.expected ?? {}).length === hashes.length &&
@@ -1517,20 +1614,18 @@ async function amneziaSourcePreview() {
   amneziaSetupDiscardReview();
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
-  let payload;
+  let login;
   try {
-    payload = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
         Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key]) ||
         amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
-    const { target: _target, ...login } = payload;
     amneziaSetupClearSecrets();
-    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    globalThis.vpnJumpClearSecrets?.();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status",
+      amneziaVpnStatusPayload(login), token, 30000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
-    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
-        status.host !== endpoint.host || status.port !== endpoint.port ||
-        status.host_key_fingerprint !== identity.fingerprint ||
-        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    if (!amneziaVpnStatusValid(status, endpoint, identity.fingerprint)) throw new Error("TARGET_NOT_READY");
     const result = await amneziaSetupApi("/api/v1/browser-ssh/vpn-source/preview", login, token, 720000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
         Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
@@ -1547,6 +1642,7 @@ async function amneziaSourcePreview() {
     $("amneziaSourceDigest").textContent = result.candidate_sha256;
     $("amneziaSourceNotice").textContent = "";
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("amneziaSetupError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin)) {
       if (["STAGE_CLEANUP_REQUIRED", "RECOVERY_REQUIRED"].includes(failure.message) &&
           amneziaSetupSameEndpoint() && !amneziaSetup.changedPin && $("amneziaSetupTrust").checked) {
@@ -1560,8 +1656,9 @@ async function amneziaSourcePreview() {
         ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
     }
   } finally {
-    payload = null;
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
@@ -1578,20 +1675,23 @@ async function amneziaSourceAction(action) {
   amneziaSetup.busy = true;
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
-  let payload;
+  let login;
   try {
-    payload = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSourceSameIdentity() ||
         amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
-    const { target: _target, ...login } = payload;
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     amneziaSetupMarkPending(true);
+    const operation = amneziaVpnOperationPayload(login,
+      action === "apply" ? { expected: source.expected } : {});
+    amneziaVpnClearCredentials(login);
     const result = await amneziaSetupApi(`/api/v1/browser-ssh/vpn-source/${action}`,
-      action === "apply" ? { ...login, expected: source.expected } : login, token, 720000);
+      operation, token, 720000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSourceSameIdentity()) return;
     if (result?.protocol !== 1 || result.scope !== "entered_target" ||
         result.host !== amneziaSetup.endpoint.host || result.port !== amneziaSetup.endpoint.port ||
-        result.host_key_fingerprint !== amneziaSetup.fingerprint ||
+        result.host_key_fingerprint !== amneziaSetup.fingerprint || !amneziaVpnRouteValid(result) ||
         (action === "apply" && (result.installed !== true || typeof result.changed !== "boolean" ||
           typeof result.cleanup_required !== "boolean" || result.cleanup_required ||
           result.source_manifest_sha256 !== source.source_manifest_sha256 ||
@@ -1606,6 +1706,7 @@ async function amneziaSourceAction(action) {
       ? "VPN-код подготовлен. Теперь покажите состояние Amnezia и продолжите настройку брокера."
       : "Очистка завершена. Проверьте VPN-код снова перед следующим действием.";
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("amneziaSetupError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin)) {
       amneziaSetupDiscardSource();
       if (["INVALID_INPUT", "AUTH_FAILED", "HOST_KEY_CHANGED", "STALE_REVISION",
@@ -1616,8 +1717,9 @@ async function amneziaSourceAction(action) {
         ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
     }
   } finally {
-    payload = null;
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
@@ -1649,7 +1751,8 @@ function wgControlSameIdentity() {
 function wgControlReady() {
   return amneziaSetupRemote() && amneziaSetupAllowed() && !amneziaSetup.busy &&
     !amneziaSetupPending() && !!amneziaSetup.fingerprint && !amneziaSetup.changedPin &&
-    $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint();
+    $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint() &&
+    (!amneziaSetupViaJump() || !!amneziaVpnRoutePins());
 }
 function wgControlRender() {
   $("wgControlPanel").hidden = !amneziaSetupRemote();
@@ -1680,7 +1783,7 @@ function wgControlReset() {
 function wgControlValidScope(value) {
   return value?.protocol === 1 && value.scope === "entered_target" &&
     value.host === amneziaSetup.endpoint?.host && value.port === amneziaSetup.endpoint?.port &&
-    value.host_key_fingerprint === amneziaSetup.fingerprint;
+    value.host_key_fingerprint === amneziaSetup.fingerprint && amneziaVpnRouteValid(value);
 }
 function wgControlValidPreview(value) {
   if (!wgControlValidScope(value) || value.schema_version !== 1 ||
@@ -1760,18 +1863,15 @@ async function wgControlPreview() {
   amneziaSetupRender();
   let login;
   try {
-    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
         Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
-    const { target: _target, ...selected } = credentials;
-    login = selected;
     amneziaSetupClearSecrets();
-    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    globalThis.vpnJumpClearSecrets?.();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status",
+      amneziaVpnStatusPayload(login), token, 30000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
-    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
-        status.host !== endpoint.host || status.port !== endpoint.port ||
-        status.host_key_fingerprint !== identity.fingerprint ||
-        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    if (!amneziaVpnStatusValid(status, endpoint, identity.fingerprint)) throw new Error("TARGET_NOT_READY");
     const result = await amneziaSetupApi("/api/v1/browser-ssh/wg-control/preview", login, token, 130000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
         Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
@@ -1780,11 +1880,13 @@ async function wgControlPreview() {
     wgControlMarkPending(false);
     wgControlShowPreview(result);
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("wgControlError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin))
       showError($("wgControlError"), wgControlExplain(failure));
   } finally {
-    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
@@ -1814,16 +1916,16 @@ async function wgControlAction(action) {
   amneziaSetupRender();
   let login;
   try {
-    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !wgControlSameIdentity() ||
         Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
-    const { target: _target, ...selected } = credentials;
-    login = selected;
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     wgControlMarkPending(true);
-    const payload = action === "apply" ? { ...login, expected: {
+    const payload = amneziaVpnOperationPayload(login, action === "apply" ? { expected: {
       state_revision: preview.state_revision, source_revision: preview.source_revision }, confirm: true } :
-      { ...login, confirm: true };
+      { confirm: true });
+    amneziaVpnClearCredentials(login);
     const result = await amneziaSetupApi(`/api/v1/browser-ssh/wg-control/${action}`, payload,
       token, action === "apply" ? 735000 : 465000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !wgControlSameIdentity()) return;
@@ -1840,6 +1942,7 @@ async function wgControlAction(action) {
       "Брокер, сокет и мониторинг WireGuard готовы. VPN-интерфейс не включён. Проверьте состояние снова." :
       "Восстановление завершено. Проверьте WireGuard-брокер снова перед установкой.";
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("wgControlError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin)) {
       if (["INVALID_INPUT", "AUTH_FAILED", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HOST_KEY_CHANGED",
            "STALE_PREVIEW", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "SOURCE_NOT_PREPARED",
@@ -1849,8 +1952,9 @@ async function wgControlAction(action) {
       showError($("wgControlError"), wgControlExplain(failure));
     }
   } finally {
-    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
@@ -1933,7 +2037,7 @@ function amneziaProvisionReset() {
 function amneziaProvisionScope(value) {
   return value?.protocol === 1 && value.scope === "entered_target" &&
     value.host === amneziaSetup.endpoint?.host && value.port === amneziaSetup.endpoint?.port &&
-    value.host_key_fingerprint === amneziaSetup.fingerprint;
+    value.host_key_fingerprint === amneziaSetup.fingerprint && amneziaVpnRouteValid(value);
 }
 const AMNEZIA_PROVISION_REASONS = new Set(["UNSUPPORTED_PLATFORM", "RECOVERY_REQUIRED",
   "ALREADY_INSTALLED", "CONTAINER_EXISTS", "TUN_UNAVAILABLE", "UDP_PORT_BUSY", "ROOT_REQUIRED", "UNSAFE_STATE",
@@ -2021,18 +2125,15 @@ async function amneziaProvisionPreview() {
   amneziaSetupRender();
   let login;
   try {
-    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
         Object.keys(identity).some((key) => amneziaProvisionIdentity()[key] !== identity[key])) return;
-    const { target: _target, ...selected } = credentials;
-    login = selected;
     amneziaSetupClearSecrets();
-    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    globalThis.vpnJumpClearSecrets?.();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status",
+      amneziaVpnStatusPayload(login), token, 30000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
-    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
-        status.host !== endpoint.host || status.port !== endpoint.port ||
-        status.host_key_fingerprint !== identity.fingerprint ||
-        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    if (!amneziaVpnStatusValid(status, endpoint, identity.fingerprint)) throw new Error("TARGET_NOT_READY");
     const result = await amneziaSetupApi("/api/v1/browser-ssh/amnezia-provision/preview",
       { ...login, ...config }, token, 135000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
@@ -2042,13 +2143,15 @@ async function amneziaProvisionPreview() {
     if (result.reason === "ALREADY_INSTALLED" || result.can_apply) amneziaProvisionMarkPending(false);
     amneziaProvisionShowPreview(result, config);
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("amneziaProvisionError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin)) {
       $("amneziaProvisionNotice").textContent = "";
       showError($("amneziaProvisionError"), amneziaProvisionExplain(failure));
     }
   } finally {
-    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
@@ -2085,15 +2188,15 @@ async function amneziaProvisionAction(action) {
   amneziaSetupRender();
   let login;
   try {
-    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    login = await amneziaVpnCredentials();
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaProvisionSameIdentity() ||
         Object.keys(identity).some((key) => amneziaProvisionIdentity()[key] !== identity[key])) return;
-    const { target: _target, ...selected } = credentials;
-    login = selected;
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     amneziaProvisionMarkPending(true);
-    const payload = action === "apply" ? { ...login, ...config,
-      expected_state: preview.state_revision, confirm: true } : { ...login, confirm: true };
+    const payload = amneziaVpnOperationPayload(login, action === "apply" ? { ...config,
+      expected_state: preview.state_revision, confirm: true } : { confirm: true });
+    amneziaVpnClearCredentials(login);
     const result = await amneziaSetupApi(`/api/v1/browser-ssh/amnezia-provision/${action}`,
       payload, token, action === "apply" ? 495000 : 195000);
     if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaProvisionSameIdentity()) return;
@@ -2117,6 +2220,7 @@ async function amneziaProvisionAction(action) {
         "Контейнер AmneziaWG 3.1 работает. Проверьте состояние ниже, сетевой экран провайдера и подключение клиента; брокер подключается отдельно." :
       "Прерванная установка очищена. Откройте новый предпросмотр перед созданием AmneziaWG.";
   } catch (failure) {
+    if (amneziaVpnHostKeyChanged(failure, $("amneziaProvisionError"))) return;
     if (amneziaSetupCurrent(generation, token, base, origin)) {
       if (["INVALID_INPUT", "AUTH_FAILED", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HOST_KEY_CHANGED",
         "PREVIEW_STALE", "STALE_PREVIEW", "CONFIRMATION_REQUIRED", "INVALID_REVISION", "CONTAINER_EXISTS",
@@ -2130,15 +2234,16 @@ async function amneziaProvisionAction(action) {
       showError($("amneziaProvisionError"), amneziaProvisionExplain(failure));
     }
   } finally {
-    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaVpnClearCredentials(login);
     amneziaSetupClearSecrets();
+    globalThis.vpnJumpClearSecrets?.();
     if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
     amneziaSetupRender();
   }
 }
 
 async function amneziaSetupAction(action) {
-  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupSameIdentity() ||
+  if (amneziaSetupViaJump() || !amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupSameIdentity() ||
       !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
       !["enroll-preview", "enroll", "install", "arm"].includes(action)) return;
   const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
@@ -2201,6 +2306,7 @@ async function amneziaSetupAction(action) {
 }
 
 function amneziaSetupConfirm(action) {
+  if (amneziaSetupViaJump()) return;
   if (amneziaSetup.busy || !amneziaSetupSameIdentity() || !amneziaSetupAllowed() ||
       !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
   const setup = amneziaSetup.setup;
@@ -2285,6 +2391,7 @@ $("amneziaSetupDialogConfirm").addEventListener("click", () => {
 });
 for (const id of ["amneziaSetupScopeLocal", "amneziaSetupScopeRemote"])
   $(id).addEventListener("change", amneziaSetupReset);
+$("amneziaSetupViaJump").addEventListener("change", () => amneziaSetupRouteChanged(true));
 for (const id of ["amneziaSetupRemoteHost", "amneziaSetupRemotePort"])
   $(id).addEventListener("input", () => {
     amneziaSetup.generation++;

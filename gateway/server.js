@@ -138,7 +138,8 @@ const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interru
   "wg-control-preview", "wg-control-apply", "wg-control-recover",
   "amnezia-provision-preview", "amnezia-provision-apply", "amnezia-provision-recover"]);
 const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE", "BUSY", "INVALID_INPUT", "INVALID_REQUEST_ID",
-  "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH", "NOT_FOUND",
+  "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH",
+  "HOST_KEY_CHANGED", "NOT_FOUND",
   "STALE_REVISION", "RESUME_REQUIRED", "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED",
   "PREPARE_UNCERTAIN", "APPLY_UNCERTAIN", "RESUME_UNCERTAIN", "CLEANUP_UNCERTAIN",
   "ARCHIVE_UNSAFE", "ARCHIVE_FULL",
@@ -357,7 +358,9 @@ export function validateTargetHostKey(value) {
       throw new Error("INVALID_INPUT");
     }
   }
-  return { host: host.toLowerCase(), port: value.port,
+  const canonicalHost = net.isIP(host) === 6 ?
+    new URL(`http://[${host}]/`).hostname.slice(1, -1) : host.toLowerCase();
+  return { host: canonicalHost, port: value.port,
     ...(Object.hasOwn(value, "jump") ? { jump: validateTargetStatus(value.jump) } : {}) };
 }
 
@@ -431,18 +434,34 @@ function exactFields(value, fields) {
     Object.keys(value).length === fields.length && fields.every((key) => Object.hasOwn(value, key));
 }
 
+const VPN_CREDENTIAL_FIELDS = ["host", "port", "username", "method", "fingerprint",
+  "password", "private_key", "passphrase"];
+function validateVpnActionRoute(value, extraFields) {
+  const withJump = Object.hasOwn(value ?? {}, "jump");
+  if (!exactFields(value, [...VPN_CREDENTIAL_FIELDS, ...extraFields,
+        ...(withJump ? ["host_key_blob", "jump"] : [])])) throw new Error("INVALID_INPUT");
+  const target = validateTargetStatus(Object.fromEntries(VPN_CREDENTIAL_FIELDS.map((key) =>
+    [key, value[key]])));
+  if (!withJump) return target;
+  if (!exactFields(value.jump, [...VPN_CREDENTIAL_FIELDS, "host_key_blob"])) {
+    throw new Error("INVALID_INPUT");
+  }
+  const jump = validateTargetStatus(Object.fromEntries(VPN_CREDENTIAL_FIELDS.map((key) =>
+    [key, value.jump[key]])));
+  pinnedHostKeyBlob(value.host_key_blob, target.fingerprint);
+  pinnedHostKeyBlob(value.jump.host_key_blob, jump.fingerprint);
+  return { ...target, host_key_blob: value.host_key_blob,
+    jump: { ...jump, host_key_blob: value.jump.host_key_blob } };
+}
+
 export function validateAgentPayload(action, value) {
   if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
   if (action.startsWith("amnezia-provision-")) {
-    const credentialFields = ["host", "port", "username", "method", "fingerprint",
-      "password", "private_key", "passphrase"];
     const configFields = ["listen_port", "subnet", "route_mode"];
     const fields = action === "amnezia-provision-apply" ?
-      [...credentialFields, ...configFields, "expected_state", "confirm"] :
-      action === "amnezia-provision-recover" ? [...credentialFields, "confirm"] :
-        [...credentialFields, ...configFields];
-    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
-    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+      [...configFields, "expected_state", "confirm"] :
+      action === "amnezia-provision-recover" ? ["confirm"] : configFields;
+    const target = validateVpnActionRoute(value, fields);
     if (action === "amnezia-provision-recover") {
       if (value.confirm !== true) throw new Error("INVALID_INPUT");
       return { ...target, confirm: true };
@@ -459,12 +478,9 @@ export function validateAgentPayload(action, value) {
     return { ...configured, expected_state: value.expected_state, confirm: true };
   }
   if (action.startsWith("wg-control-")) {
-    const credentialFields = ["host", "port", "username", "method", "fingerprint",
-      "password", "private_key", "passphrase"];
-    const fields = action === "wg-control-apply" ? [...credentialFields, "expected", "confirm"] :
-      action === "wg-control-recover" ? [...credentialFields, "confirm"] : credentialFields;
-    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
-    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+    const fields = action === "wg-control-apply" ? ["expected", "confirm"] :
+      action === "wg-control-recover" ? ["confirm"] : [];
+    const target = validateVpnActionRoute(value, fields);
     if (action === "wg-control-preview") return target;
     if (value.confirm !== true) throw new Error("INVALID_INPUT");
     if (action === "wg-control-recover") return { ...target, confirm: true };
@@ -477,11 +493,8 @@ export function validateAgentPayload(action, value) {
       source_revision: value.expected.source_revision }, confirm: true };
   }
   if (action.startsWith("vpn-source-")) {
-    const credentialFields = ["host", "port", "username", "method", "fingerprint",
-      "password", "private_key", "passphrase"];
-    const fields = action === "vpn-source-apply" ? [...credentialFields, "expected"] : credentialFields;
-    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
-    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+    const fields = action === "vpn-source-apply" ? ["expected"] : [];
+    const target = validateVpnActionRoute(value, fields);
     if (action !== "vpn-source-apply") return target;
     const expectedFields = ["source_manifest_sha256", "installed_sha256", "state_sha256", "candidate_sha256"];
     if (!exactFields(value.expected, expectedFields) ||
@@ -571,6 +584,21 @@ function safeAgentRecord(value) {
     registration_state: value.registration_state, recoverable: value.recoverable };
 }
 
+const VPN_JUMP_RESULT_FIELDS = ["jump_host", "jump_port", "jump_host_key_fingerprint"];
+function safeVpnJumpPins(value) {
+  const count = VPN_JUMP_RESULT_FIELDS.filter((field) => Object.hasOwn(value, field)).length;
+  if (count === 0) return { fields: [], values: {} };
+  if (count !== VPN_JUMP_RESULT_FIELDS.length ||
+      typeof value.jump_host !== "string" ||
+      !Number.isSafeInteger(value.jump_port) || value.jump_port < 1 || value.jump_port > 65535 ||
+      typeof value.jump_host_key_fingerprint !== "string" ||
+      !FINGERPRINT.test(value.jump_host_key_fingerprint)) throw new Error("INSTALLER_UNAVAILABLE");
+  const endpoint = validateTargetHostKey({ host: value.jump_host, port: value.jump_port });
+  return { fields: VPN_JUMP_RESULT_FIELDS,
+    values: { jump_host: endpoint.host, jump_port: value.jump_port,
+      jump_host_key_fingerprint: value.jump_host_key_fingerprint } };
+}
+
 function safeVpnSourceResult(action, value) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       value.protocol !== 1 || value.scope !== "entered_target" ||
@@ -579,12 +607,15 @@ function safeVpnSourceResult(action, value) {
       typeof value.host_key_fingerprint !== "string" ||
       !FINGERPRINT.test(value.host_key_fingerprint)) throw new Error("INSTALLER_UNAVAILABLE");
   const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
-  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
-  const base = { protocol: 1, scope: "entered_target", host: value.host,
-    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  const route = safeVpnJumpPins(value);
+  const base = { protocol: 1, scope: "entered_target", host: endpoint.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint, ...route.values };
+  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint", ...route.fields];
   if (action === "vpn-source-preview") {
     const hashes = ["source_manifest_sha256", "candidate_sha256", "installed_sha256", "state_sha256"];
-    if (hashes.some((key) => typeof value[key] !== "string" || !HEX_SHA.test(value[key])) ||
+    if (!exactFields(value, [...baseFields, ...hashes, "expected", "change",
+          "temporary_writes", "activation_writes", "cleanup_required"]) ||
+        hashes.some((key) => typeof value[key] !== "string" || !HEX_SHA.test(value[key])) ||
         !exactFields(value.expected, hashes) ||
         hashes.some((key) => value.expected[key] !== value[key]) ||
         !["install", "update", "current"].includes(value.change) ||
@@ -596,7 +627,9 @@ function safeVpnSourceResult(action, value) {
       cleanup_required: value.cleanup_required };
   }
   if (action === "vpn-source-apply") {
-    if (value.installed !== true || typeof value.changed !== "boolean" ||
+    if (!exactFields(value, [...baseFields, "installed", "changed", "cleanup_required",
+          "source_manifest_sha256", "candidate_sha256"]) ||
+        value.installed !== true || typeof value.changed !== "boolean" ||
         typeof value.cleanup_required !== "boolean" ||
         typeof value.source_manifest_sha256 !== "string" || !HEX_SHA.test(value.source_manifest_sha256) ||
         typeof value.candidate_sha256 !== "string" || !HEX_SHA.test(value.candidate_sha256)) {
@@ -607,12 +640,12 @@ function safeVpnSourceResult(action, value) {
       source_manifest_sha256: value.source_manifest_sha256,
       candidate_sha256: value.candidate_sha256 };
   }
-  if (value.recovered !== true && value.recovered !== false) throw new Error("INSTALLER_UNAVAILABLE");
+  if (!exactFields(value, [...baseFields, "recovered"]) ||
+      value.recovered !== true && value.recovered !== false) throw new Error("INSTALLER_UNAVAILABLE");
   return { ...base, recovered: value.recovered };
 }
 
 function safeWgControlResult(action, value) {
-  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint"];
   if (!value || typeof value !== "object" || Array.isArray(value) || value.protocol !== 1 ||
       value.scope !== "entered_target" || typeof value.host !== "string" ||
       !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535 ||
@@ -620,9 +653,10 @@ function safeWgControlResult(action, value) {
     throw new Error("INSTALLER_UNAVAILABLE");
   }
   const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
-  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
-  const base = { protocol: 1, scope: "entered_target", host: value.host,
-    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  const route = safeVpnJumpPins(value);
+  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint", ...route.fields];
+  const base = { protocol: 1, scope: "entered_target", host: endpoint.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint, ...route.values };
   if (action === "wg-control-preview") {
     const fullFields = ["schema_version", "action", "writes", "state_revision", "source_revision",
       "installed_current", "socket_active", "service_active", "socket_enabled", "pending_recovery",
@@ -675,7 +709,6 @@ function safeWgControlResult(action, value) {
 }
 
 function safeAmneziaProvisionResult(action, value) {
-  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint"];
   if (!value || typeof value !== "object" || Array.isArray(value) || value.protocol !== 1 ||
       value.scope !== "entered_target" || typeof value.host !== "string" ||
       !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535 ||
@@ -683,9 +716,10 @@ function safeAmneziaProvisionResult(action, value) {
     throw new Error("INSTALLER_UNAVAILABLE");
   }
   const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
-  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
-  const base = { protocol: 1, scope: "entered_target", host: value.host,
-    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  const route = safeVpnJumpPins(value);
+  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint", ...route.fields];
+  const base = { protocol: 1, scope: "entered_target", host: endpoint.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint, ...route.values };
   const common = [...baseFields, "schema_version", "action"];
   if (value.schema_version !== 1) throw new Error("INSTALLER_UNAVAILABLE");
   if (action === "amnezia-provision-preview") {
@@ -848,7 +882,11 @@ export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
           if ((action.startsWith("vpn-source-") || action.startsWith("wg-control-") ||
                action.startsWith("amnezia-provision-")) &&
               (result.host !== payload.host || result.port !== payload.port ||
-               result.host_key_fingerprint !== payload.fingerprint)) {
+               result.host_key_fingerprint !== payload.fingerprint ||
+               (payload.jump ?
+                 result.jump_host !== payload.jump.host || result.jump_port !== payload.jump.port ||
+                   result.jump_host_key_fingerprint !== payload.jump.fingerprint :
+                 VPN_JUMP_RESULT_FIELDS.some((field) => Object.hasOwn(result, field))))) {
             throw new Error("INSTALLER_UNAVAILABLE");
           }
           if ((action === "amnezia-provision-preview" && result.state_revision !== undefined) ||
@@ -2193,7 +2231,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     try {
       if (isAdminRoute) await admin(req.headers.authorization);
       const value = await body(req, (isTargetStatus || isInstallPreview ||
-        ["prepare", "resume"].includes(agentAction) || directAction === "open") ?
+        ["prepare", "resume"].includes(agentAction) || vpnSourceAction ||
+        wgControlAction || provisionAction || directAction === "open") ?
         MAX_JUMP_BODY : MAX_BODY);
       clearTimeout(bodyTimer);
       try {

@@ -1567,11 +1567,69 @@ test("VPN source setup accepts only pinned SSH credentials and the exact reviewe
     scope: "entered_target", host: "remote.example", port: 22022,
     host_key_fingerprint: FINGERPRINT, ...hashes, expected: hashes,
     change: "install", temporary_writes: true, activation_writes: false,
-    cleanup_required: false, private_key: "must-not-leak" });
+    cleanup_required: false });
   assert.equal(preview.private_key, undefined);
+  assert.throws(() => safeAgentResult("vpn-source-preview", {
+    ...preview, private_key: "must-not-leak" }), /INSTALLER_UNAVAILABLE/);
   assert.deepEqual(preview.expected, hashes);
   assert.throws(() => safeAgentResult("vpn-source-preview", { ...preview,
     expected: { ...hashes, state_sha256: "c".repeat(64) } }), /INSTALLER_UNAVAILABLE/);
+});
+
+test("VPN source, WireGuard and AmneziaWG bind one reviewed ProxyJump to each action", () => {
+  const jump = { ...statusInput({ host: "relay.example", port: 22, username: "operator" }),
+    host_key_blob: KEY.toString("base64") };
+  const route = { ...statusInput({ host: "remote.example" }),
+    host_key_blob: KEY.toString("base64"), jump };
+  const responsePins = { protocol: 1, scope: "entered_target", host: "remote.example",
+    port: 22022, host_key_fingerprint: FINGERPRINT, jump_host: "relay.example",
+    jump_port: 22, jump_host_key_fingerprint: FINGERPRINT };
+  const actions = [
+    ["vpn-source-recover", route,
+      { ...responsePins, recovered: true }],
+    ["wg-control-recover", { ...route, confirm: true },
+      { ...responsePins, action: "recovered", changed: true }],
+    ["amnezia-provision-recover", { ...route, confirm: true },
+      { ...responsePins, schema_version: 1, action: "recovered", changed: false, installed: false }],
+  ];
+  for (const [action, payload, reply] of actions) {
+    const validated = validateAgentPayload(action, payload);
+    assert.equal(validated.jump.host, "relay.example");
+    assert.equal(validated.host_key_blob, route.host_key_blob);
+    const safe = safeAgentResult(action, reply);
+    assert.equal(safe.jump_host_key_fingerprint, FINGERPRINT);
+    assert.throws(() => safeAgentResult(action, { ...reply, jump_port: 65536 }),
+      /INSTALLER_UNAVAILABLE|INVALID_INPUT/);
+    assert.throws(() => safeAgentResult(action, { ...reply,
+      jump_host_key_fingerprint: undefined }), /INSTALLER_UNAVAILABLE/);
+    assert.throws(() => safeAgentResult(action, { ...reply, private_key: "leak" }),
+      /INSTALLER_UNAVAILABLE/);
+    assert.throws(() => validateAgentPayload(action, { ...payload,
+      jump: { ...jump, command: "id" } }), /INVALID_INPUT/);
+    assert.throws(() => validateAgentPayload(action, { ...payload,
+      jump: { ...jump, fingerprint: "SHA256:" + "A".repeat(43) } }),
+      /HOST_KEY_CHANGED/);
+    assert.throws(() => validateAgentPayload(action, { ...payload,
+      host_key_blob: "not-base64" }), /INVALID_INPUT/);
+  }
+});
+
+test("VPN ProxyJump canonicalizes expanded IPv6 at request and response boundaries", () => {
+  const expanded = "2001:0db8:0000:0000:0000:0000:0000:0001";
+  const compact = "2001:db8::1";
+  const jump = { ...statusInput({ host: expanded, port: 22 }),
+    host_key_blob: KEY.toString("base64") };
+  const payload = { ...statusInput({ host: expanded }),
+    host_key_blob: KEY.toString("base64"), jump };
+  const selected = validateAgentPayload("vpn-source-recover", payload);
+  assert.equal(selected.host, compact);
+  assert.equal(selected.jump.host, compact);
+  const reply = safeAgentResult("vpn-source-recover", { protocol: 1,
+    scope: "entered_target", host: expanded, port: 22022,
+    host_key_fingerprint: FINGERPRINT, jump_host: expanded, jump_port: 22,
+    jump_host_key_fingerprint: FINGERPRINT, recovered: true });
+  assert.equal(reply.host, compact);
+  assert.equal(reply.jump_host, compact);
 });
 
 test("VPN source route enforces admin, origin and credential clearing", async () => {

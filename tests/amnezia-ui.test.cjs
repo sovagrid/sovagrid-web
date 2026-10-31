@@ -690,8 +690,8 @@ test('Amnezia profile selects a free IPv4 automatically unless manual mode is ch
 
 test('container image includes Amnezia script and service worker caches its version', () => {
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /COPY index\.html app\.js .*amnezia\.js/);
-  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=15/);
-  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=15/);
+  assert.match(fs.readFileSync('index.html', 'utf8'), /amnezia\.js\?v=16/);
+  assert.match(fs.readFileSync('sw.js', 'utf8'), /amnezia\.js\?v=16/);
 });
 
 test('WireGuard container selection binds status, action, and profile AAD to target', async () => {
