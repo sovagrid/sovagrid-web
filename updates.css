@@ -1,0 +1,24 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.release-feed-panel { margin-top: 18px; }
+.release-feed-panel #releaseFeedSummary,
+.release-feed-panel #releaseFeedNotice { display: block; margin: 12px 0; line-height: 1.55; }
+.release-feed-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 10px; margin: 16px 0; }
+.release-feed-facts>div { padding: 11px 12px; border: 1px solid var(--sg-border, #385047); border-radius: 10px; background: var(--sg-surface-soft, #13252a); min-width: 0; }
+.release-feed-facts dt { color: var(--sg-muted, #92a8ae); font-size: .7rem; margin-bottom: 5px; }
+.release-feed-facts dd { margin: 0; font-size: .82rem; overflow-wrap: anywhere; }
+.release-feed-technical { margin: 12px 0; }
+.release-feed-technical p { overflow-wrap: anywhere; line-height: 1.5; }
+.release-feed-technical code { word-break: break-all; }
+.release-feed-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
+.release-feed-actions button { min-height: 44px; margin-top: 0; }
+.release-feed-review { margin-top: 16px; padding: 15px; border: 1px solid var(--sg-border, #385047); border-radius: 10px; background: var(--sg-surface-soft, #13252a); }
+.release-feed-review[hidden] { display: none; }
+.release-feed-review p { line-height: 1.55; margin: 9px 0; }
+.release-feed-review label { display: flex; gap: 9px; align-items: flex-start; line-height: 1.5; }
+.release-feed-review label input { margin-top: 4px; accent-color: var(--sg-accent, #78e4b0); }
+@media (max-width: 600px) {
+  .release-feed-actions { display: grid; grid-template-columns: 1fr; }
+  .release-feed-actions button { width: 100%; }
+}

@@ -24,17 +24,19 @@
   <link rel="stylesheet" href="users.css?v=2">
   <link rel="stylesheet" href="backups.css?v=2">
   <link rel="stylesheet" href="host-backups.css?v=1">
+  <link rel="stylesheet" href="updates.css?v=1">
   <link rel="stylesheet" href="public-web.css?v=2">
   <link rel="stylesheet" href="vpn-jump.css?v=1">
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="ssh-keygen.js?v=1" defer></script>
-  <script src="app.js?v=51" defer></script>
+  <script src="app.js?v=52" defer></script>
   <script src="browser-ssh.js?v=4" defer></script>
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
   <script src="backups-restore.js?v=1" defer></script>
   <script src="host-backups.js?v=1" defer></script>
+  <script src="updates.js?v=1" defer></script>
   <script src="access.js?v=1" defer></script>
   <script src="checks.js?v=5" defer></script>
   <link rel="stylesheet" href="checks.css?v=3">
@@ -790,6 +792,17 @@
           <p id="usersError" class="form-error" role="alert" hidden></p>
           <p id="usersMessage" class="monitoring-message" role="status" hidden></p>
           <div id="usersList" class="users-list" aria-live="polite"></div>
+        </section>
+        <section id="releaseFeedPanel" class="panel settings-panel release-feed-panel" aria-labelledby="releaseFeedHeading" data-global-admin-only>
+          <div class="panel-heading"><div><p class="eyebrow">ОБНОВЛЕНИЯ</p><h2 id="releaseFeedHeading">Обновления этого сервера</h2></div><span id="releaseFeedBadge" class="status-badge waiting" role="status">Проверяем</span></div>
+          <p class="panel-intro">SovaGrid может проверять подписанные выпуски для полного сервера, когда опубликована совместимая лента. Включение сначала проверит подпись и совместимость выпуска. Отдельный Agent и режим «только Hub» пока обновляются вручную.</p>
+          <p id="releaseFeedSummary" class="field-help" role="status" aria-live="polite">Загружаем состояние подписки.</p>
+          <dl class="release-feed-facts"><div><dt>Последний выпуск из ленты</dt><dd id="releaseFeedVersion">—</dd></div><div><dt>Ключ подписи</dt><dd id="releaseFeedKey">—</dd></div><div><dt>Последняя проверка</dt><dd id="releaseFeedLastSeen">—</dd></div></dl>
+          <details class="release-feed-technical"><summary>Проверенные отпечатки</summary><p>Манифест установленного пакета: <code id="releaseFeedManifest">—</code></p><p>Отпечаток ключа подписи: <code id="releaseFeedFingerprint">—</code></p></details>
+          <p id="releaseFeedNotice" class="field-help" role="status"></p>
+          <div class="release-feed-actions"><button id="releaseFeedReload" class="secondary-button" type="button">Обновить состояние</button><button id="releaseFeedEnable" class="primary-button" type="button" disabled>Включить проверку…</button><button id="releaseFeedDisable" class="secondary-button" type="button" disabled>Отключить…</button></div>
+          <div id="releaseFeedReview" class="release-feed-review" hidden><strong id="releaseFeedReviewTitle"></strong><p id="releaseFeedReviewText"></p><label><input id="releaseFeedConfirm" type="checkbox"> Я понимаю, что изменится на этом сервере</label><div class="release-feed-actions"><button id="releaseFeedApply" class="primary-button" type="button" disabled>Подтвердить</button><button id="releaseFeedCancel" class="secondary-button" type="button">Отмена</button></div></div>
+          <p id="releaseFeedError" class="form-error" role="alert" hidden></p>
         </section>
         <section class="panel settings-panel backups-panel" aria-labelledby="backupsHeading" data-global-admin-only>
           <div class="panel-heading"><div><p class="eyebrow">СОХРАННОСТЬ ДАННЫХ</p><h2 id="backupsHeading">Резервные копии Hub</h2></div><span id="backupsCount" class="count-pill">—</span></div>
