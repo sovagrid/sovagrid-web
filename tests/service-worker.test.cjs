@@ -42,6 +42,8 @@ test('service worker precaches only scoped public assets and preserves other pat
     assert.ok(fs.statSync(path || 'index.html').isFile());
   }
   assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/install.js?v=3')));
+  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-backups.js?v=2')));
+  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-backups.css?v=2')));
   assert.ok(w.added.some((request) => request.url.endsWith('/icons/maskable-512.png')));
 });
 
@@ -56,7 +58,7 @@ test('HTML fallback for a missing script aborts installation without caching the
   };
   await assert.rejects(w.event('install'), /Incomplete SovaGrid app shell/);
   assert.equal(w.added.length, 0);
-  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v86']);
+  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v87']);
 });
 
 test('HTML fallback for a script never replaces the cached JavaScript on refresh', async () => {
@@ -73,6 +75,7 @@ test('API, credentials, unknown URL parameters and private downloads never enter
     ['POST', '/api/v1/session'], ['GET', '/sovagrid/monitoring/?token=private-canary'],
     ['GET', '/sovagrid/monitoring/index.html?password=private-canary'],
     ['GET', '/sovagrid/monitoring/profile.conf'],
+    ['GET', '/api/v1/host-backups/operations/' + 'a'.repeat(32) + '/portable/download/images'],
     ['GET', '/sovagrid/monitoring/', { Authorization: 'Bearer private-canary' }]]) {
     assert.equal(await w.event('fetch', new Request('https://panel.example' + path, { method, headers })), undefined);
   }

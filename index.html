@@ -23,7 +23,7 @@
   <link rel="stylesheet" href="theme.css?v=6">
   <link rel="stylesheet" href="users.css?v=2">
   <link rel="stylesheet" href="backups.css?v=2">
-  <link rel="stylesheet" href="host-backups.css?v=1">
+  <link rel="stylesheet" href="host-backups.css?v=2">
   <link rel="stylesheet" href="updates.css?v=1">
   <link rel="stylesheet" href="external-agent-update.css?v=1">
   <link rel="stylesheet" href="public-web.css?v=2">
@@ -38,7 +38,7 @@
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
   <script src="backups-restore.js?v=1" defer></script>
-  <script src="host-backups.js?v=1" defer></script>
+  <script src="host-backups.js?v=2" defer></script>
   <script src="updates.js?v=1" defer></script>
   <script src="external-agent-update.js?v=1" defer></script>
   <script src="access.js?v=1" defer></script>
@@ -839,12 +839,14 @@
         </section>
         <section class="panel settings-panel host-backups-panel" aria-labelledby="hostBackupHeading" data-global-admin-only>
           <div class="panel-heading"><div><p class="eyebrow">СОХРАННОСТЬ УЗЛА</p><h2 id="hostBackupHeading">Копии всего сервера</h2></div><span id="hostBackupCount" class="count-pill">—</span></div>
-          <p class="panel-intro">Создайте закрытый архив настроек и данных SovaGrid на сервере, где открыт этот Hub. Во время снимка службы и панель временно остановятся. После возвращения связи откройте сохранённый запрос; сами файлы и ключи в браузер не передаются.</p>
+          <p class="panel-intro">Создайте архив настроек и данных SovaGrid на сервере, где открыт этот Hub. Во время снимка службы и панель временно остановятся. Для переноса на другой хост создайте копию с точными образами контейнеров; после проверки скачайте архив, образы и квитанцию. Файлы содержат секреты сервера.</p>
           <p id="hostBackupPlan" class="field-help">Проверяем план хоста.</p>
-          <div class="backups-actions"><button id="hostBackupReload" class="secondary-button" type="button">Обновить</button><button id="hostBackupCreate" class="primary-button" type="button" disabled>Создать копию хоста…</button></div>
+          <div class="backups-actions"><button id="hostBackupReload" class="secondary-button" type="button">Обновить</button><button id="hostBackupCreate" class="primary-button" type="button" disabled>Создать копию хоста…</button><button id="hostBackupPortableCreate" class="secondary-button" type="button" disabled>Создать переносимую копию…</button></div>
+          <p id="hostBackupPortableSupport" class="field-help">Проверяем поддержку переносимых копий.</p>
           <p id="hostBackupStatus" class="field-help" role="status" aria-live="polite">Проверяем доступ к копиям хоста.</p>
           <p id="hostBackupError" class="form-error" role="alert" hidden></p>
           <div id="hostBackupActive" class="backups-restore-active" hidden></div>
+          <div id="hostBackupPortableFiles" class="host-portable-downloads" hidden></div>
           <div class="backups-restore-heading"><div><p class="eyebrow">АРХИВЫ</p><h3>Копии хоста</h3></div></div>
           <div id="hostBackupArchives" class="backups-list" aria-live="polite"></div>
           <div class="backups-restore-heading"><div><p class="eyebrow">ЖУРНАЛ</p><h3>Операции копирования</h3></div></div>

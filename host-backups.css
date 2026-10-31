@@ -8,7 +8,16 @@
 .host-backups-panel .backups-restore-active .backup-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .host-backups-panel .backups-restore-active .backup-card-actions button { min-height: 40px; }
 #hostBackupCreateSummary, #hostBackupRecoverSummary { white-space: pre-line; overflow-wrap: anywhere; }
+.host-portable-downloads { margin: 14px 0 18px; padding: 14px; border: 1px solid var(--line, #64748b); border-radius: 12px; }
+.host-portable-downloads p { margin: 0 0 10px; line-height: 1.5; }
+.host-portable-downloads a { overflow-wrap: anywhere; }
+.host-portable-files { display: grid; gap: 10px; }
+.host-portable-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.host-portable-file span { font-weight: 600; }
+.host-portable-file .secondary-button { min-height: 40px; text-align: center; }
 @media (max-width: 760px) {
   .host-backups-panel .backups-restore-active .backup-card-actions { flex-direction: column; }
   .host-backups-panel .backups-restore-active .backup-card-actions button { width: 100%; }
+  .host-portable-file { align-items: stretch; flex-direction: column; }
+  .host-portable-file .secondary-button { width: 100%; }
 }

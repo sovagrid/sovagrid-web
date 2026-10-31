@@ -17,11 +17,16 @@ const HOST_BACKUP_PHASES = Object.freeze({
   recovery_required: "Нужно восстановить службы",
 });
 const HOST_BACKUP_FINAL = new Set(["complete", "recovered", "failed"]);
+const HOST_PORTABLE_RECEIPT = "sovagrid-portable-host-receipt-v1";
+const HOST_PORTABLE_PARTS = Object.freeze({
+  archive: "Архив хоста", images: "Образы контейнеров", receipt: "Квитанция",
+});
 const hostBackupClient = {
   generation: 0, loading: false, checking: null, starting: false, recovering: false,
   plan: null, manifest: null, archives: [], operations: [], activeId: null,
   active: null, pending: null, pendingRecover: null, lastRefresh: 0,
-  ready: false, uncertain: false,
+  ready: false, uncertain: false, portableAvailable: false, activePortable: false,
+  portableReceipt: null, portableVerified: null, portableGrant: null,
 };
 
 function hostBackupCurrent(generation, token, base) {
@@ -31,19 +36,29 @@ function hostBackupCurrent(generation, token, base) {
 
 function hostBackupMarkerKey() { return HOST_BACKUP_MARKER + state.base; }
 
-function hostBackupReadMarker() {
+function hostBackupReadMarkerRecord() {
   try {
     const value = JSON.parse(localStorage.getItem(hostBackupMarkerKey()) || "null");
-    return value && Object.keys(value).length === 2 && value.base === state.base &&
-      HOST_BACKUP_ID.test(value.request_id) ? value.request_id : null;
+    const keys = value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value).sort().join(",") : "";
+    if (keys !== "base,request_id" && keys !== "base,mode,request_id") return null;
+    if (value.base !== state.base || !HOST_BACKUP_ID.test(value.request_id) ||
+        (value.mode !== undefined && value.mode !== "portable")) return null;
+    return { requestId: value.request_id, mode: value.mode || "ordinary" };
   } catch { return null; }
 }
 
-function hostBackupSaveMarker(requestId) {
+function hostBackupReadMarker() { return hostBackupReadMarkerRecord()?.requestId || null; }
+
+function hostBackupSaveMarker(requestId, mode = "ordinary") {
+  if (!HOST_BACKUP_ID.test(requestId) || !["ordinary", "portable"].includes(mode)) return false;
   try {
     localStorage.setItem(hostBackupMarkerKey(),
-      JSON.stringify({ base: state.base, request_id: requestId }));
-    return hostBackupReadMarker() === requestId;
+      JSON.stringify(mode === "portable" ?
+        { base: state.base, request_id: requestId, mode } :
+        { base: state.base, request_id: requestId }));
+    const saved = hostBackupReadMarkerRecord();
+    return saved?.requestId === requestId && saved.mode === mode;
   } catch { return false; }
 }
 
@@ -89,6 +104,56 @@ function hostBackupOperation(value, expectedId = null) {
   return value;
 }
 
+function hostBackupPortableReceipt(value, archiveId) {
+  const fields = ["protocol", "host_archive_id", "host_archive_sha256",
+    "source_manifest_sha256", "images_sha256", "images", "container_ids",
+    "exported_configs", "rootfs_sha256", "active_units", "unit_hashes"];
+  const imageId = /^sha256:[0-9a-f]{64}$/;
+  const matchingMap = (items, names, digest) => items && typeof items === "object" &&
+    !Array.isArray(items) && Object.keys(items).length === names.length &&
+    names.every((name) => Object.hasOwn(items, name) &&
+      typeof items[name] === "string" && digest.test(items[name]));
+  const imageNames = value?.images && typeof value.images === "object" &&
+    !Array.isArray(value.images) ? Object.keys(value.images) : [];
+  const units = Array.isArray(value?.active_units) ? value.active_units : [];
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== fields.length ||
+      fields.some((field) => !Object.hasOwn(value, field)) ||
+      value.protocol !== HOST_PORTABLE_RECEIPT || value.host_archive_id !== archiveId ||
+      !HOST_BACKUP_SHA.test(value.host_archive_sha256) ||
+      !HOST_BACKUP_SHA.test(value.source_manifest_sha256) ||
+      !HOST_BACKUP_SHA.test(value.images_sha256) ||
+      !value.images || typeof value.images !== "object" || Array.isArray(value.images) ||
+      ![2, 3].includes(Object.keys(value.images).length) ||
+      !Object.hasOwn(value.images, "hub") || !Object.hasOwn(value.images, "web") ||
+      Object.keys(value.images).some((name) => !["hub", "web", "ssh-gateway"].includes(name) ||
+        typeof value.images[name] !== "string" ||
+        !imageId.test(value.images[name])) ||
+      !matchingMap(value.container_ids, imageNames, HOST_BACKUP_SHA) ||
+      !matchingMap(value.rootfs_sha256, imageNames, HOST_BACKUP_SHA) ||
+      !matchingMap(value.exported_configs, imageNames, imageId) ||
+      !Array.isArray(value.active_units) || units.length > 32 ||
+      new Set(units).size !== units.length ||
+      units.some((unit) => typeof unit !== "string" ||
+        !/^sovagrid-[a-z0-9_.@-]{1,80}\.(?:service|socket|timer)$/.test(unit)) ||
+      !matchingMap(value.unit_hashes, units, HOST_BACKUP_SHA))
+    throw new Error("Hub вернул неверную квитанцию переносимой копии.");
+  return value;
+}
+
+function hostBackupPortableOperation(value, expectedId = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).length !== 8 || !Object.hasOwn(value, "image_receipt"))
+    throw new Error("Hub вернул неверное состояние переносимой копии.");
+  const { image_receipt: receipt, ...ordinary } = value;
+  const operation = hostBackupOperation(ordinary, expectedId);
+  if ((operation.phase === "complete") !== (receipt !== null) ||
+      (receipt !== null && (!operation.archive ||
+        !hostBackupPortableReceipt(receipt, operation.archive.id))))
+    throw new Error("Hub вернул несогласованное состояние переносимой копии.");
+  return { operation, receipt };
+}
+
 function hostBackupPlan(value) {
   const plan = value?.plan;
   if (!plan || typeof plan !== "object" || Array.isArray(plan) ||
@@ -105,10 +170,24 @@ function hostBackupPlan(value) {
   return { plan, manifest: value.manifest_sha256 };
 }
 
-function hostBackupSetActive(record) {
-  hostBackupClient.activeId = record.request_id;
-  hostBackupClient.active = record;
-  hostBackupClient.uncertain = false;
+function hostBackupSetActive(record, portable = false, receipt = null) {
+  const client = hostBackupClient;
+  const same = client.activeId === record.request_id && client.activePortable === portable &&
+    client.active?.phase === record.phase &&
+    client.active?.archive?.id === record.archive?.id &&
+    (!portable || !receipt || (client.portableReceipt &&
+      client.portableReceipt.host_archive_sha256 === receipt.host_archive_sha256 &&
+      client.portableReceipt.images_sha256 === receipt.images_sha256 &&
+      client.portableReceipt.source_manifest_sha256 === receipt.source_manifest_sha256));
+  if (!same) {
+    client.portableVerified = null;
+    client.portableGrant = null;
+  }
+  client.activeId = record.request_id;
+  client.active = record;
+  client.activePortable = portable;
+  client.portableReceipt = portable ? receipt || (same ? client.portableReceipt : null) : null;
+  client.uncertain = false;
   if (HOST_BACKUP_FINAL.has(record.phase)) hostBackupClearMarker(record.request_id);
 }
 
@@ -120,11 +199,24 @@ function hostBackupCanStart() {
     !client.operations.some((item) => !HOST_BACKUP_FINAL.has(item.phase));
 }
 
+function hostBackupSameOrigin() {
+  try { return new URL(state.base).origin === location.origin; }
+  catch { return false; }
+}
+
+function hostBackupPortableCanStart() {
+  return hostBackupCanStart() && hostBackupClient.portableAvailable;
+}
+
 function hostBackupRender() {
   const client = hostBackupClient;
   const ready = hubCanGlobalAdmin() && Boolean(state.token);
   $("hostBackupReload").disabled = !ready || client.loading || client.starting || client.recovering;
   $("hostBackupCreate").disabled = !hostBackupCanStart();
+  $("hostBackupPortableCreate").disabled = !hostBackupPortableCanStart();
+  $("hostBackupPortableSupport").textContent = client.portableAvailable
+    ? "Переносимая копия включает архив хоста, точные образы контейнеров и квитанцию. После проверки их можно скачать по отдельности."
+    : "Переносимые копии появятся после установки совместимого серверного выпуска.";
   $("hostBackupCount").textContent = client.ready ? String(client.archives.length) : "—";
   $("hostBackupPlan").textContent = client.plan
     ? `${client.plan.layout === "full" ? "Полный узел" : "Только Hub"} · ${client.plan.active_units.length} служб · ${client.plan.running_containers.length} контейнера(ов). При создании архивируются настройки и данные этого узла.`
@@ -145,8 +237,18 @@ function hostBackupRender() {
     const check = document.createElement("button"); check.type = "button";
     check.className = "secondary-button"; check.textContent = "Проверить состояние";
     check.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
-    check.addEventListener("click", () => { void hostBackupCheck(client.activeId); });
+    check.addEventListener("click", () => { void (client.activePortable
+      ? hostBackupPortableCheck(client.activeId) : hostBackupCheck(client.activeId)); });
     actions.append(check);
+    if (client.activePortable && client.active?.phase === "complete" && client.portableReceipt) {
+      const verify = document.createElement("button"); verify.type = "button";
+      verify.className = "secondary-button";
+      verify.textContent = client.checking === client.activeId ? "Проверяем…" :
+        "Проверить архив и образы";
+      verify.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
+      verify.addEventListener("click", () => { void hostBackupPortableVerify(client.activeId); });
+      actions.append(verify);
+    }
     if (client.active && !HOST_BACKUP_FINAL.has(client.active.phase)) {
       const recover = document.createElement("button"); recover.type = "button";
       recover.className = "secondary-button"; recover.textContent = "Восстановить службы…";
@@ -155,6 +257,62 @@ function hostBackupRender() {
       actions.append(recover);
     }
     active.append(title, info, actions);
+  }
+  const portableFiles = $("hostBackupPortableFiles"); portableFiles.replaceChildren();
+  portableFiles.hidden = !(client.portableVerified && client.activePortable &&
+    client.activeId === client.portableVerified.requestId);
+  if (!portableFiles.hidden) {
+    const result = client.portableVerified;
+    const summary = document.createElement("p");
+    summary.textContent = `Пара проверена: архив ${bytes(result.archive.bytes)}, образы ${bytes(result.imagesBytes)}. Сохраните все три файла вместе; в них есть секреты сервера.`;
+    portableFiles.append(summary);
+    if (!hostBackupSameOrigin()) {
+      const notice = document.createElement("p");
+      notice.textContent = "Для скачивания откройте веб-панель самого выбранного Hub и войдите там. Файлы не пересылаются через этот сайт.";
+      const link = document.createElement("a");
+      link.textContent = "Открыть панель выбранного Hub";
+      link.href = new URL("/sovagrid/monitoring/", state.base).href;
+      link.target = "_blank"; link.rel = "noopener noreferrer";
+      portableFiles.append(notice, link);
+    } else {
+      const list = document.createElement("div"); list.className = "host-portable-files";
+      for (const [part, label] of Object.entries(HOST_PORTABLE_PARTS)) {
+        const row = document.createElement("div"); row.className = "host-portable-file";
+        const name = document.createElement("span"); name.textContent = label;
+        const grant = client.portableGrant;
+        if (grant && grant.requestId === result.requestId && grant.part === part &&
+            grant.expiresAt > Date.now() && grant.base === state.base && grant.token === state.token) {
+          const link = document.createElement("a");
+          link.className = "secondary-button";
+          link.textContent = "Скачать";
+          link.href = `${state.base}/api/v1/host-backups/operations/${result.requestId}/portable/download/${part}`;
+          link.download = part === "archive" ? "host.tar.gz" :
+            part === "images" ? "images.tar" : "receipt.json";
+          link.addEventListener("click", () => {
+            client.portableGrant = null;
+            link.setAttribute("aria-disabled", "true");
+            link.style.pointerEvents = "none";
+            setTimeout(() => {
+              if (hostBackupCurrent(client.generation, state.token, state.base))
+                hostBackupRender();
+            }, 1500);
+          });
+          row.append(name, link);
+        } else {
+          const prepare = document.createElement("button"); prepare.type = "button";
+          prepare.className = "secondary-button";
+          prepare.textContent = "Подготовить скачивание";
+          prepare.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
+          prepare.addEventListener("click", () => { void hostBackupPortablePrepareDownload(result.requestId, part); });
+          row.append(name, prepare);
+        }
+        list.append(row);
+      }
+      portableFiles.append(list);
+      const note = document.createElement("p"); note.className = "field-help";
+      note.textContent = "Нажмите «Подготовить скачивание», затем «Скачать» в течение минуты. Браузер сохранит файл напрямую с вашего Hub; SovaGrid не загружает многогигабайтный архив в память страницы.";
+      portableFiles.append(note);
+    }
   }
   const archives = $("hostBackupArchives"); archives.replaceChildren();
   if (client.ready && !client.archives.length) {
@@ -187,7 +345,15 @@ function hostBackupRender() {
     action.className = "secondary-button"; action.textContent = "Состояние";
     action.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
     action.addEventListener("click", () => { void hostBackupCheck(item.request_id); });
-    content.append(title, info); card.append(content, action); operations.append(card);
+    content.append(title, info); card.append(content, action);
+    if (client.portableAvailable && item.phase === "complete") {
+      const portable = document.createElement("button"); portable.type = "button";
+      portable.className = "secondary-button"; portable.textContent = "Проверить переносимую копию";
+      portable.disabled = !ready || Boolean(client.checking) || client.starting || client.recovering;
+      portable.addEventListener("click", () => { void hostBackupPortableCheck(item.request_id); });
+      card.append(portable);
+    }
+    operations.append(card);
   }
 }
 
@@ -196,7 +362,9 @@ function hostBackupsReset() {
   Object.assign(hostBackupClient, { loading: false, checking: null, starting: false,
     recovering: false, plan: null, manifest: null, archives: [], operations: [],
     activeId: null, active: null, pending: null, pendingRecover: null,
-    lastRefresh: 0, ready: false, uncertain: false });
+    lastRefresh: 0, ready: false, uncertain: false, portableAvailable: false,
+    activePortable: false, portableReceipt: null, portableVerified: null,
+    portableGrant: null });
   if ($("hostBackupCreateDialog").open) $("hostBackupCreateDialog").close();
   if ($("hostBackupRecoverDialog").open) $("hostBackupRecoverDialog").close();
   $("hostBackupStatus").textContent = "Откройте настройки, чтобы проверить копии хоста.";
@@ -214,16 +382,20 @@ async function hostBackupsRefresh(force = false) {
   if (!force && Date.now() - client.lastRefresh < interval) return;
   const generation = client.generation, token = state.token, base = state.base;
   client.loading = true; client.lastRefresh = Date.now();
-  const marker = hostBackupReadMarker();
+  const markerRecord = hostBackupReadMarkerRecord();
+  const marker = markerRecord?.requestId || null;
   if (marker && !client.activeId) client.activeId = marker;
   hostBackupRender();
-  const [planResult, archivesResult, operationsResult] = await Promise.allSettled([
+  const [planResult, archivesResult, operationsResult, portableResult] = await Promise.allSettled([
     request("/api/v1/host-backups/plan", { timeoutMs: 20000 }),
     request("/api/v1/host-backups/archives", { timeoutMs: 20000 }),
     request("/api/v1/host-backups/operations", { timeoutMs: 20000 }),
+    request("/api/v1/host-backups/portable/capabilities", { timeoutMs: 20000 }),
   ]);
   if (!hostBackupCurrent(generation, token, base)) return;
   const errors = [];
+  client.portableAvailable = portableResult.status === "fulfilled" &&
+    portableResult.value?.supported === true && portableResult.value?.download === true;
   if (planResult.status === "fulfilled") {
     try {
       const parsed = hostBackupPlan(planResult.value);
@@ -254,17 +426,31 @@ async function hostBackupsRefresh(force = false) {
         throw new Error("Повторяющиеся операции.");
       client.operations = parsed;
       const selected = parsed.find((item) => item.request_id === (marker || client.activeId));
-      if (selected) hostBackupSetActive(selected);
+      if (selected) hostBackupSetActive(selected,
+        selected.request_id === marker ? markerRecord?.mode === "portable" :
+          client.activePortable);
     } catch (error) { client.operations = []; errors.push(error.message); }
   } else { client.operations = []; errors.push("История операций недоступна."); }
   client.ready = errors.length === 0;
   client.loading = false;
   if (marker && !client.operations.some((item) => item.request_id === marker)) {
     try {
-      const record = hostBackupOperation(await request(
-        `/api/v1/host-backups/operations/${marker}`, { timeoutMs: 20000 }), marker);
+      const portable = markerRecord?.mode === "portable";
+      const raw = await request(`/api/v1/host-backups/operations/${marker}` +
+        (portable ? "/portable" : ""), { timeoutMs: 20000 });
+      const parsed = portable ? hostBackupPortableOperation(raw, marker) :
+        { operation: hostBackupOperation(raw, marker), receipt: null };
       if (!hostBackupCurrent(generation, token, base)) return;
-      hostBackupSetActive(record);
+      hostBackupSetActive(parsed.operation, portable, parsed.receipt);
+    } catch {
+      if (hostBackupCurrent(generation, token, base)) client.uncertain = true;
+    }
+  } else if (marker && markerRecord?.mode === "portable") {
+    try {
+      const parsed = hostBackupPortableOperation(await request(
+        `/api/v1/host-backups/operations/${marker}/portable`, { timeoutMs: 20000 }), marker);
+      if (!hostBackupCurrent(generation, token, base)) return;
+      hostBackupSetActive(parsed.operation, true, parsed.receipt);
     } catch {
       if (hostBackupCurrent(generation, token, base)) client.uncertain = true;
     }
@@ -326,8 +512,113 @@ async function hostBackupVerify(archiveId) {
   }
 }
 
-async function hostBackupPrepareCreate() {
-  if (!hostBackupCanStart()) return;
+async function hostBackupPortableCheck(requestId) {
+  if (!HOST_BACKUP_ID.test(requestId) || !state.token || !hubCanGlobalAdmin() ||
+      hostBackupClient.checking || hostBackupClient.starting || hostBackupClient.recovering) return;
+  const client = hostBackupClient, generation = client.generation,
+    token = state.token, base = state.base;
+  client.checking = requestId; hostBackupRender();
+  try {
+    const parsed = hostBackupPortableOperation(await request(
+      `/api/v1/host-backups/operations/${requestId}/portable`, { timeoutMs: 30000 }), requestId);
+    if (!hostBackupCurrent(generation, token, base)) return;
+    hostBackupSetActive(parsed.operation, true, parsed.receipt);
+    $("hostBackupStatus").textContent = parsed.operation.phase === "complete"
+      ? "Переносимая копия создана. Проверьте архив и образы перед скачиванием."
+      : `Переносимая копия: ${HOST_BACKUP_PHASES[parsed.operation.phase]}.`;
+    clearError($("hostBackupError"));
+  } catch (error) {
+    if (hostBackupCurrent(generation, token, base))
+      showError($("hostBackupError"), error.status === 404 || error.status === 409
+        ? "Это задание не содержит переносимую копию или больше недоступно."
+        : error.message || "Не удалось проверить переносимую копию.");
+  } finally {
+    if (hostBackupCurrent(generation, token, base)) { client.checking = null; hostBackupRender(); }
+  }
+}
+
+async function hostBackupPortableVerify(requestId) {
+  const client = hostBackupClient;
+  if (!HOST_BACKUP_ID.test(requestId) || client.activeId !== requestId ||
+      !client.activePortable || client.active?.phase !== "complete" ||
+      !client.portableReceipt || !state.token || !hubCanGlobalAdmin() ||
+      client.checking || client.starting || client.recovering) return;
+  const generation = client.generation, token = state.token, base = state.base;
+  client.checking = requestId; client.portableVerified = null; client.portableGrant = null;
+  hostBackupRender();
+  $("hostBackupStatus").textContent = "Проверяем архив и образы на сервере; это может занять несколько минут…";
+  try {
+    const result = await request(
+      `/api/v1/host-backups/operations/${requestId}/portable/verify`,
+      { timeoutMs: 2700000 });
+    if (!hostBackupCurrent(generation, token, base)) return;
+    if (!result || Object.keys(result).sort().join(",") !==
+        "archive,images_bytes,ok,receipt,request_id" || result.ok !== true ||
+        result.request_id !== requestId ||
+        !Number.isSafeInteger(result.images_bytes) || result.images_bytes < 1 ||
+        result.images_bytes > 8 * 1024 ** 3)
+      throw new Error("Hub вернул неверный результат проверки переносимой копии.");
+    const archive = hostBackupArchive(result.archive, client.active.archive.id);
+    const receipt = hostBackupPortableReceipt(result.receipt, archive.id);
+    if (archive.bytes !== client.active.archive.bytes ||
+        receipt.host_archive_sha256 !== client.portableReceipt.host_archive_sha256 ||
+        receipt.images_sha256 !== client.portableReceipt.images_sha256 ||
+        receipt.source_manifest_sha256 !== client.portableReceipt.source_manifest_sha256)
+      throw new Error("Архив и квитанция изменились после проверки состояния.");
+    client.portableVerified = { requestId, archive, imagesBytes: result.images_bytes,
+      receipt, base, token };
+    $("hostBackupStatus").textContent = "Пара проверена. Подготовьте скачивание каждого из трёх файлов.";
+    clearError($("hostBackupError"));
+  } catch (error) {
+    if (hostBackupCurrent(generation, token, base))
+      showError($("hostBackupError"), error.message || "Пару не удалось проверить.");
+  } finally {
+    if (hostBackupCurrent(generation, token, base)) { client.checking = null; hostBackupRender(); }
+  }
+}
+
+async function hostBackupPortablePrepareDownload(requestId, part) {
+  const client = hostBackupClient, verified = client.portableVerified;
+  if (!HOST_BACKUP_ID.test(requestId) || !Object.hasOwn(HOST_PORTABLE_PARTS, part) ||
+      !verified || verified.requestId !== requestId || verified.base !== state.base ||
+      verified.token !== state.token || !hostBackupSameOrigin() ||
+      !hubCanGlobalAdmin() || client.checking || client.starting || client.recovering) return;
+  const generation = client.generation, token = state.token, base = state.base;
+  client.checking = requestId; client.portableGrant = null; hostBackupRender();
+  try {
+    const grant = await request(
+      `/api/v1/host-backups/operations/${requestId}/portable/download-grants/${part}`,
+      { method: "POST", body: "{}", timeoutMs: 120000 });
+    if (!hostBackupCurrent(generation, token, base)) return;
+    if (!grant || Object.keys(grant).sort().join(",") !==
+        "expires_in_seconds,part,request_id" ||
+        grant.request_id !== requestId || grant.part !== part ||
+        !Number.isSafeInteger(grant.expires_in_seconds) ||
+        grant.expires_in_seconds < 1 || grant.expires_in_seconds > 60)
+      throw new Error("Hub не подтвердил одноразовое скачивание.");
+    client.portableGrant = { requestId, part, base, token,
+      expiresAt: Date.now() + grant.expires_in_seconds * 1000 };
+    $("hostBackupStatus").textContent = `Разрешение для «${HOST_PORTABLE_PARTS[part]}» готово на ${grant.expires_in_seconds} секунд. Нажмите «Скачать».`;
+    clearError($("hostBackupError"));
+    const timer = setTimeout(() => {
+      if (client.portableGrant?.requestId === requestId &&
+          client.portableGrant.part === part && client.portableGrant.expiresAt <= Date.now()) {
+        client.portableGrant = null;
+        if (hostBackupCurrent(generation, token, base)) hostBackupRender();
+      }
+    }, grant.expires_in_seconds * 1000 + 50);
+    timer?.unref?.(); // Node UI tests; browsers return a numeric timer ID.
+  } catch (error) {
+    if (hostBackupCurrent(generation, token, base))
+      showError($("hostBackupError"), error.message || "Не удалось подготовить скачивание.");
+  } finally {
+    if (hostBackupCurrent(generation, token, base)) { client.checking = null; hostBackupRender(); }
+  }
+}
+
+async function hostBackupPrepareCreate(mode = "ordinary") {
+  if (mode !== "ordinary" && mode !== "portable") return;
+  if (mode === "portable" ? !hostBackupPortableCanStart() : !hostBackupCanStart()) return;
   const client = hostBackupClient, generation = client.generation,
     token = state.token, base = state.base;
   client.loading = true; hostBackupRender();
@@ -340,10 +631,16 @@ async function hostBackupPrepareCreate() {
     const requestId = crypto.randomUUID().replaceAll("-", "");
     if (!HOST_BACKUP_ID.test(requestId)) throw new Error("Не удалось создать ID запроса.");
     client.pending = { requestId, manifest: fresh.manifest, plan: fresh.plan,
-      generation, token, base };
+      generation, token, base, mode };
+    $("hostBackupCreateHeading").textContent = mode === "portable"
+      ? "Создать переносимую копию?" : "Временно остановить службы?";
+    $("hostBackupCreateConfirm").textContent = mode === "portable"
+      ? "Создать переносимую копию" : "Остановить и создать копию";
     $("hostBackupCreateSummary").textContent =
       `Режим: ${fresh.plan.layout === "full" ? "полный узел" : "только Hub"}\n` +
       `Активных служб: ${fresh.plan.active_units.length}; контейнеров: ${fresh.plan.running_containers.length}.\n` +
+      (mode === "portable" ?
+        "Будет создан архив данных, точные образы контейнеров и квитанция. " : "") +
       `Службы и панель временно остановятся. ID запроса: ${requestId}.`;
     clearError($("hostBackupCreateError"));
     $("hostBackupCreateDialog").showModal();
@@ -360,22 +657,28 @@ async function hostBackupConfirmCreate() {
   if (!pending || !hostBackupCurrent(pending.generation, pending.token, pending.base) ||
       client.starting || client.recovering || hostBackupReadMarker() ||
       client.operations.some((item) => !HOST_BACKUP_FINAL.has(item.phase))) return;
-  if (!hostBackupSaveMarker(pending.requestId)) {
+  if (!hostBackupSaveMarker(pending.requestId, pending.mode)) {
     showError($("hostBackupCreateError"),
       "Браузер не сохранил ID запроса. Разрешите хранение данных для сайта или создайте копию через Connect.");
     return;
   }
   client.pending = null; $("hostBackupCreateDialog").close();
   client.starting = true; client.activeId = pending.requestId; client.active = null;
+  client.activePortable = pending.mode === "portable";
+  client.portableReceipt = null; client.portableVerified = null; client.portableGrant = null;
   client.uncertain = true; hostBackupRender();
-  $("hostBackupStatus").textContent = "Создание копии запущено. Панель временно потеряет связь; ID запроса сохранён.";
+  $("hostBackupStatus").textContent = pending.mode === "portable"
+    ? "Создание переносимой копии запущено. Панель временно потеряет связь; ID сохранён."
+    : "Создание копии запущено. Панель временно потеряет связь; ID запроса сохранён.";
   try {
-    const record = hostBackupOperation(await request("/api/v1/host-backups/operations", {
+    const endpoint = pending.mode === "portable" ?
+      "/api/v1/host-backups/portable/operations" : "/api/v1/host-backups/operations";
+    const record = hostBackupOperation(await request(endpoint, {
       method: "POST", body: JSON.stringify({ request_id: pending.requestId,
         expected_manifest_sha256: pending.manifest }), timeoutMs: 30000,
     }), pending.requestId);
     if (!hostBackupCurrent(pending.generation, pending.token, pending.base)) return;
-    hostBackupSetActive(record);
+    hostBackupSetActive(record, pending.mode === "portable");
   } catch {
     if (hostBackupCurrent(pending.generation, pending.token, pending.base))
       showError($("hostBackupError"), `Ответ на запрос ${pending.requestId} потерян или отклонён. Не запускайте копирование повторно; проверьте сохранённый ID после восстановления связи.`);
@@ -413,7 +716,7 @@ async function hostBackupConfirmRecover() {
       `/api/v1/host-backups/operations/${requestId}/recover`,
       { method: "POST", body: "{}", timeoutMs: 30000 }), requestId);
     if (!hostBackupCurrent(generation, token, base)) return;
-    hostBackupSetActive(record);
+    hostBackupSetActive(record, client.activePortable && client.activeId === requestId);
     $("hostBackupStatus").textContent = `Запрос ${requestId}: ${HOST_BACKUP_PHASES[record.phase]}.`;
   } catch {
     if (hostBackupCurrent(generation, token, base))
@@ -426,7 +729,8 @@ async function hostBackupConfirmRecover() {
 }
 
 $("hostBackupReload").addEventListener("click", () => { void hostBackupsRefresh(true); });
-$("hostBackupCreate").addEventListener("click", () => { void hostBackupPrepareCreate(); });
+$("hostBackupCreate").addEventListener("click", () => { void hostBackupPrepareCreate("ordinary"); });
+$("hostBackupPortableCreate").addEventListener("click", () => { void hostBackupPrepareCreate("portable"); });
 $("hostBackupCreateConfirm").addEventListener("click", () => { void hostBackupConfirmCreate(); });
 $("hostBackupCreateCancel").addEventListener("click", () => $("hostBackupCreateDialog").close());
 $("hostBackupCreateDialog").addEventListener("close", () => { hostBackupClient.pending = null; hostBackupRender(); });

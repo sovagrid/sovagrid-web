@@ -21,6 +21,19 @@ const operation = (id = operationId, phase = 'accepted') => ({
   phase, archive: phase === 'complete' ? archive : null,
   error: null, created_at: timestamp,
 });
+const portableReceipt = { protocol: 'sovagrid-portable-host-receipt-v1',
+  host_archive_id: archiveId, host_archive_sha256: 'd'.repeat(64),
+  source_manifest_sha256: manifest, images_sha256: 'e'.repeat(64),
+  images: { hub: 'sha256:' + '1'.repeat(64), web: 'sha256:' + '2'.repeat(64) },
+  container_ids: { hub: '3'.repeat(64), web: '4'.repeat(64) },
+  exported_configs: { hub: 'sha256:' + '1'.repeat(64), web: 'sha256:' + '2'.repeat(64) },
+  rootfs_sha256: { hub: '5'.repeat(64), web: '6'.repeat(64) },
+  active_units: [], unit_hashes: {} };
+const portableOperation = (id = operationId, phase = 'complete') => ({
+  ...operation(id, phase), image_receipt: phase === 'complete' ? portableReceipt : null,
+});
+const portableVerification = { ok: true, request_id: operationId,
+  archive, images_bytes: 8192, receipt: portableReceipt };
 const reply = (status, value) => ({ ok: status < 400, status,
   text: async () => JSON.stringify(value) });
 
@@ -30,7 +43,8 @@ function harness(localStore = new Map()) {
     if (!elements.has(id)) {
       const listeners = new Map();
       elements.set(id, { textContent: '', hidden: false, disabled: false, open: false,
-        children: [], listeners, className: '',
+        children: [], listeners, className: '', style: {}, attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
         addEventListener(type, fn) { listeners.set(type, fn); },
         append(...items) { this.children.push(...items); },
         replaceChildren(...items) { this.children = items; },
@@ -63,6 +77,10 @@ function harness(localStore = new Map()) {
     setFetchHook: (fn) => { fetchHook = fn; } };
 }
 
+function descendants(node) {
+  return [node, ...node.children.flatMap(descendants)];
+}
+
 function metadata(url) {
   if (url.endsWith('/plan')) return reply(200, plan);
   if (url.endsWith('/archives')) return reply(200, { archives: [archive] });
@@ -88,6 +106,7 @@ test('confirmed host snapshot keeps request ID before the one POST', async () =>
   });
   await h.context.hostBackupsRefresh(true);
   assert.equal(h.element('hostBackupCreate').disabled, false);
+  assert.equal(h.element('hostBackupPortableCreate').disabled, true);
   await h.context.hostBackupPrepareCreate();
   assert.equal(h.element('hostBackupCreateDialog').open, true);
   assert.equal(posts, 0);
@@ -170,4 +189,126 @@ test('recovery is confirmed and uses the stored operation ID once', async () => 
   await h.context.hostBackupConfirmRecover();
   assert.equal(recoveryPosts, 1);
   assert.equal(h.context.hostBackupReadMarker(), operationId);
+});
+
+test('portable create stores its mode before POST and resumes by ID after a lost reply', async () => {
+  const store = new Map(), h = harness(store);
+  let createdId, posts = 0;
+  h.setFetchHook((url, options) => {
+    if (url.endsWith('/portable/capabilities'))
+      return Promise.resolve(reply(200, { supported: true, download: true }));
+    if (url.endsWith('/portable/operations') && options.method === 'POST') {
+      posts++;
+      createdId = JSON.parse(options.body).request_id;
+      assert.equal(JSON.parse(store.get('sovagrid.host-backup-request.v1:https://hub.example')).mode,
+        'portable');
+      return Promise.reject(new TypeError('Hub restarted during the snapshot'));
+    }
+    if (createdId && url.endsWith('/operations/' + createdId + '/portable'))
+      return Promise.reject(new TypeError('Hub still offline'));
+    return Promise.resolve(metadata(url));
+  });
+  await h.context.hostBackupsRefresh(true);
+  assert.equal(h.element('hostBackupPortableCreate').disabled, false);
+  await h.context.hostBackupPrepareCreate('portable');
+  assert.match(h.element('hostBackupCreateSummary').textContent, /образы контейнеров/);
+  await h.context.hostBackupConfirmCreate();
+  await new Promise(setImmediate);
+  assert.equal(posts, 1);
+  assert.equal(h.context.hostBackupReadMarkerRecord()?.mode, 'portable');
+  const resumed = harness(store);
+  resumed.setFetchHook((url) => {
+    if (url.endsWith('/portable/capabilities'))
+      return Promise.resolve(reply(200, { supported: true, download: true }));
+    if (url.endsWith('/operations/' + createdId + '/portable'))
+      return Promise.resolve(reply(200, portableOperation(createdId)));
+    return Promise.resolve(metadata(url));
+  });
+  await resumed.context.hostBackupsRefresh(true);
+  assert.equal(resumed.client.activeId, createdId);
+  assert.equal(resumed.client.activePortable, true);
+  assert.equal(resumed.client.portableReceipt.host_archive_id, archiveId);
+  assert.equal(resumed.context.hostBackupReadMarker(), null);
+});
+
+test('verified portable pair gets one same-origin cookie grant and a native download link', async () => {
+  const h = harness();
+  h.context.location.origin = 'https://hub.example';
+  h.setFetchHook((url, options) => {
+    if (url.endsWith('/portable/capabilities'))
+      return Promise.resolve(reply(200, { supported: true, download: true }));
+    if (url.endsWith('/operations/' + operationId + '/portable/verify'))
+      return Promise.resolve(reply(200, portableVerification));
+    if (url.endsWith('/operations/' + operationId + '/portable'))
+      return Promise.resolve(reply(200, portableOperation()));
+    if (url.endsWith('/operations/' + operationId + '/portable/download-grants/images')) {
+      assert.equal(options.method, 'POST');
+      assert.equal(options.body, '{}');
+      assert.equal(options.headers.Authorization, 'Bearer session-1');
+      return Promise.resolve(reply(200, { request_id: operationId, part: 'images',
+        expires_in_seconds: 60 }));
+    }
+    return Promise.resolve(metadata(url));
+  });
+  await h.context.hostBackupsRefresh(true);
+  await h.context.hostBackupPortableCheck(operationId);
+  await h.context.hostBackupPortableVerify(operationId);
+  assert.equal(h.client.portableVerified.imagesBytes, 8192);
+  await h.context.hostBackupPortablePrepareDownload(operationId, 'images');
+  const links = descendants(h.element('hostBackupPortableFiles')).filter((item) =>
+    typeof item.href === 'string' && item.href.endsWith('/portable/download/images'));
+  assert.equal(links.length, 1);
+  assert.equal(links[0].download, 'images.tar');
+  assert.equal(links[0].href.includes('session-1'), false);
+  assert.equal(h.calls.filter((call) => call.url.endsWith('/portable/download/images')).length, 0);
+  links[0].listeners.get('click')();
+  assert.equal(h.client.portableGrant, null);
+});
+
+test('remote-origin panel does not issue a cookie grant for another Hub', async () => {
+  const h = harness();
+  h.context.location.origin = 'https://panel.example';
+  h.setFetchHook((url) => {
+    if (url.endsWith('/portable/capabilities'))
+      return Promise.resolve(reply(200, { supported: true, download: true }));
+    if (url.endsWith('/operations/' + operationId + '/portable/verify'))
+      return Promise.resolve(reply(200, portableVerification));
+    if (url.endsWith('/operations/' + operationId + '/portable'))
+      return Promise.resolve(reply(200, portableOperation()));
+    return Promise.resolve(metadata(url));
+  });
+  await h.context.hostBackupsRefresh(true);
+  await h.context.hostBackupPortableCheck(operationId);
+  await h.context.hostBackupPortableVerify(operationId);
+  await h.context.hostBackupPortablePrepareDownload(operationId, 'archive');
+  assert.equal(h.calls.some((call) => call.url.includes('/download-grants/')), false);
+  const links = descendants(h.element('hostBackupPortableFiles')).filter((item) =>
+    typeof item.href === 'string');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].href, 'https://hub.example/sovagrid/monitoring/');
+  assert.match(h.element('hostBackupPortableFiles').children[1].textContent,
+    /самого выбранного Hub/);
+});
+
+test('changed receipt refuses browser export before any download grant', async () => {
+  const h = harness();
+  h.context.location.origin = 'https://hub.example';
+  h.setFetchHook((url) => {
+    if (url.endsWith('/portable/capabilities'))
+      return Promise.resolve(reply(200, { supported: true, download: true }));
+    if (url.endsWith('/operations/' + operationId + '/portable/verify'))
+      return Promise.resolve(reply(200, { ...portableVerification,
+        receipt: { ...portableReceipt, images_sha256: 'f'.repeat(64) } }));
+    if (url.endsWith('/operations/' + operationId + '/portable'))
+      return Promise.resolve(reply(200, portableOperation()));
+    return Promise.resolve(metadata(url));
+  });
+  await h.context.hostBackupsRefresh(true);
+  await h.context.hostBackupPortableCheck(operationId);
+  await h.context.hostBackupPortableVerify(operationId);
+  assert.equal(h.client.portableVerified, null);
+  assert.equal(h.element('hostBackupPortableFiles').hidden, true);
+  await h.context.hostBackupPortablePrepareDownload(operationId, 'images');
+  assert.equal(h.calls.some((call) => call.url.includes('/download-grants/')), false);
+  assert.match(h.element('hostBackupError').textContent, /изменились/);
 });

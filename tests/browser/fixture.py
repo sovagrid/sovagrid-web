@@ -6,6 +6,7 @@
 import http.client
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 import tempfile
@@ -61,6 +62,10 @@ def main():
         class Handler(SimpleHTTPRequestHandler):
             APP_PREFIX = '/sovagrid/monitoring/'
             CUSTOM_PREFIX = '/ops/monitoring/'
+            PORTABLE_IMAGE_PATH = '/api/v1/host-backups/operations/' + 'b' * 32 + '/portable/download/images'
+            PORTABLE_IMAGE = b'disposable-image-archive'
+            portable_used_grants = set()
+            portable_grant_lock = threading.Lock()
 
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -91,7 +96,27 @@ def main():
                     connection.close()
 
             def do_GET(self):
-                if self.path.startswith('/api/') or self.path == '/healthz':
+                if self.path == self.PORTABLE_IMAGE_PATH:
+                    # Native browser downloads bypass Playwright request routing.
+                    # Serve a disposable, one-use cookie fixture on the UI origin.
+                    cookie = self.headers.get('Cookie', '')
+                    grant = re.search(r'(?:^|;\s*)sg_portable_smoke=([a-f0-9]{32})(?:;|$)', cookie)
+                    if not grant:
+                        self.send_error(403)
+                        return
+                    with self.portable_grant_lock:
+                        if grant.group(1) in self.portable_used_grants:
+                            self.send_error(403)
+                            return
+                        self.portable_used_grants.add(grant.group(1))
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/octet-stream')
+                    self.send_header('Content-Disposition', 'attachment; filename="images.tar"')
+                    self.send_header('Content-Length', str(len(self.PORTABLE_IMAGE)))
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
+                    self.wfile.write(self.PORTABLE_IMAGE)
+                elif self.path.startswith('/api/') or self.path == '/healthz':
                     self.proxy()
                 elif self.path == '/' and self.headers.get('Host') == 'localhost:8900':
                     # A second loopback origin models the public `untouched`
