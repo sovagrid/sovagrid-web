@@ -20,8 +20,22 @@ const HOST_BACKUP_PHASES = Object.freeze({
 const HOST_BACKUP_FINAL = new Set(["complete", "recovered", "failed"]);
 const HOST_PORTABLE_RECEIPT = "sovagrid-portable-host-receipt-v1";
 const HOST_PORTABLE_PARTS = Object.freeze({
-  archive: "Архив хоста", images: "Образы контейнеров", receipt: "Квитанция",
+  archive: "Архив хоста", host_manifest: "Манифест хоста",
+  images: "Образы контейнеров", images_manifest: "Манифест образов",
+  receipt: "Квитанция",
 });
+function hostBackupPortableFilename(part, archiveId) {
+  if (part === "archive") return `${archiveId}.tar.gz`;
+  if (part === "host_manifest") return `${archiveId}.manifest.json`;
+  if (part === "images") return "images.tar";
+  if (part === "images_manifest") return "manifest.json";
+  return "receipt.json";
+}
+function hostBackupPortableStagePath(part, archiveId) {
+  const name = hostBackupPortableFilename(part, archiveId);
+  return ["images", "images_manifest", "receipt"].includes(part)
+    ? `${archiveId}/${name}` : name;
+}
 const hostBackupClient = {
   generation: 0, loading: false, checking: null, starting: false, recovering: false,
   plan: null, manifest: null, archives: [], operations: [], activeId: null,
@@ -262,7 +276,7 @@ function hostBackupRender() {
   $("hostBackupCreate").disabled = !hostBackupCanStart();
   $("hostBackupPortableCreate").disabled = !hostBackupPortableCanStart();
   $("hostBackupPortableSupport").textContent = client.portableAvailable
-    ? "Переносимая копия включает архив хоста, точные образы контейнеров и квитанцию. После проверки их можно скачать по отдельности."
+    ? "Переносимая копия включает архив хоста, точные образы контейнеров, два манифеста и квитанцию. После проверки скачайте все пять файлов."
     : "Переносимые копии появятся после установки совместимого серверного выпуска.";
   const downloadPending = $("hostBackupDownloadPending");
   downloadPending.replaceChildren();
@@ -332,7 +346,7 @@ function hostBackupRender() {
   if (!portableFiles.hidden) {
     const result = client.portableVerified;
     const summary = document.createElement("p");
-    summary.textContent = `Пара проверена: архив ${bytes(result.archive.bytes)}, образы ${bytes(result.imagesBytes)}. Сохраните все три файла вместе; в них есть секреты сервера.`;
+    summary.textContent = `Пара проверена: архив ${bytes(result.archive.bytes)}, образы ${bytes(result.imagesBytes)}. Скачайте все пять файлов. На целевом сервере положите архив и его манифест рядом, а образы, их манифест и квитанцию — в каталог ${result.archive.id}/. Файлы содержат секреты сервера.`;
     portableFiles.append(summary);
     if (!hostBackupSameOrigin()) {
       const notice = document.createElement("p");
@@ -346,7 +360,8 @@ function hostBackupRender() {
       const list = document.createElement("div"); list.className = "host-portable-files";
       for (const [part, label] of Object.entries(HOST_PORTABLE_PARTS)) {
         const row = document.createElement("div"); row.className = "host-portable-file";
-        const name = document.createElement("span"); name.textContent = label;
+        const name = document.createElement("span");
+        name.textContent = `${label} — ${hostBackupPortableStagePath(part, result.archive.id)}`;
         const grant = client.portableGrant;
         const pendingThis = client.portableDownloadPending?.requestId === result.requestId &&
           client.portableDownloadPending.part === part;
@@ -360,8 +375,7 @@ function hostBackupRender() {
           link.className = "secondary-button";
           link.textContent = "Скачать";
           link.href = `${state.base}/api/v1/host-backups/operations/${result.requestId}/portable/download/${part}`;
-          link.download = part === "archive" ? "host.tar.gz" :
-            part === "images" ? "images.tar" : "receipt.json";
+          link.download = hostBackupPortableFilename(part, result.archive.id);
           link.addEventListener("click", (event) => {
             const pending = hostBackupSaveDownloadMarker(result.requestId, part);
             if (!pending) {
@@ -655,7 +669,7 @@ async function hostBackupPortableVerify(requestId) {
       throw new Error("Архив и квитанция изменились после проверки состояния.");
     client.portableVerified = { requestId, archive, imagesBytes: result.images_bytes,
       receipt, base, token };
-    $("hostBackupStatus").textContent = "Пара проверена. Подготовьте скачивание каждого из трёх файлов.";
+    $("hostBackupStatus").textContent = "Пара проверена. Подготовьте скачивание каждого из пяти файлов.";
     clearError($("hostBackupError"));
   } catch (error) {
     if (hostBackupCurrent(generation, token, base))

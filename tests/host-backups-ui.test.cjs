@@ -293,6 +293,45 @@ test('verified portable pair gets one same-origin cookie grant and a native down
   assert.equal(resumed.element('hostBackupPortableCreate').disabled, false);
 });
 
+test('portable export lists all five staging paths and grants each manifest separately', async () => {
+  for (const [part, filename] of [
+    ['host_manifest', archiveId + '.manifest.json'],
+    ['images_manifest', 'manifest.json'],
+  ]) {
+    const h = harness();
+    h.context.location.origin = 'https://hub.example';
+    Object.assign(h.client, { ready: true, activeId: operationId,
+      active: operation(operationId, 'complete'), activePortable: true,
+      portableReceipt, portableVerified: { requestId: operationId, archive,
+        imagesBytes: 8192, receipt: portableReceipt,
+        base: h.state.base, token: h.state.token } });
+    h.context.hostBackupRender();
+    const rows = descendants(h.element('hostBackupPortableFiles'))
+      .filter((item) => item.className === 'host-portable-file');
+    assert.equal(rows.length, 5);
+    const names = rows.map((row) => row.children[0].textContent);
+    assert.ok(names.some((name) => name.includes(archiveId + '.tar.gz')));
+    assert.ok(names.some((name) => name.includes(archiveId + '.manifest.json')));
+    assert.ok(names.some((name) => name.includes(archiveId + '/images.tar')));
+    assert.ok(names.some((name) => name.includes(archiveId + '/manifest.json')));
+    assert.ok(names.some((name) => name.includes(archiveId + '/receipt.json')));
+    h.setFetchHook((url, options) => {
+      if (url.endsWith('/portable/download-grants/' + part)) {
+        assert.equal(options.method, 'POST');
+        return Promise.resolve(reply(200, { request_id: operationId, part,
+          expires_in_seconds: 60 }));
+      }
+      return Promise.resolve(metadata(url));
+    });
+    await h.context.hostBackupPortablePrepareDownload(operationId, part);
+    const links = descendants(h.element('hostBackupPortableFiles')).filter((item) =>
+      typeof item.href === 'string' && item.href.endsWith('/portable/download/' + part));
+    assert.equal(links.length, 1);
+    assert.equal(links[0].download, filename);
+    assert.equal(links[0].href.includes('session-1'), false);
+  }
+});
+
 test('native download is canceled if the browser cannot persist its pending state', () => {
   const h = harness();
   h.context.location.origin = 'https://hub.example';
