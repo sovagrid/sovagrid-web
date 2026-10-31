@@ -17,6 +17,7 @@ const amneziaClient = {
 const amneziaSetup = { generation: 0, busy: false, fingerprint: null, changedPin: false,
   controller: null, endpoint: null, setup: null, enrollment: null, identity: null,
   source: null, sourceIdentity: null, pendingAction: null };
+const wgControl = { preview: null, identity: null, pendingAction: null };
 const AMNEZIA_ENROLL_FIELDS = ["protocol", "action", "writes", "target", "container_id", "image_id",
   "config_sha256", "table_sha256", "configured_clients", "vpn_protocol", "interface", "listen_port",
   "server_subnet", "host_key_fingerprint", "reverify_required"].sort();
@@ -1122,6 +1123,7 @@ function amneziaSetupDiscardSource() {
   $("amneziaSourceSummary").textContent = "";
   $("amneziaSourceDigest").textContent = "";
   $("amneziaSourceNotice").textContent = "";
+  wgControlReset();
 }
 function amneziaSetupDiscardReview() {
   amneziaSetup.setup = null;
@@ -1184,6 +1186,7 @@ function amneziaSetupRender() {
   $("amneziaSetupArm").hidden = !safe || setup?.enrolled !== true || !setup?.installed_current ||
     !setup?.can_arm || setup?.marker !== "absent";
   $("amneziaSetupEnroll").disabled = !safe || !amneziaSetup.enrollment || amneziaSetup.busy;
+  wgControlRender();
 }
 function amneziaSetupReset() {
   amneziaSetup.generation++;
@@ -1256,6 +1259,8 @@ function amneziaSetupExplain(failure) {
   if (failure.message === "SETUP_UNAVAILABLE") return "Предпросмотр на этом хосте недоступен. Проверьте серверный пакет и права SSH-пользователя.";
   if (failure.message === "SETUP_CHANGED") return "Состояние контейнера изменилось. Проверьте его заново и повторите действие.";
   if (failure.message === "SETUP_UNCERTAIN") return "Связь прервалась или ответ не подтверждён. Действие могло выполниться: проверьте состояние перед повтором.";
+  if (["APPLY_UNCERTAIN", "RECOVERY_UNCERTAIN"].includes(failure.message))
+    return "Ответ о подготовке VPN-кода не подтверждён. Состояние могло измениться: сначала проверьте пакет снова и при необходимости завершите очистку, не повторяя действие вслепую.";
   if (failure.message === "RATE_LIMIT") return "Слишком много попыток. Подождите минуту.";
   if (failure.message === "BUSY") return "SSH-шлюз занят. Повторите позже.";
   if (failure.message === "SSH_TIMEOUT") return "SSH-хост не ответил вовремя.";
@@ -1604,6 +1609,239 @@ async function amneziaSourceAction(action) {
   }
 }
 
+function wgControlPendingKey() {
+  let endpoint = amneziaSetup.endpoint;
+  if (!endpoint) {
+    try { endpoint = amneziaSetupEndpoint(); } catch { /* Address not selected yet. */ }
+  }
+  return `sovagrid.wg-control-pending:${location.origin}:${endpoint
+    ? `${endpoint.host}:${endpoint.port}` : "unselected_target"}`;
+}
+function wgControlPending() {
+  try { return sessionStorage.getItem(wgControlPendingKey()) === "1"; } catch { return false; }
+}
+function wgControlMarkPending(pending) {
+  try {
+    if (pending) sessionStorage.setItem(wgControlPendingKey(), "1");
+    else sessionStorage.removeItem(wgControlPendingKey());
+  } catch { /* Private browsing may disable storage. */ }
+}
+function wgControlSameIdentity() {
+  try {
+    const current = amneziaSetupIdentity(), reviewed = wgControl.identity;
+    return reviewed && Object.keys(current).every((key) => current[key] === reviewed[key]);
+  } catch { return false; }
+}
+function wgControlReady() {
+  return amneziaSetupRemote() && amneziaSetupAllowed() && !amneziaSetup.busy &&
+    !amneziaSetupPending() && !!amneziaSetup.fingerprint && !amneziaSetup.changedPin &&
+    $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint();
+}
+function wgControlRender() {
+  $("wgControlPanel").hidden = !amneziaSetupRemote();
+  const ready = wgControlReady(), reviewed = ready && wgControlSameIdentity() && wgControl.preview;
+  $("wgControlPreview").disabled = !ready;
+  $("wgControlReview").hidden = !reviewed;
+  $("wgControlApply").hidden = !reviewed || wgControl.preview.can_apply !== true ||
+    wgControl.preview.pending_recovery === true || wgControlPending();
+  $("wgControlRecover").hidden = !reviewed || wgControl.preview.pending_recovery !== true;
+  if (wgControlPending() && !wgControl.preview && !$("wgControlNotice").textContent) {
+    $("wgControlNotice").textContent =
+      "Предыдущее действие могло продолжиться после потери связи. Сначала проверьте состояние заново.";
+  }
+}
+function wgControlReset() {
+  wgControl.preview = null;
+  wgControl.identity = null;
+  wgControl.pendingAction = null;
+  if ($("wgControlDialog").open) $("wgControlDialog").close();
+  $("wgControlReview").hidden = true;
+  $("wgControlSummary").textContent = "";
+  $("wgControlDetails").textContent = "";
+  $("wgControlDigest").textContent = "";
+  $("wgControlNotice").textContent = "";
+  clearError($("wgControlError"));
+  wgControlRender();
+}
+function wgControlValidScope(value) {
+  return value?.protocol === 1 && value.scope === "entered_target" &&
+    value.host === amneziaSetup.endpoint?.host && value.port === amneziaSetup.endpoint?.port &&
+    value.host_key_fingerprint === amneziaSetup.fingerprint;
+}
+function wgControlValidPreview(value) {
+  if (!wgControlValidScope(value) || value.schema_version !== 1 ||
+      value.action !== "preview" || value.writes !== false ||
+      typeof value.can_apply !== "boolean" || typeof value.pending_recovery !== "boolean") return false;
+  const reason = value.reason;
+  if (reason !== undefined && !["SOURCE_NOT_PREPARED", "SOURCE_CHANGED", "AGENT_UNAVAILABLE",
+      "DEPENDENCIES_UNAVAILABLE", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "BUSY",
+      "OPERATION_FAILED", "ROOT_REQUIRED", "SSH_UNAVAILABLE", "STALE_PREVIEW"].includes(reason)) return false;
+  if (value.state_revision === undefined && value.source_revision === undefined) {
+    return value.can_apply === false && typeof reason === "string";
+  }
+  const boolFields = ["installed_current", "socket_active", "service_active", "socket_enabled",
+    "inventory_timer_active", "inventory_timer_enabled", "inventory_snapshot_present",
+    "apparmor_profile_present", "requires_service_restart"];
+  return ["state_revision", "source_revision"].every((key) =>
+    typeof value[key] === "string" && /^[0-9a-f]{64}$/.test(value[key])) &&
+    boolFields.every((key) => typeof value[key] === "boolean") &&
+    Array.isArray(value.missing_dependencies) && value.missing_dependencies.length <= 5 &&
+    new Set(value.missing_dependencies).size === value.missing_dependencies.length &&
+    value.missing_dependencies.every((name) =>
+      ["wg", "wg-quick", "ip", "python3-cryptography", "apparmor_parser"].includes(name)) &&
+    (value.can_apply ? reason === undefined : typeof reason === "string");
+}
+function wgControlReason(reason) {
+  const labels = {
+    SOURCE_NOT_PREPARED: "Сначала подготовьте VPN-код в шаге выше и проверьте брокер снова.",
+    SOURCE_CHANGED: "VPN-код на сервере изменился. Проверьте пакет снова перед установкой.",
+    AGENT_UNAVAILABLE: "На сервере не найден нужный Agent или его группа. Сначала установите Agent.",
+    DEPENDENCIES_UNAVAILABLE: "Не удалось подготовить зависимости WireGuard. Проверьте пакеты сервера.",
+    RECOVERY_REQUIRED: "Осталась незавершённая установка. Сначала выполните восстановление и повторите проверку.",
+    CONTROL_ACTIVE: "Работающий брокер нельзя заменить этим мастером. Проверьте его в окно обслуживания.",
+    BUSY: "Сервер занят другой операцией. Повторите проверку позже.",
+    ROOT_REQUIRED: "Нужен SSH-вход root или sudo без запроса пароля.",
+  };
+  return labels[reason] || "Брокер пока нельзя установить. Проверьте сервер и повторите предпросмотр.";
+}
+function wgControlShowPreview(value) {
+  wgControl.preview = value;
+  wgControl.identity = amneziaSetupIdentity();
+  $("wgControlSummary").textContent = value.pending_recovery ? wgControlReason("RECOVERY_REQUIRED") :
+    value.can_apply ? value.installed_current && value.socket_active && value.inventory_timer_active
+      ? "Брокер WireGuard уже установлен и работает. Можно повторно применить проверенное состояние при необходимости."
+      : "Сервер готов к установке WireGuard-брокера. VPN-интерфейс останется выключенным."
+      : wgControlReason(value.reason);
+  $("wgControlDetails").textContent = !value.state_revision ? "Подробный снимок пока недоступен." :
+    `Сокет: ${value.socket_active ? "работает" : "не запущен"}. Служба: ${value.service_active ? "работает" : "не запущена"}. ` +
+    `Таймер мониторинга: ${value.inventory_timer_active ? "работает" : "не запущен"}. ` +
+    `Недостающие пакеты: ${value.missing_dependencies.length ? value.missing_dependencies.join(", ") : "нет"}.` +
+    (value.requires_service_restart ? " Для установки потребуется перезапуск службы брокера." : "");
+  $("wgControlRevisions").hidden = !value.state_revision;
+  $("wgControlDigest").textContent = value.state_revision ?
+    `Состояние: ${value.state_revision}\nVPN-код: ${value.source_revision}` : "";
+  $("wgControlNotice").textContent = "";
+  wgControlRender();
+}
+function wgControlExplain(failure) {
+  if (["APPLY_UNCERTAIN", "RECOVERY_UNCERTAIN", "SSH_TIMEOUT", "INSTALLER_UNAVAILABLE",
+    "SSH_UNAVAILABLE", "OPERATION_FAILED"].includes(failure.message)) {
+    return "Ответ потерян или не подтверждён. Действие могло выполниться: сначала проверьте состояние заново, затем решайте, нужно ли восстановление.";
+  }
+  if (failure.message === "STALE_PREVIEW") return "Состояние изменилось после проверки. Откройте новый предпросмотр.";
+  if (failure.message === "RECOVERY_REQUIRED") return wgControlReason("RECOVERY_REQUIRED");
+  if (failure.message === "SOURCE_NOT_PREPARED") return wgControlReason("SOURCE_NOT_PREPARED");
+  if (failure.message === "AGENT_UNAVAILABLE") return wgControlReason("AGENT_UNAVAILABLE");
+  if (failure.message === "DEPENDENCIES_UNAVAILABLE") return wgControlReason("DEPENDENCIES_UNAVAILABLE");
+  if (failure.message === "CONTROL_ACTIVE") return wgControlReason("CONTROL_ACTIVE");
+  if (failure.message === "KEY_READ_FAILED") return "Не удалось прочитать выбранный файл ключа.";
+  return amneziaSetupExplain(failure);
+}
+async function wgControlPreview() {
+  if (!wgControlReady()) return;
+  const identity = amneziaSetupIdentity(), endpoint = amneziaSetup.endpoint;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  wgControlReset();
+  amneziaSetupRender();
+  let login;
+  try {
+    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
+    const { target: _target, ...selected } = credentials;
+    login = selected;
+    amneziaSetupClearSecrets();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
+    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
+        status.host !== endpoint.host || status.port !== endpoint.port ||
+        status.host_key_fingerprint !== identity.fingerprint ||
+        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    const result = await amneziaSetupApi("/api/v1/browser-ssh/wg-control/preview", login, token, 130000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
+    if (!wgControlValidPreview(result)) throw new Error("INVALID_RESPONSE");
+    amneziaSetupSavePin(identity.fingerprint);
+    wgControlMarkPending(false);
+    wgControlShowPreview(result);
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin))
+      showError($("wgControlError"), wgControlExplain(failure));
+  } finally {
+    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+function wgControlConfirm(action) {
+  if (!wgControlReady() || !wgControlSameIdentity() || !wgControl.preview ||
+      !(action === "apply" ? wgControl.preview.can_apply && !wgControlPending() :
+        action === "recover" && wgControl.preview.pending_recovery)) return;
+  const host = `${amneziaSetup.endpoint.host}:${amneziaSetup.endpoint.port}`;
+  $("wgControlDialogTitle").textContent = action === "apply" ?
+    "Установить WireGuard-брокер?" : "Завершить восстановление WireGuard?";
+  $("wgControlDialogSummary").textContent = action === "apply" ?
+    `SovaGrid установит пакеты, включит сокет и таймер мониторинга на ${host}. VPN-интерфейс и клиентские профили не изменятся.` :
+    `SovaGrid проверит и завершит собственную прерванную установку на ${host}. VPN-интерфейс не будет включён.`;
+  wgControl.pendingAction = action;
+  $("wgControlDialog").showModal();
+}
+async function wgControlAction(action) {
+  const preview = wgControl.preview;
+  if (!wgControlReady() || !wgControlSameIdentity() || !preview ||
+      !(action === "apply" ? preview.can_apply && !wgControlPending() :
+        action === "recover" && preview.pending_recovery)) return;
+  const identity = wgControl.identity;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  clearError($("wgControlError"));
+  amneziaSetupRender();
+  let login;
+  try {
+    const credentials = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !wgControlSameIdentity() ||
+        Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
+    const { target: _target, ...selected } = credentials;
+    login = selected;
+    amneziaSetupClearSecrets();
+    wgControlMarkPending(true);
+    const payload = action === "apply" ? { ...login, expected: {
+      state_revision: preview.state_revision, source_revision: preview.source_revision }, confirm: true } :
+      { ...login, confirm: true };
+    const result = await amneziaSetupApi(`/api/v1/browser-ssh/wg-control/${action}`, payload,
+      token, action === "apply" ? 735000 : 465000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !wgControlSameIdentity()) return;
+    if (!wgControlValidScope(result) || (action === "apply" &&
+        (result.action !== "installed" || result.socket_active !== true || result.service_active !== true ||
+         result.inventory_timer_active !== true || result.inventory_snapshot_present !== true ||
+         result.vpn_interface_changed !== false || result.source_revision !== preview.source_revision)) ||
+        (action === "recover" && (result.action !== "recovered" || typeof result.changed !== "boolean"))) {
+      throw new Error(action === "apply" ? "APPLY_UNCERTAIN" : "RECOVERY_UNCERTAIN");
+    }
+    wgControlMarkPending(false);
+    wgControlReset();
+    $("wgControlNotice").textContent = action === "apply" ?
+      "Брокер, сокет и мониторинг WireGuard готовы. VPN-интерфейс не включён. Проверьте состояние снова." :
+      "Восстановление завершено. Проверьте WireGuard-брокер снова перед установкой.";
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      if (["INVALID_INPUT", "AUTH_FAILED", "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HOST_KEY_CHANGED",
+           "STALE_PREVIEW", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "SOURCE_NOT_PREPARED",
+           "SOURCE_CHANGED", "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "ROOT_REQUIRED",
+           "BUSY"].includes(failure.message)) wgControlMarkPending(false);
+      wgControlReset();
+      showError($("wgControlError"), wgControlExplain(failure));
+    }
+  } finally {
+    if (login) for (const key of ["password", "private_key", "passphrase"]) login[key] = "";
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+
 async function amneziaSetupAction(action) {
   if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupSameIdentity() ||
       !amneziaSetup.fingerprint || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
@@ -1712,6 +1950,17 @@ $("amneziaSetupForm").addEventListener("submit", (event) => { void amneziaSetupP
 $("amneziaSourcePreview").addEventListener("click", () => { void amneziaSourcePreview(); });
 $("amneziaSourceApply").addEventListener("click", () => amneziaSourceConfirm("apply"));
 $("amneziaSourceRecover").addEventListener("click", () => amneziaSourceConfirm("recover"));
+$("wgControlPreview").addEventListener("click", () => { void wgControlPreview(); });
+$("wgControlApply").addEventListener("click", () => wgControlConfirm("apply"));
+$("wgControlRecover").addEventListener("click", () => wgControlConfirm("recover"));
+$("wgControlDialogCancel").addEventListener("click", () => $("wgControlDialog").close());
+$("wgControlDialog").addEventListener("close", () => { wgControl.pendingAction = null; });
+$("wgControlDialogConfirm").addEventListener("click", () => {
+  const action = wgControl.pendingAction;
+  if (!action) return;
+  $("wgControlDialog").close();
+  void wgControlAction(action);
+});
 $("amneziaSetupEnrollPreview").addEventListener("click", () => { void amneziaSetupAction("enroll-preview"); });
 $("amneziaSetupEnroll").addEventListener("click", () => amneziaSetupConfirm("enroll"));
 $("amneziaSetupInstall").addEventListener("click", () => amneziaSetupConfirm("install"));

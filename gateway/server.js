@@ -127,7 +127,8 @@ const GRANT = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list",
-  "vpn-source-preview", "vpn-source-apply", "vpn-source-recover"]);
+  "vpn-source-preview", "vpn-source-apply", "vpn-source-recover",
+  "wg-control-preview", "wg-control-apply", "wg-control-recover"]);
 const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE", "BUSY", "INVALID_INPUT", "INVALID_REQUEST_ID",
   "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH", "NOT_FOUND",
   "STALE_REVISION", "RESUME_REQUIRED", "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED",
@@ -137,7 +138,12 @@ const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILAB
   "INSTALLER_UNAVAILABLE", "ROOT_REQUIRED", "JOURNAL_UNAVAILABLE", "UNSAFE_LOCK",
   "INVALID_REQUEST", "SOURCE_CHANGED", "STATE_CONFLICT", "OWNERSHIP_CONFLICT",
   "STALE_PREVIEW", "CONTROL_ACTIVE", "OPERATION_FAILED", "INTERNAL_ERROR",
-  "STAGE_CLEANUP_REQUIRED", "RESPONSE_TOO_LARGE"]);
+  "STAGE_CLEANUP_REQUIRED", "RESPONSE_TOO_LARGE", "SOURCE_NOT_PREPARED",
+  "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "RECOVERY_UNCERTAIN"]);
+const WG_DEPENDENCIES = new Set(["wg", "wg-quick", "ip", "python3-cryptography", "apparmor_parser"]);
+const WG_REASONS = new Set(["SOURCE_NOT_PREPARED", "SOURCE_CHANGED", "AGENT_UNAVAILABLE",
+  "DEPENDENCIES_UNAVAILABLE", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "BUSY",
+  "OPERATION_FAILED", "ROOT_REQUIRED", "SSH_UNAVAILABLE", "STALE_PREVIEW"]);
 
 if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("Invalid fixed host SSH port");
@@ -368,6 +374,24 @@ function exactFields(value, fields) {
 
 export function validateAgentPayload(action, value) {
   if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  if (action.startsWith("wg-control-")) {
+    const credentialFields = ["host", "port", "username", "method", "fingerprint",
+      "password", "private_key", "passphrase"];
+    const fields = action === "wg-control-apply" ? [...credentialFields, "expected", "confirm"] :
+      action === "wg-control-recover" ? [...credentialFields, "confirm"] : credentialFields;
+    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
+    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+    if (action === "wg-control-preview") return target;
+    if (value.confirm !== true) throw new Error("INVALID_INPUT");
+    if (action === "wg-control-recover") return { ...target, confirm: true };
+    if (!exactFields(value.expected, ["state_revision", "source_revision"]) ||
+        !["state_revision", "source_revision"].every((key) =>
+          typeof value.expected[key] === "string" && HEX_SHA.test(value.expected[key]))) {
+      throw new Error("INVALID_INPUT");
+    }
+    return { ...target, expected: { state_revision: value.expected.state_revision,
+      source_revision: value.expected.source_revision }, confirm: true };
+  }
   if (action.startsWith("vpn-source-")) {
     const credentialFields = ["host", "port", "username", "method", "fingerprint",
       "password", "private_key", "passphrase"];
@@ -477,7 +501,71 @@ function safeVpnSourceResult(action, value) {
   return { ...base, recovered: value.recovered };
 }
 
+function safeWgControlResult(action, value) {
+  const baseFields = ["protocol", "scope", "host", "port", "host_key_fingerprint"];
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.protocol !== 1 ||
+      value.scope !== "entered_target" || typeof value.host !== "string" ||
+      !Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535 ||
+      typeof value.host_key_fingerprint !== "string" || !FINGERPRINT.test(value.host_key_fingerprint)) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
+  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
+  const base = { protocol: 1, scope: "entered_target", host: value.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  if (action === "wg-control-preview") {
+    const fullFields = ["schema_version", "action", "writes", "state_revision", "source_revision",
+      "installed_current", "socket_active", "service_active", "socket_enabled", "pending_recovery",
+      "inventory_timer_active", "inventory_timer_enabled", "inventory_snapshot_present",
+      "missing_dependencies", "apparmor_profile_present", "can_apply", "requires_service_restart"];
+    const full = exactFields(value, [...baseFields, ...fullFields]) ||
+      exactFields(value, [...baseFields, ...fullFields, "reason"]);
+    if (value.schema_version !== 1 || value.action !== "preview" || value.writes !== false) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    if (full) {
+      const booleanFields = ["installed_current", "socket_active", "service_active", "socket_enabled",
+        "pending_recovery", "inventory_timer_active", "inventory_timer_enabled",
+        "inventory_snapshot_present", "apparmor_profile_present", "can_apply", "requires_service_restart"];
+      if (!["state_revision", "source_revision"].every((key) => typeof value[key] === "string" && HEX_SHA.test(value[key])) ||
+          booleanFields.some((key) => typeof value[key] !== "boolean") ||
+          !Array.isArray(value.missing_dependencies) || value.missing_dependencies.length > WG_DEPENDENCIES.size ||
+          new Set(value.missing_dependencies).size !== value.missing_dependencies.length ||
+          value.missing_dependencies.some((name) => !WG_DEPENDENCIES.has(name)) ||
+          (Object.hasOwn(value, "reason") ?
+            !["RECOVERY_REQUIRED", "CONTROL_ACTIVE"].includes(value.reason) || value.can_apply !== false :
+            value.can_apply !== true)) throw new Error("INSTALLER_UNAVAILABLE");
+      return { ...base, ...Object.fromEntries(fullFields.map((key) => [key, value[key]])),
+        ...(Object.hasOwn(value, "reason") ? { reason: value.reason } : {}) };
+    }
+    if (!exactFields(value, [...baseFields, "schema_version", "action", "writes",
+          "can_apply", "pending_recovery", "reason"]) || value.can_apply !== false ||
+        typeof value.pending_recovery !== "boolean" || !WG_REASONS.has(value.reason)) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    return { ...base, schema_version: 1, action: "preview", writes: false,
+      can_apply: false, pending_recovery: value.pending_recovery, reason: value.reason };
+  }
+  if (action === "wg-control-apply") {
+    if (!exactFields(value, [...baseFields, "action", "socket_active", "service_active",
+          "vpn_interface_changed", "inventory_timer_active", "inventory_snapshot_present", "source_revision"]) ||
+        value.action !== "installed" || value.socket_active !== true || value.service_active !== true ||
+        value.vpn_interface_changed !== false || value.inventory_timer_active !== true ||
+        value.inventory_snapshot_present !== true || typeof value.source_revision !== "string" ||
+        !HEX_SHA.test(value.source_revision)) throw new Error("INSTALLER_UNAVAILABLE");
+    return { ...base, action: "installed", socket_active: true, service_active: true,
+      vpn_interface_changed: false, inventory_timer_active: true, inventory_snapshot_present: true,
+      source_revision: value.source_revision };
+  }
+  if (!exactFields(value, [...baseFields, "action", "changed"]) ||
+      value.action !== "recovered" || typeof value.changed !== "boolean") {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  return { ...base, action: "recovered", changed: value.changed };
+}
+
 export function safeAgentResult(action, value) {
+  if (action.startsWith("wg-control-")) return safeWgControlResult(action, value);
   if (action.startsWith("vpn-source-")) return safeVpnSourceResult(action, value);
   if (action === "list") {
     if (!Array.isArray(value) || value.length > 256) throw new Error("INSTALLER_UNAVAILABLE");
@@ -524,8 +612,15 @@ export function safeAgentResult(action, value) {
   return record;
 }
 
+export function agentTimeoutMs(action) {
+  if (action === "wg-control-preview") return 120000;
+  if (action === "wg-control-apply") return 720000;
+  if (action === "wg-control-recover") return 450000;
+  return ["status", "list", "interrupt"].includes(action) ? 10000 : 720000;
+}
+
 export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
-  timeoutMs = ["status", "list", "interrupt"].includes(action) ? 10000 : 720000 } = {}) {
+  timeoutMs = agentTimeoutMs(action) } = {}) {
   if (!AGENT_ACTIONS.has(action) || typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
     throw new Error("AUTH_REQUIRED");
   }
@@ -565,7 +660,7 @@ export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
         if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error();
         if (response.ok === true && Object.keys(response).length === 2 && Object.hasOwn(response, "result")) {
           const result = safeAgentResult(action, response.result);
-          if (action.startsWith("vpn-source-") &&
+          if ((action.startsWith("vpn-source-") || action.startsWith("wg-control-")) &&
               (result.host !== payload.host || result.port !== payload.port ||
                result.host_key_fingerprint !== payload.fingerprint)) {
             throw new Error("INSTALLER_UNAVAILABLE");
@@ -1317,6 +1412,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   const reads = new WindowLimit(60, 60);
   const attempts = new WindowLimit(5, 60);
   const stages = new WindowLimit(5, 60);
+  const wgStages = new WindowLimit(8, 60);
   let active = 0;
   return async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -1333,10 +1429,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
     const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
     const vpnSourceAction = /^\/api\/v1\/browser-ssh\/vpn-source\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
-    const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction) || Boolean(vpnSourceAction);
+    const wgControlAction = /^\/api\/v1\/browser-ssh\/wg-control\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
+    const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview ||
+      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -1346,7 +1444,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : vpnSourceAction ? stages : isAgentRead ||
+    if (!(isProbe ? probes : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
           ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
       .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
@@ -1363,10 +1461,10 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (agentAction || vpnSourceAction) {
+        if (agentAction || vpnSourceAction || wgControlAction) {
           const token = BEARER.exec(req.headers.authorization || "")?.[1];
           if (!token) throw new Error("AUTH_REQUIRED");
-          const action = agentAction || `vpn-source-${vpnSourceAction}`;
+          const action = agentAction || (vpnSourceAction ? `vpn-source-${vpnSourceAction}` : `wg-control-${wgControlAction}`);
           const selected = validateAgentPayload(action, value);
           try { json(res, 200, await agent(action, selected, token)); }
           finally { clearCredentials(selected); }
@@ -1414,7 +1512,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "CONTROL_ACTIVE",
           "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK"].includes(code) ? 409 :
         code === "NOT_FOUND" ? 404 :
-        ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED"].includes(code) ? 422 :
+        ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED",
+          "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE"].includes(code) ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
           code === "ADMIN_FORBIDDEN" ? 403 : 503;
       json(res, status, error?.requestId && UUID.test(error.requestId) ?

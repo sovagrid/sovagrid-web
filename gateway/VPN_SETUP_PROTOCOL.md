@@ -74,3 +74,31 @@ root or passwordless sudo access to their fixed installer.
 An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
 from the gateway container by this route; a separately configured reachable
 SSH endpoint is needed.
+
+## Plain WireGuard broker on an entered Agent
+
+After preparing the verified `sovagrid-vpn` source, the same pinned SSH form
+can inspect and install the plain WireGuard control broker through
+`POST /api/v1/browser-ssh/wg-control/preview`, `/apply`, and `/recover`. These
+routes require a fresh unrestricted Hub admin session, same-origin HTTPS or
+loopback, and exactly the eight entered-target SSH fields listed above without
+the Amnezia `target` field. Apply adds exactly
+`expected: {state_revision, source_revision}` (two lowercase 64-character
+SHA-256 values) and `confirm: true`; recover adds `confirm: true`.
+
+The preview is read-only. A full result reports the broker socket and service,
+inventory timer and snapshot, dependencies, AppArmor profile, the two revisions,
+`can_apply`, and any fixed blocking reason. A degraded preview has no revisions
+and cannot authorize apply. The Web Agent and root installer compare the
+reviewed revisions again before writing. If recovery is required, only the
+separately confirmed recover action is available. The browser clears SSH
+secrets before each request and keeps only a tab-scoped uncertainty marker if
+the response may have been lost. A fresh preview is required before another
+write. Socket deadlines are 120 seconds for preview, 720 seconds for apply,
+and 450 seconds for recover; the browser waits slightly longer.
+
+The gateway validates and returns only fixed status fields and fixed error
+codes. The install may add Ubuntu packages and enables the root broker socket,
+service, and inventory timer. It does not create or activate a WireGuard
+interface, VPN instance, or client profile. See the
+[Web Agent contract](../../sovagrid-blueprint/deploy/WEB_WIREGUARD_CONTROL.md).

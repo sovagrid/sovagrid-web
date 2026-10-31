@@ -13,10 +13,17 @@ const TOKEN = 't'.repeat(43);
 const preview = () => ({ protocol: 1, target: 'awg2', enrolled: false,
   marker: 'absent', other_marker: 'absent', socket_active: false, service_active: false,
   installer_ready: true, installed_current: false, can_arm: true, reason: 'NOT_ENROLLED' });
+const until = async (predicate) => {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await new Promise(setImmediate);
+  }
+  throw new Error('timed out');
+};
 
 function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = 'https://panel.example',
   fingerprint = FINGERPRINT, savedPin = null, previewReply = preview(), replies = {} } = {}) {
-  const elements = new Map(), calls = [], storage = new Map();
+  const elements = new Map(), calls = [], storage = new Map(), session = new Map();
   const location = new URL(page);
   if (savedPin) storage.set(`sovagrid.ssh-host-key:${location.origin}`, savedPin);
   const element = (id) => {
@@ -25,7 +32,8 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
       elements.set(id, { textContent: '', value: '', hidden: false, disabled: false,
         checked: id === 'amneziaSetupAuthPassword', files: [], open: false, listeners,
         addEventListener(name, fn) { listeners.set(name, fn); },
-        replaceChildren() { this.textContent = ''; }, append() {}, close() {},
+        replaceChildren() { this.textContent = ''; }, append() {},
+        showModal() { this.open = true; }, close() { this.open = false; listeners.get('close')?.(); },
       });
     }
     return elements.get(id);
@@ -39,6 +47,8 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
     location, navigator: { canShare: () => false }, confirm: () => true,
     localStorage: { getItem: (key) => storage.get(key) ?? null,
       setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
+    sessionStorage: { getItem: (key) => session.get(key) ?? null,
+      setItem: (key, value) => session.set(key, value), removeItem: (key) => session.delete(key) },
     fetch: async (path, options) => {
       calls.push({ path, options });
       const reply = Object.hasOwn(replies, path)
@@ -59,7 +69,7 @@ function harness({ page = 'https://panel.example/sovagrid/monitoring/', base = '
   element('amneziaSetupTarget').value = 'awg2';
   element('amneziaSetupAuthPassword').checked = true;
   context.amneziaSetupRender();
-  return { context, state, element, calls, storage };
+  return { context, state, element, calls, storage, session };
 }
 
 test('VPN panel includes local and entered-host SSH setup with fresh PWA assets', () => {
@@ -75,13 +85,188 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /id="amneziaSetupRemotePort"/);
   assert.match(html, /id="amneziaSourcePreview"/);
   assert.match(html, /id="amneziaSourceApply"/);
+  assert.match(html, /id="wgControlPanel"/);
+  assert.match(html, /id="wgControlPreview"/);
+  assert.match(html, /VPN-интерфейс и клиентские профили не создаются и не включаются/);
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=10/);
-  assert.match(shell, /amnezia\.js\?v=10/);
-  assert.match(html, /styles\.css\?v=42/);
-  assert.match(shell, /styles\.css\?v=42/);
+  assert.match(html, /amnezia\.js\?v=11/);
+  assert.match(shell, /amnezia\.js\?v=11/);
+  assert.match(html, /styles\.css\?v=43/);
+  assert.match(shell, /styles\.css\?v=43/);
+});
+
+test('plain WireGuard broker preview uses pinned target and confirmed apply with exact revisions', async () => {
+  const host = 'wg.example', port = 2202;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT };
+  const revisions = { state_revision: 'a'.repeat(64), source_revision: 'b'.repeat(64) };
+  const snapshot = { ...scope, schema_version: 1, action: 'preview', writes: false,
+    ...revisions, installed_current: false, socket_active: false, service_active: false,
+    socket_enabled: false, pending_recovery: false, inventory_timer_active: false,
+    inventory_timer_enabled: false, inventory_snapshot_present: false,
+    missing_dependencies: ['wg'], apparmor_profile_present: false,
+    can_apply: true, requires_service_restart: false };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/wg-control/preview': snapshot,
+    '/api/v1/browser-ssh/wg-control/apply': { ...scope, action: 'installed',
+      socket_active: true, service_active: true, vpn_interface_changed: false,
+      inventory_timer_active: true, inventory_snapshot_present: true,
+      source_revision: revisions.source_revision },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'one-use-password';
+  await h.context.wgControlPreview();
+  assert.deepEqual(h.calls.map((call) => call.path), [
+    '/api/v1/browser-ssh/target-host-key', '/api/v1/browser-ssh/target-status',
+    '/api/v1/browser-ssh/wg-control/preview',
+  ]);
+  assert.equal(h.element('wgControlReview').hidden, false);
+  assert.equal(h.element('wgControlApply').hidden, false);
+  assert.equal(h.element('wgControlRecover').hidden, true);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.match(h.element('wgControlDetails').textContent, /Недостающие пакеты: wg/);
+  h.element('amneziaSetupPassword').value = 'fresh-password';
+  h.context.wgControlConfirm('apply');
+  assert.equal(h.element('wgControlDialog').open, true);
+  assert.equal(h.calls.length, 3, 'review alone must not install');
+  h.element('wgControlDialogConfirm').listeners.get('click')();
+  await until(() => h.element('wgControlNotice').textContent.includes('Брокер, сокет'));
+  const applied = h.calls.at(-1);
+  assert.equal(applied.path, '/api/v1/browser-ssh/wg-control/apply');
+  const body = JSON.parse(applied.options.body);
+  assert.deepEqual(body.expected, revisions);
+  assert.equal(body.confirm, true);
+  assert.equal(body.password, 'fresh-password');
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  assert.match(h.element('wgControlNotice').textContent, /VPN-интерфейс не включён/);
+  assert.equal(h.session.size, 0);
+});
+
+test('degraded WireGuard preview blocks apply and reviewed recovery requires confirmation', async () => {
+  const host = 'wg.example', scope = { protocol: 1, scope: 'entered_target', host, port: 22,
+    host_key_fingerprint: FINGERPRINT };
+  let reason = 'SOURCE_NOT_PREPARED';
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/wg-control/preview': () => ({ ...scope, schema_version: 1,
+      action: 'preview', writes: false, can_apply: false,
+      pending_recovery: reason === 'RECOVERY_REQUIRED', reason }),
+    '/api/v1/browser-ssh/wg-control/recover': { ...scope, action: 'recovered', changed: true },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = '22';
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.wgControlPreview();
+  assert.equal(h.element('wgControlApply').hidden, true);
+  assert.equal(h.element('wgControlRecover').hidden, true);
+  assert.match(h.element('wgControlSummary').textContent, /подготовьте VPN-код/);
+  reason = 'RECOVERY_REQUIRED';
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.wgControlPreview();
+  assert.equal(h.element('wgControlRecover').hidden, false);
+  h.element('amneziaSetupPassword').value = 'new-secret';
+  h.context.wgControlConfirm('recover');
+  assert.equal(h.element('wgControlDialog').open, true);
+  h.element('wgControlDialogConfirm').listeners.get('click')();
+  await until(() => h.element('wgControlNotice').textContent.includes('Восстановление завершено'));
+  const body = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(body.confirm, true);
+  assert.equal(Object.hasOwn(body, 'expected'), false);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+});
+
+test('uncertain WireGuard apply retains recovery warning and invalidates reviewed revisions', async () => {
+  const host = 'wg.example', scope = { protocol: 1, scope: 'entered_target', host, port: 22,
+    host_key_fingerprint: FINGERPRINT };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/wg-control/preview': { ...scope, schema_version: 1,
+      action: 'preview', writes: false, state_revision: 'a'.repeat(64),
+      source_revision: 'b'.repeat(64), installed_current: false, socket_active: false,
+      service_active: false, socket_enabled: false, pending_recovery: false,
+      inventory_timer_active: false, inventory_timer_enabled: false,
+      inventory_snapshot_present: false, missing_dependencies: [],
+      apparmor_profile_present: true, can_apply: true, requires_service_restart: false },
+    '/api/v1/browser-ssh/wg-control/apply': { __httpStatus: 503,
+      body: { error: 'APPLY_UNCERTAIN' } },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = '22';
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.wgControlPreview();
+  h.element('amneziaSetupPassword').value = 'fresh';
+  h.context.wgControlConfirm('apply');
+  h.element('wgControlDialogConfirm').listeners.get('click')();
+  await until(() => h.element('wgControlError').textContent.includes('Действие могло выполниться'));
+  assert.equal(h.element('wgControlApply').hidden, true);
+  assert.equal(h.session.size, 1, 'uncertain outcome remains visible across reload in this tab');
+  h.element('amneziaSetupPassword').value = 'fresh-again';
+  await h.context.wgControlPreview();
+  assert.equal(h.session.size, 0, 'a verified new preview resolves the uncertainty marker');
+  assert.equal(h.element('wgControlApply').hidden, false);
+});
+
+test('changing the SSH endpoint invalidates WireGuard review before any write', async () => {
+  const host = 'wg.example', scope = { protocol: 1, scope: 'entered_target', host, port: 22,
+    host_key_fingerprint: FINGERPRINT };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/wg-control/preview': { ...scope, schema_version: 1,
+      action: 'preview', writes: false, state_revision: 'a'.repeat(64),
+      source_revision: 'b'.repeat(64), installed_current: false, socket_active: false,
+      service_active: false, socket_enabled: false, pending_recovery: false,
+      inventory_timer_active: false, inventory_timer_enabled: false,
+      inventory_snapshot_present: false, missing_dependencies: [],
+      apparmor_profile_present: true, can_apply: true, requires_service_restart: false },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = '22';
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'secret';
+  await h.context.wgControlPreview();
+  assert.equal(h.element('wgControlApply').hidden, false);
+  h.element('amneziaSetupRemoteHost').value = 'other.example';
+  h.element('amneziaSetupRemoteHost').listeners.get('input')();
+  assert.equal(h.element('wgControlApply').hidden, true);
+  assert.equal(h.element('wgControlReview').hidden, true);
+  h.context.wgControlConfirm('apply');
+  assert.equal(h.element('wgControlDialog').open, false);
+  assert.equal(h.calls.filter((call) => call.path.endsWith('/wg-control/apply')).length, 0);
 });
 
 test('entered host prepares verified VPN code through preview and separate confirmation', async () => {

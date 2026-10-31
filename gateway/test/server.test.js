@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import ssh2 from "ssh2";
-import { createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
+import { agentTimeoutMs, createHandler, hostKey, inspectHostKey, inspectTargetHostKey, issueGrant,
   previewAmneziaSetup, previewTargetInstall, probeTargetStatus, proxyAgent, requireUnrestrictedAdmin,
   safeAgentResult, validateAgentPayload,
   safeAmneziaPreview, validateAmneziaPreview, validateLogin, validateTargetHostKey,
@@ -1031,6 +1031,86 @@ test("VPN source route enforces admin, origin and credential clearing", async ()
   assert.equal(selected.passphrase, "");
 });
 
+test("WireGuard broker accepts exact pinned payloads and sanitizes fixed results", () => {
+  const login = statusInput({ host: "remote.example" });
+  const expected = { state_revision: "a".repeat(64), source_revision: "b".repeat(64) };
+  assert.equal(validateAgentPayload("wg-control-preview", login).host, "remote.example");
+  assert.deepEqual(validateAgentPayload("wg-control-apply", { ...login, expected, confirm: true }).expected,
+    expected);
+  assert.deepEqual(validateAgentPayload("wg-control-recover", { ...login, confirm: true }).confirm, true);
+  for (const bad of [
+    { ...login, expected, confirm: false },
+    { ...login, expected: { ...expected, state_revision: "A".repeat(64) }, confirm: true },
+    { ...login, expected: { ...expected, command: "whoami" }, confirm: true },
+  ]) assert.throws(() => validateAgentPayload("wg-control-apply", bad), /INVALID_INPUT/);
+  assert.throws(() => validateAgentPayload("wg-control-recover", { ...login, confirm: "true" }), /INVALID_INPUT/);
+  assert.throws(() => validateAgentPayload("wg-control-preview", { ...login, command: "whoami" }), /INVALID_INPUT/);
+
+  const scope = { protocol: 1, scope: "entered_target", host: "remote.example", port: 22022,
+    host_key_fingerprint: FINGERPRINT };
+  const preview = { ...scope, schema_version: 1, action: "preview", writes: false,
+    ...expected, installed_current: false, socket_active: false, service_active: false,
+    socket_enabled: false, pending_recovery: false, inventory_timer_active: false,
+    inventory_timer_enabled: false, inventory_snapshot_present: false,
+    missing_dependencies: ["wg", "python3-cryptography"], apparmor_profile_present: false,
+    can_apply: true, requires_service_restart: false };
+  assert.deepEqual(safeAgentResult("wg-control-preview", preview), preview);
+  assert.throws(() => safeAgentResult("wg-control-preview", { ...preview, private_key: "secret" }),
+    /INSTALLER_UNAVAILABLE/);
+  assert.throws(() => safeAgentResult("wg-control-preview", { ...preview,
+    missing_dependencies: ["curl"] }), /INSTALLER_UNAVAILABLE/);
+  assert.deepEqual(safeAgentResult("wg-control-preview", { ...scope, schema_version: 1,
+    action: "preview", writes: false, can_apply: false, pending_recovery: true,
+    reason: "RECOVERY_REQUIRED" }).reason, "RECOVERY_REQUIRED");
+  assert.throws(() => safeAgentResult("wg-control-preview", { ...scope, schema_version: 1,
+    action: "preview", writes: false, can_apply: false, pending_recovery: false,
+    reason: "target says password=secret" }), /INSTALLER_UNAVAILABLE/);
+  const installed = { ...scope, action: "installed", socket_active: true, service_active: true,
+    vpn_interface_changed: false, inventory_timer_active: true, inventory_snapshot_present: true,
+    source_revision: expected.source_revision };
+  assert.deepEqual(safeAgentResult("wg-control-apply", installed), installed);
+  assert.throws(() => safeAgentResult("wg-control-apply", { ...installed,
+    vpn_interface_changed: true }), /INSTALLER_UNAVAILABLE/);
+  assert.deepEqual(safeAgentResult("wg-control-recover", { ...scope,
+    action: "recovered", changed: true }).changed, true);
+  assert.equal(agentTimeoutMs("wg-control-preview"), 120000);
+  assert.equal(agentTimeoutMs("wg-control-apply"), 720000);
+  assert.equal(agentTimeoutMs("wg-control-recover"), 450000);
+});
+
+test("WireGuard broker route checks admin and origin, then wipes SSH credentials", async () => {
+  const login = statusInput({ host: "remote.example" });
+  const expected = { state_revision: "a".repeat(64), source_revision: "b".repeat(64) };
+  let forwarded = 0, selected;
+  const handler = createHandler({ admin: async (authorization) => {
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, agent: async (action, payload, token) => {
+    forwarded++;
+    assert.equal(action, "wg-control-apply");
+    assert.equal(token, TOKEN);
+    assert.deepEqual(payload.expected, expected);
+    assert.equal(payload.confirm, true);
+    assert.equal(payload.password, "server-secret");
+    selected = payload;
+    return { protocol: 1, scope: "entered_target", host: "remote.example", port: 22022,
+      host_key_fingerprint: FINGERPRINT, action: "installed", socket_active: true,
+      service_active: true, vpn_interface_changed: false, inventory_timer_active: true,
+      inventory_snapshot_present: true, source_revision: expected.source_revision };
+  } });
+  const path = "/api/v1/browser-ssh/wg-control/apply", payload = { ...login, expected, confirm: true };
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(forwarded, 0);
+  const result = await call(handler, { path, payload, headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.vpn_interface_changed, false);
+  assert.equal(forwarded, 1);
+  assert.equal(selected.password, "");
+  assert.equal(selected.private_key, "");
+  assert.equal(selected.passphrase, "");
+});
+
 test("Agent socket proxy sends one bounded request and accepts only a safe reply", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sovagrid-agent-proxy-"));
   const socketPath = join(directory, "control.sock");
@@ -1043,7 +1123,12 @@ test("Agent socket proxy sends one bounded request and accepts only a safe reply
       seen.push(request);
       socket.end(JSON.stringify(request.action === "apply" ?
         { ok: false, error: "APPLY_UNCERTAIN", request_id: REQUEST_ID } :
-        { ok: true, result: { ...AGENT_RECORD, private_key: "must-not-appear" } }) + "\n");
+        request.action === "wg-control-preview" ?
+          { ok: true, result: { protocol: 1, scope: "entered_target", host: "other.example",
+            port: 22022, host_key_fingerprint: FINGERPRINT, schema_version: 1,
+            action: "preview", writes: false, can_apply: false, pending_recovery: false,
+            reason: "SOURCE_NOT_PREPARED" } } :
+          { ok: true, result: { ...AGENT_RECORD, private_key: "must-not-appear" } }) + "\n");
     });
   });
   try {
@@ -1060,6 +1145,9 @@ test("Agent socket proxy sends one bounded request and accepts only a safe reply
       assert.equal(error.requestId, REQUEST_ID);
       return true;
     });
+    await assert.rejects(proxyAgent("wg-control-preview", validateAgentPayload("wg-control-preview",
+      statusInput({ host: "remote.example" })), TOKEN, { socketPath, timeoutMs: 1000 }),
+    /INSTALLER_UNAVAILABLE/, "a valid reply from another SSH endpoint must be rejected");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(directory, { recursive: true, force: true });
