@@ -73,13 +73,135 @@ test('VPN panel includes local and entered-host SSH setup with fresh PWA assets'
   assert.match(html, /id="amneziaSetupScopeRemote"/);
   assert.match(html, /id="amneziaSetupRemoteHost"/);
   assert.match(html, /id="amneziaSetupRemotePort"/);
+  assert.match(html, /id="amneziaSourcePreview"/);
+  assert.match(html, /id="amneziaSourceApply"/);
   assert.match(html, /Показать состояние без изменений/);
   assert.doesNotMatch(html, /id="amneziaSetup(?:Host|Port)Input"/);
   assert.match(styles, /#amneziaSetupKeyFields\[hidden\]/);
-  assert.match(html, /amnezia\.js\?v=9/);
-  assert.match(shell, /amnezia\.js\?v=9/);
-  assert.match(html, /styles\.css\?v=40/);
-  assert.match(shell, /styles\.css\?v=40/);
+  assert.match(html, /amnezia\.js\?v=10/);
+  assert.match(shell, /amnezia\.js\?v=10/);
+  assert.match(html, /styles\.css\?v=41/);
+  assert.match(shell, /styles\.css\?v=41/);
+});
+
+test('entered host prepares verified VPN code through preview and separate confirmation', async () => {
+  const host = 'vpn.example', port = 2202;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT };
+  const hashes = { source_manifest_sha256: 'a'.repeat(64), candidate_sha256: 'b'.repeat(64),
+    installed_sha256: '0'.repeat(64), state_sha256: '0'.repeat(64) };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/vpn-source/preview': { ...scope, ...hashes, expected: hashes,
+      change: 'install', temporary_writes: true, activation_writes: false,
+      cleanup_required: false },
+    '/api/v1/browser-ssh/vpn-source/apply': { ...scope, installed: true, changed: true,
+      cleanup_required: false, source_manifest_sha256: hashes.source_manifest_sha256,
+      candidate_sha256: hashes.candidate_sha256 },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'one-use-password';
+  await h.context.amneziaSourcePreview();
+  assert.deepEqual(h.calls.map((call) => call.path), [
+    '/api/v1/browser-ssh/target-host-key',
+    '/api/v1/browser-ssh/target-status',
+    '/api/v1/browser-ssh/vpn-source/preview',
+  ]);
+  assert.equal(h.element('amneziaSourceReview').hidden, false);
+  assert.equal(h.element('amneziaSourceApply').hidden, false);
+  assert.equal(h.element('amneziaSourceDigest').textContent, hashes.candidate_sha256);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  h.element('amneziaSetupPassword').value = 'second-use-password';
+  await h.context.amneziaSourceAction('apply');
+  const applied = h.calls.at(-1);
+  assert.equal(applied.path, '/api/v1/browser-ssh/vpn-source/apply');
+  assert.equal(JSON.parse(applied.options.body).password, 'second-use-password');
+  assert.deepEqual(JSON.parse(applied.options.body).expected, hashes);
+  assert.match(h.element('amneziaSourceNotice').textContent, /VPN-код подготовлен/);
+  assert.equal(h.element('amneziaSourceApply').hidden, true);
+  assert.equal(h.element('amneziaSetupPassword').value, '');
+  h.element('amneziaSetupRemoteHost').value = 'other.example';
+  h.element('amneziaSetupRemoteHost').listeners.get('input')();
+  assert.equal(h.element('amneziaSourceNotice').textContent, '');
+  assert.equal(h.element('amneziaSourcePreview').disabled, true);
+});
+
+test('VPN source preview exposes only reviewed recovery and never reuses a stale endpoint', async () => {
+  const host = 'vpn.example', port = 22;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT };
+  const hashes = { source_manifest_sha256: 'a'.repeat(64), candidate_sha256: 'b'.repeat(64),
+    installed_sha256: 'b'.repeat(64), state_sha256: 'c'.repeat(64) };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/vpn-source/preview': { ...scope, ...hashes, expected: hashes,
+      change: 'current', temporary_writes: true, activation_writes: false,
+      cleanup_required: true },
+    '/api/v1/browser-ssh/vpn-source/recover': { ...scope, recovered: true },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'temporary-password';
+  await h.context.amneziaSourcePreview();
+  assert.equal(h.element('amneziaSourceApply').hidden, true);
+  assert.equal(h.element('amneziaSourceRecover').hidden, false);
+  h.element('amneziaSetupPassword').value = 'fresh-password';
+  await h.context.amneziaSourceAction('recover');
+  assert.equal(h.calls.at(-1).path, '/api/v1/browser-ssh/vpn-source/recover');
+  assert.equal(JSON.parse(h.calls.at(-1).options.body).password, 'fresh-password');
+  assert.equal(JSON.parse(h.calls.at(-1).options.body).expected, undefined);
+  assert.match(h.element('amneziaSourceNotice').textContent, /Очистка завершена/);
+  h.element('amneziaSetupRemoteHost').value = 'other.example';
+  h.element('amneziaSetupRemoteHost').listeners.get('input')();
+  assert.equal(h.element('amneziaSourceNotice').textContent, '');
+  assert.equal(h.element('amneziaSourceRecover').hidden, true);
+});
+
+test('interrupted VPN source staging offers recovery after a failed preview', async () => {
+  const host = 'vpn.example', port = 22;
+  const scope = { protocol: 1, scope: 'entered_target', host, port,
+    host_key_fingerprint: FINGERPRINT };
+  const h = harness({ replies: {
+    '/api/v1/browser-ssh/target-host-key': { ...scope, key_type: 'ssh-ed25519',
+      fingerprint: FINGERPRINT, reverify_required: true },
+    '/api/v1/browser-ssh/target-status': { ...scope, kind: 'agent_only' },
+    '/api/v1/browser-ssh/vpn-source/preview': { __httpStatus: 409,
+      body: { error: 'STAGE_CLEANUP_REQUIRED' } },
+    '/api/v1/browser-ssh/vpn-source/recover': { ...scope, recovered: true },
+  } });
+  h.element('amneziaSetupScopeLocal').checked = false;
+  h.element('amneziaSetupScopeRemote').checked = true;
+  h.context.amneziaSetupReset();
+  h.element('amneziaSetupRemoteHost').value = host;
+  h.element('amneziaSetupRemotePort').value = String(port);
+  await h.context.amneziaSetupInspect();
+  h.element('amneziaSetupTrust').checked = true;
+  h.element('amneziaSetupUsername').value = 'root';
+  h.element('amneziaSetupPassword').value = 'temporary-password';
+  await h.context.amneziaSourcePreview();
+  assert.equal(h.element('amneziaSourceRecover').hidden, false);
+  assert.equal(h.element('amneziaSourceApply').hidden, true);
+  h.element('amneziaSetupPassword').value = 'fresh-password';
+  await h.context.amneziaSourceAction('recover');
+  assert.equal(h.calls.at(-1).path, '/api/v1/browser-ssh/vpn-source/recover');
+  assert.match(h.element('amneziaSourceNotice').textContent, /Очистка завершена/);
 });
 
 test('entered Ubuntu host needs its own pinned SSH key and status before VPN preview', async () => {

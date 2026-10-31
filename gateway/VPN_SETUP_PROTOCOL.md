@@ -56,9 +56,21 @@ The root `enroll-preview` command may initialize its private lock directory on
 first use. Its `writes: false` flag means it does not change the VPN container,
 client table, broker, or enrollment record.
 
-The entered host must already have the compatible `sovagrid-vpn` source and
-root or passwordless sudo access to its fixed Amnezia installer. This API does
-not transfer source files, create a VPN container, or create a jump tunnel.
+The entered host needs root SSH access to prepare compatible `sovagrid-vpn`
+source through `POST /api/v1/browser-ssh/vpn-source/preview`, `/apply`, and
+`/recover`. These routes require the same exact eight SSH fields as target
+status, unrestricted Hub admin access, and the independently reviewed host
+fingerprint. Preview stages a verified bundle temporarily, returns four SHA-256
+fields in `expected`, the `install|update|current` decision, and
+`cleanup_required`; apply requires that entire `expected` object unchanged.
+The helper checks the target files again before installing both fixed source
+trees. A recovery request cleans up only its owned temporary state. A lost
+apply response or `cleanup_required:true` requires a fresh preview before
+further action. Source updates refuse an installed Amnezia or WireGuard control
+unit or enable marker, even if the unit is currently stopped.
+These routes do not create a VPN container, arm a broker, or create a jump
+tunnel. The Amnezia routes still require an existing compatible container and
+root or passwordless sudo access to their fixed installer.
 An SSH reverse tunnel bound only to the Hub host's loopback is not reachable
 from the gateway container by this route; a separately configured reachable
 SSH endpoint is needed.

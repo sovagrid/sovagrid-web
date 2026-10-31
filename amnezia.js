@@ -15,7 +15,8 @@ const amneziaClient = {
   profile: null, downloadUrls: new Set(),
 };
 const amneziaSetup = { generation: 0, busy: false, fingerprint: null, changedPin: false,
-  controller: null, endpoint: null, setup: null, enrollment: null, identity: null, pendingAction: null };
+  controller: null, endpoint: null, setup: null, enrollment: null, identity: null,
+  source: null, sourceIdentity: null, pendingAction: null };
 const AMNEZIA_ENROLL_FIELDS = ["protocol", "action", "writes", "target", "container_id", "image_id",
   "config_sha256", "table_sha256", "configured_clients", "vpn_protocol", "interface", "listen_port",
   "server_subnet", "host_key_fingerprint", "reverify_required"].sort();
@@ -1108,6 +1109,20 @@ function amneziaSetupSameIdentity() {
     return reviewed && Object.keys(current).every((key) => current[key] === reviewed[key]);
   } catch { return false; }
 }
+function amneziaSourceSameIdentity() {
+  try {
+    const current = amneziaSetupIdentity(), reviewed = amneziaSetup.sourceIdentity;
+    return reviewed && Object.keys(current).every((key) => current[key] === reviewed[key]);
+  } catch { return false; }
+}
+function amneziaSetupDiscardSource() {
+  amneziaSetup.source = null;
+  amneziaSetup.sourceIdentity = null;
+  $("amneziaSourceReview").hidden = true;
+  $("amneziaSourceSummary").textContent = "";
+  $("amneziaSourceDigest").textContent = "";
+  $("amneziaSourceNotice").textContent = "";
+}
 function amneziaSetupDiscardReview() {
   amneziaSetup.setup = null;
   amneziaSetup.enrollment = null;
@@ -1145,6 +1160,15 @@ function amneziaSetupRender() {
   $("amneziaSetupInspect").disabled = !allowed || amneziaSetup.busy;
   $("amneziaSetupSubmit").disabled = !allowed || amneziaSetup.busy || !amneziaSetup.fingerprint ||
     amneziaSetup.changedPin || !$("amneziaSetupTrust").checked || !amneziaSetupSameEndpoint();
+  const sourceSafe = remote && allowed && !amneziaSetup.busy && !!amneziaSetup.fingerprint &&
+    !amneziaSetup.changedPin && $("amneziaSetupTrust").checked && amneziaSetupSameEndpoint();
+  $("amneziaSourcePreview").disabled = !sourceSafe;
+  $("amneziaSourceReview").hidden = !sourceSafe || !amneziaSourceSameIdentity() || !amneziaSetup.source;
+  $("amneziaSourceApply").hidden = !amneziaSetup.source || !sourceSafe ||
+    !amneziaSourceSameIdentity() || amneziaSetup.source.cleanup_required ||
+    amneziaSetup.source.change === "current";
+  $("amneziaSourceRecover").hidden = !amneziaSetup.source || !sourceSafe ||
+    !amneziaSourceSameIdentity() || !amneziaSetup.source.cleanup_required;
   for (const id of ["amneziaSetupTarget", "amneziaSetupScopeLocal", "amneziaSetupScopeRemote",
     "amneziaSetupRemoteHost", "amneziaSetupRemotePort", "amneziaSetupUsername", "amneziaSetupAuthPassword",
     "amneziaSetupAuthKey", "amneziaSetupPassword", "amneziaSetupPrivateKey", "amneziaSetupPassphrase",
@@ -1176,6 +1200,7 @@ function amneziaSetupReset() {
   $("amneziaSetupHostKeyReview").hidden = true;
   $("amneziaSetupReplaceKey").hidden = true;
   amneziaSetupDiscardReview();
+  amneziaSetupDiscardSource();
   $("amneziaSetupSummary").textContent = "";
   $("amneziaSetupDetails").textContent = "";
   $("amneziaSetupUsername").value = "";
@@ -1189,6 +1214,7 @@ function amneziaSetupMethodChanged() {
   $("amneziaSetupPasswordFields").hidden = key;
   amneziaSetupClearSecrets();
   amneziaSetupDiscardReview();
+  amneziaSetupDiscardSource();
   amneziaSetupRender();
 }
 function amneziaSetupCurrent(generation, token, base, origin) {
@@ -1236,6 +1262,18 @@ function amneziaSetupExplain(failure) {
   if (failure.message === "INVALID_INPUT") return "Проверьте поля SSH и попробуйте снова.";
   if (failure.message === "INVALID_TARGET") return "Укажите корректный адрес и порт SSH удалённого сервера (1–65535).";
   if (failure.message === "TARGET_NOT_READY") return "Удалённый сервер должен быть Ubuntu с установленным SovaGrid Agent или Hub. При необходимости сначала установите Agent через мастер серверов.";
+  if (failure.message === "SOURCE_UNTRUSTED" || failure.message === "SOURCE_CHANGED")
+    return "Проверенный пакет VPN на Hub изменился или недоступен. Обновите серверную часть и проверьте пакет снова.";
+  if (failure.message === "STALE_PREVIEW" || failure.message === "STATE_CONFLICT")
+    return "Файлы VPN на сервере изменились после проверки. Проверьте пакет снова перед применением.";
+  if (failure.message === "OWNERSHIP_CONFLICT" || failure.message === "CONTROL_ACTIVE")
+    return "На сервере есть чужие файлы или работающий брокер управления. SovaGrid не будет их заменять; проверьте сервер и окно обслуживания.";
+  if (failure.message === "RECOVERY_REQUIRED" || failure.message === "STAGE_CLEANUP_REQUIRED")
+    return "Осталась незавершённая подготовка VPN-кода. Проверьте пакет и завершите очистку перед новым действием.";
+  if (failure.message === "ROOT_REQUIRED") return "Для подготовки VPN-кода нужен SSH-вход root или sudo без запроса пароля.";
+  if (["JOURNAL_UNAVAILABLE", "UNSAFE_LOCK", "OPERATION_FAILED", "INTERNAL_ERROR",
+       "RESPONSE_TOO_LARGE", "RUNTIME_UNAVAILABLE"].includes(failure.message))
+    return "Подготовка VPN-кода не завершилась. Проверьте состояние сервера и повторите предпросмотр.";
   return "Не удалось проверить подключение Amnezia на этом хосте.";
 }
 async function amneziaSetupInspect() {
@@ -1252,6 +1290,7 @@ async function amneziaSetupInspect() {
   $("amneziaSetupHostKeyReview").hidden = true;
   $("amneziaSetupReplaceKey").hidden = true;
   amneziaSetupDiscardReview();
+  amneziaSetupDiscardSource();
   amneziaSetupClearSecrets();
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
@@ -1405,7 +1444,7 @@ function amneziaSetupValidActionIdentity(result) {
     .some((key) => Object.hasOwn(result ?? {}, key));
 }
 
-async function amneziaSetupCredentials() {
+async function amneziaSetupCredentials({ requireReview = true } = {}) {
   const identity = amneziaSetupIdentity();
   const file = identity.method === "private_key" ? $("amneziaSetupPrivateKey").files?.[0] : null;
   const passphrase = identity.method === "private_key" ? $("amneziaSetupPassphrase").value : "";
@@ -1419,7 +1458,8 @@ async function amneziaSetupCredentials() {
   if (identity.method === "private_key") {
     try { private_key = await file.text(); } catch { throw new Error("KEY_READ_FAILED"); }
   } else password = $("amneziaSetupPassword").value;
-  if (!amneziaSetupSameIdentity() ||
+  if ((requireReview && !amneziaSetupSameIdentity()) ||
+      Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key]) ||
       !amneziaSetupSameEndpoint() ||
       (identity.method === "private_key" && (file !== $("amneziaSetupPrivateKey").files?.[0] ||
         passphrase !== $("amneziaSetupPassphrase").value)) ||
@@ -1430,6 +1470,138 @@ async function amneziaSetupCredentials() {
   return { username: identity.username, method: identity.method, fingerprint: identity.fingerprint,
     password, private_key, passphrase, target: identity.target,
     ...(amneziaSetup.endpoint ?? {}) };
+}
+
+function amneziaSourceValid(result) {
+  const endpoint = amneziaSetup.endpoint;
+  const hashes = ["source_manifest_sha256", "candidate_sha256", "installed_sha256", "state_sha256"];
+  return !!endpoint && result?.protocol === 1 && result.scope === "entered_target" &&
+    result.host === endpoint.host && result.port === endpoint.port &&
+    result.host_key_fingerprint === amneziaSetup.fingerprint &&
+    hashes.every((key) => typeof result[key] === "string" && /^[0-9a-f]{64}$/.test(result[key]) &&
+      result.expected?.[key] === result[key]) &&
+    Object.keys(result.expected ?? {}).length === hashes.length &&
+    ["install", "update", "current"].includes(result.change) &&
+    result.temporary_writes === true && result.activation_writes === false &&
+    typeof result.cleanup_required === "boolean";
+}
+
+async function amneziaSourcePreview() {
+  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupRemote() ||
+      !amneziaSetup.fingerprint || amneziaSetup.changedPin ||
+      !$("amneziaSetupTrust").checked || !amneziaSetupSameEndpoint()) return;
+  const identity = amneziaSetupIdentity();
+  const endpoint = amneziaSetup.endpoint;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  amneziaSetupDiscardSource();
+  amneziaSetupDiscardReview();
+  clearError($("amneziaSetupError"));
+  amneziaSetupRender();
+  let payload;
+  try {
+    payload = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key]) ||
+        amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
+    const { target: _target, ...login } = payload;
+    amneziaSetupClearSecrets();
+    const status = await amneziaSetupApi("/api/v1/browser-ssh/target-status", login, token, 30000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint()) return;
+    if (status?.protocol !== 1 || status.scope !== "entered_target" ||
+        status.host !== endpoint.host || status.port !== endpoint.port ||
+        status.host_key_fingerprint !== identity.fingerprint ||
+        !["managed", "agent_only"].includes(status.kind)) throw new Error("TARGET_NOT_READY");
+    const result = await amneziaSetupApi("/api/v1/browser-ssh/vpn-source/preview", login, token, 720000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSetupSameEndpoint() ||
+        Object.keys(identity).some((key) => amneziaSetupIdentity()[key] !== identity[key])) return;
+    if (!amneziaSourceValid(result)) throw new Error("INVALID_RESPONSE");
+    amneziaSetupSavePin(identity.fingerprint);
+    amneziaSetupMarkPending(false);
+    amneziaSetup.source = result;
+    amneziaSetup.sourceIdentity = identity;
+    $("amneziaSourceSummary").textContent = result.cleanup_required
+      ? "После предыдущей операции остались собственные временные файлы SovaGrid. Завершите очистку и проверьте пакет снова."
+      : result.change === "current" ? "Совместимый VPN-код уже готов на сервере."
+        : result.change === "install" ? "VPN-код отсутствует. Можно подготовить его на этом сервере."
+          : "Найден более старый VPN-код. Обновление доступно только до установки брокера управления; существующий брокер мастер не заменит.";
+    $("amneziaSourceDigest").textContent = result.candidate_sha256;
+    $("amneziaSourceNotice").textContent = "";
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      if (["STAGE_CLEANUP_REQUIRED", "RECOVERY_REQUIRED"].includes(failure.message) &&
+          amneziaSetupSameEndpoint() && !amneziaSetup.changedPin && $("amneziaSetupTrust").checked) {
+        amneziaSetup.source = { change: "current", cleanup_required: true, recovery_only: true };
+        amneziaSetup.sourceIdentity = identity;
+        $("amneziaSourceSummary").textContent =
+          "Осталась собственная временная подготовка SovaGrid. Завершите очистку и проверьте пакет заново.";
+        $("amneziaSourceDigest").textContent = "Отпечаток доступен после очистки.";
+      }
+      showError($("amneziaSetupError"), failure.message === "KEY_READ_FAILED"
+        ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
+    }
+  } finally {
+    payload = null;
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
+}
+
+async function amneziaSourceAction(action) {
+  const source = amneziaSetup.source;
+  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSetupRemote() || !source ||
+      !amneziaSourceSameIdentity() || !amneziaSetupSameEndpoint() ||
+      amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
+      !((action === "apply" && source.change !== "current" && !source.cleanup_required) ||
+        (action === "recover" && source.cleanup_required))) return;
+  const generation = amneziaSetup.generation, token = state.token, base = state.base, origin = location.origin;
+  amneziaSetup.busy = true;
+  clearError($("amneziaSetupError"));
+  amneziaSetupRender();
+  let payload;
+  try {
+    payload = await amneziaSetupCredentials({ requireReview: false });
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSourceSameIdentity() ||
+        amneziaSetup.changedPin || !$("amneziaSetupTrust").checked) return;
+    const { target: _target, ...login } = payload;
+    amneziaSetupClearSecrets();
+    amneziaSetupMarkPending(true);
+    const result = await amneziaSetupApi(`/api/v1/browser-ssh/vpn-source/${action}`,
+      action === "apply" ? { ...login, expected: source.expected } : login, token, 720000);
+    if (!amneziaSetupCurrent(generation, token, base, origin) || !amneziaSourceSameIdentity()) return;
+    if (result?.protocol !== 1 || result.scope !== "entered_target" ||
+        result.host !== amneziaSetup.endpoint.host || result.port !== amneziaSetup.endpoint.port ||
+        result.host_key_fingerprint !== amneziaSetup.fingerprint ||
+        (action === "apply" && (result.installed !== true || typeof result.changed !== "boolean" ||
+          typeof result.cleanup_required !== "boolean" || result.cleanup_required ||
+          result.source_manifest_sha256 !== source.source_manifest_sha256 ||
+          result.candidate_sha256 !== source.candidate_sha256)) ||
+        (action === "recover" && typeof result.recovered !== "boolean")) {
+      throw new Error("SETUP_UNCERTAIN");
+    }
+    amneziaSetupMarkPending(false);
+    amneziaSetupDiscardSource();
+    amneziaSetupDiscardReview();
+    $("amneziaSourceNotice").textContent = action === "apply"
+      ? "VPN-код подготовлен. Теперь покажите состояние Amnezia и продолжите настройку брокера."
+      : "Очистка завершена. Проверьте VPN-код снова перед следующим действием.";
+  } catch (failure) {
+    if (amneziaSetupCurrent(generation, token, base, origin)) {
+      amneziaSetupDiscardSource();
+      if (["INVALID_INPUT", "AUTH_FAILED", "HOST_KEY_CHANGED", "STALE_REVISION",
+           "STALE_PREVIEW", "SOURCE_CHANGED", "STATE_CONFLICT", "OWNERSHIP_CONFLICT",
+           "CONTROL_ACTIVE", "ROOT_REQUIRED"].includes(failure.message))
+        amneziaSetupMarkPending(false);
+      showError($("amneziaSetupError"), failure.message === "KEY_READ_FAILED"
+        ? "Не удалось прочитать выбранный файл ключа." : amneziaSetupExplain(failure));
+    }
+  } finally {
+    payload = null;
+    amneziaSetupClearSecrets();
+    if (amneziaSetup.generation === generation) amneziaSetup.busy = false;
+    amneziaSetupRender();
+  }
 }
 
 async function amneziaSetupAction(action) {
@@ -1517,8 +1689,29 @@ function amneziaSetupConfirm(action) {
   $("amneziaSetupDialog").showModal();
 }
 
+function amneziaSourceConfirm(action) {
+  const source = amneziaSetup.source;
+  if (!amneziaSetupAllowed() || amneziaSetup.busy || !amneziaSourceSameIdentity() ||
+      !amneziaSetupSameEndpoint() || amneziaSetup.changedPin || !$("amneziaSetupTrust").checked ||
+      !((action === "apply" && source?.change !== "current" && !source?.cleanup_required) ||
+        (action === "recover" && source?.cleanup_required))) return;
+  const host = `${amneziaSetup.endpoint.host}:${amneziaSetup.endpoint.port}`;
+  $("amneziaSetupDialogTitle").textContent = action === "apply"
+    ? "Подготовить VPN-код" : "Завершить очистку VPN-кода";
+  $("amneziaSetupDialogSummary").textContent = action === "apply"
+    ? `SovaGrid установит проверенный VPN-код на ${host}. VPN-контейнер и работающие службы не меняются. Пакет: ${source.candidate_sha256}.`
+    : `SovaGrid очистит только собственные временные файлы подготовки на ${host}.`;
+  $("amneziaSetupMaintenanceLabel").hidden = true;
+  $("amneziaSetupMaintenance").checked = false;
+  amneziaSetup.pendingAction = `source-${action}`;
+  $("amneziaSetupDialog").showModal();
+}
+
 $("amneziaSetupInspect").addEventListener("click", () => { void amneziaSetupInspect(); });
 $("amneziaSetupForm").addEventListener("submit", (event) => { void amneziaSetupPreview(event); });
+$("amneziaSourcePreview").addEventListener("click", () => { void amneziaSourcePreview(); });
+$("amneziaSourceApply").addEventListener("click", () => amneziaSourceConfirm("apply"));
+$("amneziaSourceRecover").addEventListener("click", () => amneziaSourceConfirm("recover"));
 $("amneziaSetupEnrollPreview").addEventListener("click", () => { void amneziaSetupAction("enroll-preview"); });
 $("amneziaSetupEnroll").addEventListener("click", () => amneziaSetupConfirm("enroll"));
 $("amneziaSetupInstall").addEventListener("click", () => amneziaSetupConfirm("install"));
@@ -1529,7 +1722,9 @@ $("amneziaSetupDialogConfirm").addEventListener("click", () => {
   const action = amneziaSetup.pendingAction;
   if (!action || (action === "arm" && !$("amneziaSetupMaintenance").checked)) return;
   $("amneziaSetupDialog").close();
-  void amneziaSetupAction(action);
+  if (action === "source-apply" || action === "source-recover")
+    void amneziaSourceAction(action.slice("source-".length));
+  else void amneziaSetupAction(action);
 });
 for (const id of ["amneziaSetupScopeLocal", "amneziaSetupScopeRemote"])
   $(id).addEventListener("change", amneziaSetupReset);
@@ -1548,6 +1743,7 @@ for (const id of ["amneziaSetupRemoteHost", "amneziaSetupRemotePort"])
     $("amneziaSetupHostKeyReview").hidden = true;
     $("amneziaSetupReplaceKey").hidden = true;
     amneziaSetupDiscardReview();
+    amneziaSetupDiscardSource();
     amneziaSetupClearSecrets();
     clearError($("amneziaSetupError"));
     amneziaSetupRender();
@@ -1557,10 +1753,14 @@ $("amneziaSetupAuthPassword").addEventListener("change", amneziaSetupMethodChang
 $("amneziaSetupAuthKey").addEventListener("change", amneziaSetupMethodChanged);
 $("amneziaSetupUsername").addEventListener("input", () => {
   amneziaSetupDiscardReview();
+  amneziaSetupDiscardSource();
   amneziaSetupRender();
 });
 $("amneziaSetupTrust").addEventListener("change", () => {
-  if (!$("amneziaSetupTrust").checked) amneziaSetupDiscardReview();
+  if (!$("amneziaSetupTrust").checked) {
+    amneziaSetupDiscardReview();
+    amneziaSetupDiscardSource();
+  }
   amneziaSetupRender();
 });
 $("amneziaSetupReplaceKey").addEventListener("click", () => {
@@ -1568,6 +1768,7 @@ $("amneziaSetupReplaceKey").addEventListener("click", () => {
   amneziaSetup.changedPin = false;
   $("amneziaSetupReplaceKey").hidden = true;
   $("amneziaSetupTrust").checked = false;
+  amneziaSetupDiscardSource();
   clearError($("amneziaSetupError"));
   amneziaSetupRender();
 });

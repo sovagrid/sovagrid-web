@@ -184,5 +184,5 @@ test('inode form is included in the container and scoped offline shell', () => {
   assert.match(fs.readFileSync('Dockerfile', 'utf8'), /monitoring\.js inode\.js/);
   assert.match(fs.readFileSync('index.html', 'utf8'), /inode\.js\?v=1/);
   assert.match(fs.readFileSync('sw.js', 'utf8'), /inode\.js\?v=1/);
-  assert.match(fs.readFileSync('sw.js', 'utf8'), /\$\{CACHE_PREFIX\}v71/);
+  assert.match(fs.readFileSync('sw.js', 'utf8'), /\$\{CACHE_PREFIX\}v72/);
 });

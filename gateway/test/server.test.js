@@ -977,6 +977,60 @@ test("Agent HTTP routes require a fresh unrestricted session and never expose su
   assert.deepEqual(error.body, { error: "PREPARE_UNCERTAIN", request_id: REQUEST_ID });
 });
 
+test("VPN source setup accepts only pinned SSH credentials and the exact reviewed revision", async () => {
+  const login = statusInput({ host: "remote.example" });
+  const hashes = { source_manifest_sha256: "a".repeat(64), installed_sha256: "0".repeat(64),
+    state_sha256: "0".repeat(64), candidate_sha256: "b".repeat(64) };
+  assert.equal(validateAgentPayload("vpn-source-preview", login).host, "remote.example");
+  assert.deepEqual(validateAgentPayload("vpn-source-apply", { ...login, expected: hashes }).expected, hashes);
+  assert.throws(() => validateAgentPayload("vpn-source-apply", { ...login,
+    expected: { ...hashes, candidate_sha256: "bad" } }), /INVALID_INPUT/);
+  assert.throws(() => validateAgentPayload("vpn-source-apply", { ...login,
+    expected: { ...hashes, password: "unexpected" } }), /INVALID_INPUT/);
+  const preview = safeAgentResult("vpn-source-preview", { protocol: 1,
+    scope: "entered_target", host: "remote.example", port: 22022,
+    host_key_fingerprint: FINGERPRINT, ...hashes, expected: hashes,
+    change: "install", temporary_writes: true, activation_writes: false,
+    cleanup_required: false, private_key: "must-not-leak" });
+  assert.equal(preview.private_key, undefined);
+  assert.deepEqual(preview.expected, hashes);
+  assert.throws(() => safeAgentResult("vpn-source-preview", { ...preview,
+    expected: { ...hashes, state_sha256: "c".repeat(64) } }), /INSTALLER_UNAVAILABLE/);
+});
+
+test("VPN source route enforces admin, origin and credential clearing", async () => {
+  let forwarded = 0;
+  let selected;
+  const handler = createHandler({ admin: async (authorization) => {
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, agent: async (action, payload, token) => {
+    forwarded++;
+    assert.equal(action, "vpn-source-preview");
+    assert.equal(token, TOKEN);
+    assert.equal(payload.password, "server-secret");
+    selected = payload;
+    return { protocol: 1, scope: "entered_target", host: "remote.example", port: 22022,
+      host_key_fingerprint: FINGERPRINT, source_manifest_sha256: "a".repeat(64),
+      candidate_sha256: "b".repeat(64), installed_sha256: "0".repeat(64),
+      state_sha256: "0".repeat(64), change: "install", temporary_writes: true,
+      activation_writes: false, cleanup_required: false };
+  } });
+  const path = "/api/v1/browser-ssh/vpn-source/preview";
+  const payload = statusInput({ host: "remote.example" });
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(forwarded, 0);
+  const result = await call(handler, { path, payload,
+    headers: { authorization: "Bearer " + TOKEN } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.change, "install");
+  assert.equal(forwarded, 1);
+  assert.equal(selected.password, "");
+  assert.equal(selected.private_key, "");
+  assert.equal(selected.passphrase, "");
+});
+
 test("Agent socket proxy sends one bounded request and accepts only a safe reply", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sovagrid-agent-proxy-"));
   const socketPath = join(directory, "control.sock");

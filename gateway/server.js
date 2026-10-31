@@ -126,14 +126,18 @@ const USERNAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/;
 const GRANT = /^[A-Za-z0-9_-]{43}$/;
 const BEARER = /^Bearer ([A-Za-z0-9_-]{43})$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list"]);
+const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list",
+  "vpn-source-preview", "vpn-source-apply", "vpn-source-recover"]);
 const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE", "BUSY", "INVALID_INPUT", "INVALID_REQUEST_ID",
   "INVALID_REVISION", "INVALID_FINGERPRINT", "INVALID_TARGET", "HOST_KEY_MISMATCH", "NOT_FOUND",
   "STALE_REVISION", "RESUME_REQUIRED", "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED",
   "PREPARE_UNCERTAIN", "APPLY_UNCERTAIN", "RESUME_UNCERTAIN", "CLEANUP_UNCERTAIN",
   "ARCHIVE_UNSAFE", "ARCHIVE_FULL",
   "SSH_UNAVAILABLE", "SOURCE_UNTRUSTED", "RUNTIME_UNAVAILABLE", "INVALID_JOURNAL",
-  "INSTALLER_UNAVAILABLE"]);
+  "INSTALLER_UNAVAILABLE", "ROOT_REQUIRED", "JOURNAL_UNAVAILABLE", "UNSAFE_LOCK",
+  "INVALID_REQUEST", "SOURCE_CHANGED", "STATE_CONFLICT", "OWNERSHIP_CONFLICT",
+  "STALE_PREVIEW", "CONTROL_ACTIVE", "OPERATION_FAILED", "INTERNAL_ERROR",
+  "STAGE_CLEANUP_REQUIRED", "RESPONSE_TOO_LARGE"]);
 
 if (!Number.isSafeInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("Invalid fixed host SSH port");
@@ -364,6 +368,20 @@ function exactFields(value, fields) {
 
 export function validateAgentPayload(action, value) {
   if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  if (action.startsWith("vpn-source-")) {
+    const credentialFields = ["host", "port", "username", "method", "fingerprint",
+      "password", "private_key", "passphrase"];
+    const fields = action === "vpn-source-apply" ? [...credentialFields, "expected"] : credentialFields;
+    if (!exactFields(value, fields)) throw new Error("INVALID_INPUT");
+    const target = validateTargetStatus(Object.fromEntries(credentialFields.map((key) => [key, value[key]])));
+    if (action !== "vpn-source-apply") return target;
+    const expectedFields = ["source_manifest_sha256", "installed_sha256", "state_sha256", "candidate_sha256"];
+    if (!exactFields(value.expected, expectedFields) ||
+        expectedFields.some((key) => typeof value.expected[key] !== "string" || !HEX_SHA.test(value.expected[key]))) {
+      throw new Error("INVALID_INPUT");
+    }
+    return { ...target, expected: Object.fromEntries(expectedFields.map((key) => [key, value.expected[key]])) };
+  }
   if (action === "prepare") {
     const selected = validateTargetInstallPreview(value);
     return { host: selected.host, port: selected.port, username: selected.username,
@@ -419,7 +437,48 @@ function safeAgentRecord(value) {
     registration_state: value.registration_state, recoverable: value.recoverable };
 }
 
+function safeVpnSourceResult(action, value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.protocol !== 1 || value.scope !== "entered_target" ||
+      typeof value.host !== "string" || !Number.isSafeInteger(value.port) ||
+      value.port < 1 || value.port > 65535 ||
+      typeof value.host_key_fingerprint !== "string" ||
+      !FINGERPRINT.test(value.host_key_fingerprint)) throw new Error("INSTALLER_UNAVAILABLE");
+  const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
+  if (endpoint.host !== value.host) throw new Error("INSTALLER_UNAVAILABLE");
+  const base = { protocol: 1, scope: "entered_target", host: value.host,
+    port: value.port, host_key_fingerprint: value.host_key_fingerprint };
+  if (action === "vpn-source-preview") {
+    const hashes = ["source_manifest_sha256", "candidate_sha256", "installed_sha256", "state_sha256"];
+    if (hashes.some((key) => typeof value[key] !== "string" || !HEX_SHA.test(value[key])) ||
+        !exactFields(value.expected, hashes) ||
+        hashes.some((key) => value.expected[key] !== value[key]) ||
+        !["install", "update", "current"].includes(value.change) ||
+        value.temporary_writes !== true || value.activation_writes !== false ||
+        typeof value.cleanup_required !== "boolean") throw new Error("INSTALLER_UNAVAILABLE");
+    return { ...base, ...Object.fromEntries(hashes.map((key) => [key, value[key]])),
+      expected: Object.fromEntries(hashes.map((key) => [key, value[key]])),
+      change: value.change, temporary_writes: true, activation_writes: false,
+      cleanup_required: value.cleanup_required };
+  }
+  if (action === "vpn-source-apply") {
+    if (value.installed !== true || typeof value.changed !== "boolean" ||
+        typeof value.cleanup_required !== "boolean" ||
+        typeof value.source_manifest_sha256 !== "string" || !HEX_SHA.test(value.source_manifest_sha256) ||
+        typeof value.candidate_sha256 !== "string" || !HEX_SHA.test(value.candidate_sha256)) {
+      throw new Error("INSTALLER_UNAVAILABLE");
+    }
+    return { ...base, installed: true, changed: value.changed,
+      cleanup_required: value.cleanup_required,
+      source_manifest_sha256: value.source_manifest_sha256,
+      candidate_sha256: value.candidate_sha256 };
+  }
+  if (value.recovered !== true && value.recovered !== false) throw new Error("INSTALLER_UNAVAILABLE");
+  return { ...base, recovered: value.recovered };
+}
+
 export function safeAgentResult(action, value) {
+  if (action.startsWith("vpn-source-")) return safeVpnSourceResult(action, value);
   if (action === "list") {
     if (!Array.isArray(value) || value.length > 256) throw new Error("INSTALLER_UNAVAILABLE");
     return value.map(safeAgentRecord);
@@ -505,7 +564,13 @@ export function proxyAgent(action, payload, token, { socketPath = AGENT_SOCKET,
         const response = JSON.parse(output.subarray(0, newline).toString("utf8"));
         if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error();
         if (response.ok === true && Object.keys(response).length === 2 && Object.hasOwn(response, "result")) {
-          finish(null, safeAgentResult(action, response.result));
+          const result = safeAgentResult(action, response.result);
+          if (action.startsWith("vpn-source-") &&
+              (result.host !== payload.host || result.port !== payload.port ||
+               result.host_key_fingerprint !== payload.fingerprint)) {
+            throw new Error("INSTALLER_UNAVAILABLE");
+          }
+          finish(null, result);
         } else if (response.ok === false && typeof response.error === "string" &&
                    AGENT_ERRORS.has(response.error) &&
                    Object.keys(response).every((key) => ["ok", "error", "request_id"].includes(key)) &&
@@ -1251,6 +1316,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   const probes = new WindowLimit(20, 60);
   const reads = new WindowLimit(60, 60);
   const attempts = new WindowLimit(5, 60);
+  const stages = new WindowLimit(5, 60);
   let active = 0;
   return async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -1266,10 +1332,11 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
     const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
     const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
-    const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction);
+    const vpnSourceAction = /^\/api\/v1\/browser-ssh\/vpn-source\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
+    const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview || Boolean(agentAction) || Boolean(vpnSourceAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -1279,7 +1346,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : isAgentRead || ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
+    if (!(isProbe ? probes : vpnSourceAction ? stages : isAgentRead ||
+          ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
       .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
       return;
@@ -1295,11 +1363,12 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       const value = await body(req);
       clearTimeout(bodyTimer);
       try {
-        if (agentAction) {
+        if (agentAction || vpnSourceAction) {
           const token = BEARER.exec(req.headers.authorization || "")?.[1];
           if (!token) throw new Error("AUTH_REQUIRED");
-          const selected = validateAgentPayload(agentAction, value);
-          try { json(res, 200, await agent(agentAction, selected, token)); }
+          const action = agentAction || `vpn-source-${vpnSourceAction}`;
+          const selected = validateAgentPayload(action, value);
+          try { json(res, 200, await agent(action, selected, token)); }
           finally { clearCredentials(selected); }
         } else if (isTargetProbe) {
           json(res, 200, await inspectTarget(validateTargetHostKey(value)));
@@ -1338,11 +1407,14 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD",
         ...AGENT_ERRORS]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
-      const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") ? 400 :
+      const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") &&
+        code !== "INVALID_JOURNAL" ? 400 :
         ["HOST_KEY_CHANGED", "HOST_KEY_MISMATCH", "SETUP_CHANGED", "STALE_REVISION", "RESUME_REQUIRED",
-          "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY"].includes(code) ? 409 :
+          "RECOVERY_REQUIRED", "ALREADY_ACTIVE", "TARGET_CHANGED", "BUSY", "SOURCE_CHANGED",
+          "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "CONTROL_ACTIVE",
+          "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK"].includes(code) ? 409 :
         code === "NOT_FOUND" ? 404 :
-        code === "UNSUPPORTED_AUTH_METHOD" ? 422 :
+        ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED"].includes(code) ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
           code === "ADMIN_FORBIDDEN" ? 403 : 503;
       json(res, status, error?.requestId && UUID.test(error.requestId) ?
