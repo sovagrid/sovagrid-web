@@ -1,0 +1,32 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.external-agent-update-panel { margin-top: 18px; }
+.external-agent-update-panel .field-help { line-height: 1.55; }
+.external-agent-update-technical { margin: 12px 0 18px; }
+.external-agent-update-technical p { overflow-wrap: anywhere; }
+.external-agent-update-panel code { word-break: break-all; }
+.external-agent-update-archive { display: grid; gap: 7px; max-width: 680px; margin: 16px 0 0; }
+.external-agent-update-archive input { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.external-agent-update-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 14px; }
+.external-agent-update-actions button { min-height: 44px; margin-top: 0; }
+.external-agent-update-review { margin-top: 18px; padding: 16px; border: 1px solid var(--sg-border, #385047); border-radius: 10px; background: var(--sg-surface-soft, #13252a); }
+.external-agent-update-review[hidden] { display: none; }
+.external-agent-update-operation { margin-top: 16px; padding: 14px 16px; border: 1px solid var(--sg-border, #385047); border-radius: 10px; background: var(--sg-surface-soft, #13252a); }
+.external-agent-update-operation[hidden] { display: none; }
+.external-agent-update-operation p { line-height: 1.5; }
+.external-agent-update-history { margin-top: 16px; }
+.external-agent-update-history button { min-height: 44px; }
+.external-agent-update-history pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; }
+.external-agent-update-review h3 { margin-top: 0; }
+.external-agent-update-review dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 9px; }
+.external-agent-update-review dl>div { min-width: 0; padding: 10px; border: 1px solid var(--sg-border, #385047); border-radius: 8px; }
+.external-agent-update-review dt { font-size: .73rem; color: var(--sg-muted, #92a8ae); margin-bottom: 5px; }
+.external-agent-update-review dd { margin: 0; overflow-wrap: anywhere; }
+.external-agent-update-review pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+.external-agent-update-confirm { display: flex; align-items: flex-start; gap: 9px; margin-top: 16px; line-height: 1.5; }
+.external-agent-update-confirm input { margin-top: 4px; accent-color: var(--sg-accent, #78e4b0); }
+@media (max-width: 600px) {
+  .external-agent-update-actions { display: grid; grid-template-columns: 1fr; }
+  .external-agent-update-actions button { width: 100%; }
+}

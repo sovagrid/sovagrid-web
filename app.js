@@ -119,6 +119,7 @@ function applyHubPermissions() {
   globalThis.publicWebAccessChanged?.();
   globalThis.localWebAccessChanged?.();
   globalThis.releaseFeedAccessChanged?.();
+  globalThis.externalAgentUpdateAccessChanged?.();
   globalThis.sovagridDirectSSH?.accessChanged?.();
 }
 const SEALED_PROFILE_INFO = "SovaGrid sealed WireGuard profile v1";
@@ -405,6 +406,7 @@ function logout(revoke = true) {
   globalThis.backupsReset?.();
   globalThis.hostBackupsReset?.();
   globalThis.releaseFeedReset?.();
+  globalThis.externalAgentUpdateReset?.();
   globalThis.accessReset?.();
   globalThis.processInventoryReset?.();
   globalThis.containerLogsReset?.();
@@ -613,6 +615,9 @@ async function refresh() {
     }
     if (state.view === "settings" && hubCanGlobalAdmin() && globalThis.releaseFeedRefresh) {
       details.push(globalThis.releaseFeedRefresh());
+    }
+    if (state.view === "settings" && hubCanGlobalAdmin() && globalThis.externalAgentUpdateRefresh) {
+      details.push(globalThis.externalAgentUpdateRefresh());
     }
     if (state.view === "vpn") {
       renderVpnControls();
