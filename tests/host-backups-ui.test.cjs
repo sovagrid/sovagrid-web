@@ -34,8 +34,47 @@ const portableOperation = (id = operationId, phase = 'complete') => ({
 });
 const portableVerification = { ok: true, request_id: operationId,
   archive, images_bytes: 8192, receipt: portableReceipt };
+function portableReceiptV2(layout = 'full') {
+  const value = JSON.parse(JSON.stringify(portableReceipt));
+  value.protocol = 'sovagrid-portable-host-receipt-v2';
+  value.active_units = ['sovagrid-release-feed.timer'];
+  value.unit_hashes = { 'sovagrid-release-feed.timer': 'b'.repeat(64) };
+  value.unit_states = {
+    [layout === 'full' ? 'sovagrid-agent.service' : 'sovagrid-agent-local.service']:
+      { active: true, enablement: 'enabled', sha256: 'a'.repeat(64) },
+    'sovagrid-release-feed.timer': { active: true, enablement: 'disabled', sha256: 'b'.repeat(64) },
+  };
+  return value;
+}
 const reply = (status, value) => ({ ok: status < 400, status,
   text: async () => JSON.stringify(value) });
+
+test('receipt v2 accepts layout-bound states and rejects unbound writer metadata', () => {
+  const h = harness();
+  for (const layout of ['full', 'hub-only']) {
+    const receipt = portableReceiptV2(layout);
+    assert.equal(h.context.hostBackupPortableReceipt(receipt, archiveId, layout), receipt);
+  }
+  assert.equal(h.context.hostBackupPortableReceipt(portableReceipt, archiveId), portableReceipt);
+  const mutations = [
+    (value) => { value.unit_states['sovagrid-unreviewed.service'] = {
+      active: false, enablement: 'disabled', sha256: 'a'.repeat(64) }; },
+    (value) => { value.unit_states['sovagrid-agent.service'].active = 1; },
+    (value) => { value.unit_states['sovagrid-agent.service'].enablement = 'invalid'; },
+    (value) => { value.unit_states['sovagrid-agent.service'].extra = true; },
+    (value) => { value.unit_states['sovagrid-release-feed.timer'].sha256 = 'c'.repeat(64); },
+    (value) => { value.unit_states['sovagrid-release-feed.timer'].active = false; },
+    (value) => { delete value.unit_states['sovagrid-release-feed.timer']; },
+    (value) => { value.active_units = []; value.unit_hashes = {}; },
+    (value) => { value.protocol = portableReceipt.protocol; },
+  ];
+  for (const mutate of mutations) {
+    const value = portableReceiptV2();
+    mutate(value);
+    assert.throws(() => h.context.hostBackupPortableReceipt(value, archiveId, 'full'), /квитанцию/);
+  }
+  assert.throws(() => h.context.hostBackupPortableReceipt(portableReceiptV2(), archiveId, 'hub-only'), /квитанцию/);
+});
 
 function harness(localStore = new Map()) {
   const elements = new Map(), calls = [];
@@ -399,4 +438,37 @@ test('changed receipt refuses browser export before any download grant', async (
   await h.context.hostBackupPortablePrepareDownload(operationId, 'images');
   assert.equal(h.calls.some((call) => call.url.includes('/download-grants/')), false);
   assert.match(h.element('hostBackupError').textContent, /изменились/);
+});
+
+test('v2 browser verification binds every unit state and invalidates changed metadata', async () => {
+  for (const changed of [false, true]) {
+    const h = harness();
+    h.context.location.origin = 'https://hub.example';
+    const receipt = portableReceiptV2();
+    const checked = portableReceiptV2();
+    checked.unit_states = Object.fromEntries(Object.entries(checked.unit_states).reverse());
+    if (changed) checked.unit_states['sovagrid-agent.service'].enablement = 'disabled';
+    h.setFetchHook((url) => {
+      if (url.endsWith('/portable/capabilities'))
+        return Promise.resolve(reply(200, { supported: true, download: true }));
+      if (url.endsWith('/operations/' + operationId + '/portable/verify'))
+        return Promise.resolve(reply(200, { ...portableVerification, receipt: checked }));
+      if (url.endsWith('/operations/' + operationId + '/portable'))
+        return Promise.resolve(reply(200, { ...portableOperation(), image_receipt: receipt }));
+      return Promise.resolve(metadata(url));
+    });
+    await h.context.hostBackupsRefresh(true);
+    await h.context.hostBackupPortableCheck(operationId);
+    await h.context.hostBackupPortableVerify(operationId);
+    if (changed) {
+      assert.equal(h.client.portableVerified, null);
+      assert.match(h.element('hostBackupError').textContent, /изменились/);
+    } else {
+      assert.equal(h.client.portableVerified.receipt.protocol, 'sovagrid-portable-host-receipt-v2');
+      const newer = portableReceiptV2();
+      newer.unit_states['sovagrid-agent.service'].enablement = 'disabled';
+      h.context.hostBackupSetActive(operation(operationId, 'complete'), true, newer);
+      assert.equal(h.client.portableVerified, null);
+    }
+  }
 });

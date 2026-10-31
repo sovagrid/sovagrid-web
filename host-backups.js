@@ -19,6 +19,92 @@ const HOST_BACKUP_PHASES = Object.freeze({
 });
 const HOST_BACKUP_FINAL = new Set(["complete", "recovered", "failed"]);
 const HOST_PORTABLE_RECEIPT = "sovagrid-portable-host-receipt-v1";
+const HOST_PORTABLE_RECEIPT_V2 = "sovagrid-portable-host-receipt-v2";
+const HOST_UNIT_ENABLEMENT = new Set(["alias", "disabled", "enabled", "enabled-runtime", "generated", "indirect", "linked", "linked-runtime", "masked", "masked-runtime", "static", "transient"]);
+const HOST_MANAGED_UNITS = {
+  "full": new Set(`
+    sovagrid-agent.service
+    sovagrid-amnezia-control.service
+    sovagrid-amnezia-control.socket
+    sovagrid-auto-update.service
+    sovagrid-auto-update.timer
+    sovagrid-container-inventory.service
+    sovagrid-container-inventory.timer
+    sovagrid-hub-backup-control.service
+    sovagrid-hub-backup-control.socket
+    sovagrid-journal-control.service
+    sovagrid-journal-control.socket
+    sovagrid-release-feed.service
+    sovagrid-release-feed.timer
+    sovagrid-service-control.service
+    sovagrid-service-control.socket
+    sovagrid-terminal-control.service
+    sovagrid-terminal-control.socket
+    sovagrid-vpn-control.service
+    sovagrid-vpn-control.socket
+    sovagrid-vpn-routing.service
+    sovagrid-vpn-status.service
+    sovagrid-vpn-status.timer
+    sovagrid-web-agent-control.service
+    sovagrid-web-agent-control.socket
+  `.trim().split(/\s+/)),
+  "hub-only": new Set(`
+    sovagrid-agent-local.service
+    sovagrid-container-inventory-local.service
+    sovagrid-container-inventory-local.timer
+    sovagrid-external-agent-apply@.service
+    sovagrid-external-agent-recovery.service
+    sovagrid-hub-backup-control.service
+    sovagrid-hub-backup-control.socket
+    sovagrid-hub-only-update.service
+    sovagrid-hub-only-update.timer
+    sovagrid-release-feed.service
+    sovagrid-release-feed.timer
+    sovagrid-service-local-control.service
+    sovagrid-service-local-control.socket
+    sovagrid-terminal-local-control.service
+    sovagrid-terminal-local-control.socket
+    sovagrid-vpn-routing.service
+    sovagrid-vpn-status.service
+    sovagrid-vpn-status.timer
+    sovagrid-web-agent-control.service
+    sovagrid-web-agent-control.socket
+  `.trim().split(/\s+/)),
+};
+const HOST_WRITER_UNITS = {
+  "full": new Set(`
+    sovagrid-amnezia-control.service
+    sovagrid-amnezia-control.socket
+    sovagrid-auto-update.service
+    sovagrid-auto-update.timer
+    sovagrid-container-inventory.service
+    sovagrid-container-inventory.timer
+    sovagrid-hub-backup-control.service
+    sovagrid-hub-backup-control.socket
+    sovagrid-release-feed.service
+    sovagrid-release-feed.timer
+    sovagrid-vpn-control.service
+    sovagrid-vpn-control.socket
+    sovagrid-vpn-status.service
+    sovagrid-vpn-status.timer
+    sovagrid-web-agent-control.service
+    sovagrid-web-agent-control.socket
+  `.trim().split(/\s+/)),
+  "hub-only": new Set(`
+    sovagrid-container-inventory-local.service
+    sovagrid-container-inventory-local.timer
+    sovagrid-hub-backup-control.service
+    sovagrid-hub-backup-control.socket
+    sovagrid-hub-only-update.service
+    sovagrid-hub-only-update.timer
+    sovagrid-release-feed.service
+    sovagrid-release-feed.timer
+    sovagrid-vpn-status.service
+    sovagrid-vpn-status.timer
+    sovagrid-web-agent-control.service
+    sovagrid-web-agent-control.socket
+  `.trim().split(/\s+/)),
+};
 const HOST_PORTABLE_PARTS = Object.freeze({
   archive: "Архив хоста", host_manifest: "Манифест хоста",
   images: "Образы контейнеров", images_manifest: "Манифест образов",
@@ -164,10 +250,12 @@ function hostBackupOperation(value, expectedId = null) {
   return value;
 }
 
-function hostBackupPortableReceipt(value, archiveId) {
+function hostBackupPortableReceipt(value, archiveId, layout = null) {
   const fields = ["protocol", "host_archive_id", "host_archive_sha256",
     "source_manifest_sha256", "images_sha256", "images", "container_ids",
     "exported_configs", "rootfs_sha256", "active_units", "unit_hashes"];
+  const v2 = value?.protocol === HOST_PORTABLE_RECEIPT_V2;
+  if (v2) fields.push("unit_states");
   const imageId = /^sha256:[0-9a-f]{64}$/;
   const matchingMap = (items, names, digest) => items && typeof items === "object" &&
     !Array.isArray(items) && Object.keys(items).length === names.length &&
@@ -179,7 +267,8 @@ function hostBackupPortableReceipt(value, archiveId) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       Object.keys(value).length !== fields.length ||
       fields.some((field) => !Object.hasOwn(value, field)) ||
-      value.protocol !== HOST_PORTABLE_RECEIPT || value.host_archive_id !== archiveId ||
+      ![HOST_PORTABLE_RECEIPT, HOST_PORTABLE_RECEIPT_V2].includes(value.protocol) ||
+      value.host_archive_id !== archiveId ||
       !HOST_BACKUP_SHA.test(value.host_archive_sha256) ||
       !HOST_BACKUP_SHA.test(value.source_manifest_sha256) ||
       !HOST_BACKUP_SHA.test(value.images_sha256) ||
@@ -198,6 +287,25 @@ function hostBackupPortableReceipt(value, archiveId) {
         !/^sovagrid-[a-z0-9_.@-]{1,80}\.(?:service|socket|timer)$/.test(unit)) ||
       !matchingMap(value.unit_hashes, units, HOST_BACKUP_SHA))
     throw new Error("Hub вернул неверную квитанцию переносимой копии.");
+  if (v2) {
+    const states = value.unit_states;
+    const validLayout = typeof layout === "string" && Object.hasOwn(HOST_MANAGED_UNITS, layout);
+    if (!validLayout || !states || typeof states !== "object" || Array.isArray(states) ||
+        Object.keys(states).length > 32 ||
+        Object.entries(states).some(([name, item]) => !HOST_MANAGED_UNITS[layout].has(name) ||
+          !item || typeof item !== "object" || Array.isArray(item) ||
+          Object.keys(item).length !== 3 ||
+          !["active", "enablement", "sha256"].every((field) => Object.hasOwn(item, field)) ||
+          typeof item.active !== "boolean" || typeof item.enablement !== "string" ||
+          !HOST_UNIT_ENABLEMENT.has(item.enablement) || typeof item.sha256 !== "string" ||
+          !HOST_BACKUP_SHA.test(item.sha256)) ||
+        Object.keys(states).filter((name) => HOST_WRITER_UNITS[layout].has(name) &&
+          states[name].active).length !== units.length ||
+        units.some((name) => !Object.hasOwn(states, name) || !states[name].active ||
+          !HOST_WRITER_UNITS[layout].has(name) || states[name].sha256 !== value.unit_hashes[name]) ||
+        JSON.stringify(value).length + 1 > 8192)
+      throw new Error("Hub вернул неверную квитанцию переносимой копии.");
+  }
   return value;
 }
 
@@ -209,9 +317,16 @@ function hostBackupPortableOperation(value, expectedId = null) {
   const operation = hostBackupOperation(ordinary, expectedId);
   if ((operation.phase === "complete") !== (receipt !== null) ||
       (receipt !== null && (!operation.archive ||
-        !hostBackupPortableReceipt(receipt, operation.archive.id))))
+        !hostBackupPortableReceipt(receipt, operation.archive.id, operation.archive.layout))))
     throw new Error("Hub вернул несогласованное состояние переносимой копии.");
   return { operation, receipt };
+}
+
+function hostBackupSameReceipt(left, right) {
+  const ordered = (value) => Array.isArray(value) ? value.map(ordered) :
+    value && typeof value === "object" ? Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered(left)) === JSON.stringify(ordered(right));
 }
 
 function hostBackupPlan(value) {
@@ -236,9 +351,7 @@ function hostBackupSetActive(record, portable = false, receipt = null) {
     client.active?.phase === record.phase &&
     client.active?.archive?.id === record.archive?.id &&
     (!portable || !receipt || (client.portableReceipt &&
-      client.portableReceipt.host_archive_sha256 === receipt.host_archive_sha256 &&
-      client.portableReceipt.images_sha256 === receipt.images_sha256 &&
-      client.portableReceipt.source_manifest_sha256 === receipt.source_manifest_sha256));
+      hostBackupSameReceipt(client.portableReceipt, receipt)));
   if (!same) {
     client.portableVerified = null;
     client.portableGrant = null;
@@ -661,11 +774,9 @@ async function hostBackupPortableVerify(requestId) {
         result.images_bytes > 8 * 1024 ** 3)
       throw new Error("Hub вернул неверный результат проверки переносимой копии.");
     const archive = hostBackupArchive(result.archive, client.active.archive.id);
-    const receipt = hostBackupPortableReceipt(result.receipt, archive.id);
+    const receipt = hostBackupPortableReceipt(result.receipt, archive.id, archive.layout);
     if (archive.bytes !== client.active.archive.bytes ||
-        receipt.host_archive_sha256 !== client.portableReceipt.host_archive_sha256 ||
-        receipt.images_sha256 !== client.portableReceipt.images_sha256 ||
-        receipt.source_manifest_sha256 !== client.portableReceipt.source_manifest_sha256)
+        !hostBackupSameReceipt(receipt, client.portableReceipt))
       throw new Error("Архив и квитанция изменились после проверки состояния.");
     client.portableVerified = { requestId, archive, imagesBytes: result.images_bytes,
       receipt, base, token };
