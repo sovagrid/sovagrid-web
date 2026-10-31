@@ -19,7 +19,8 @@ const sshBootstrapPort = takeSSHBootstrapPort();
 let browserSSHLanding = null;
 
 const $ = (id) => document.getElementById(id);
-const state = { base: "", token: "", servers: [], incidents: [], jobs: [], audit: [], vpn: null, selectedId: null, view: "overview", firstLoad: true, startTelegram: null, startTelegramLoading: false, pendingCommand: "", pendingServerId: null, pendingCommandKey: null, submittingCommandKey: null, commandSubmitting: false, vpnTargetId: null, vpnPending: null, vpnSubmittingKey: null, vpnActionJobId: null, vpnActionJob: null, timer: null, refreshSeq: 0, passwordChangeSeq: 0, passwordChanging: false, history: [], chartField: "cpu_percent" };
+const VPN_HUB_HOST = "@hub-host";
+const state = { base: "", token: "", servers: [], incidents: [], jobs: [], audit: [], vpn: null, vpnInventoryTargetId: null, selectedId: null, view: "overview", firstLoad: true, startTelegram: null, startTelegramLoading: false, pendingCommand: "", pendingServerId: null, pendingCommandKey: null, submittingCommandKey: null, commandSubmitting: false, vpnTargetId: null, vpnPending: null, vpnSubmittingKey: null, vpnActionJobId: null, vpnActionJob: null, timer: null, refreshSeq: 0, passwordChangeSeq: 0, passwordChanging: false, history: [], chartField: "cpu_percent" };
 state.user = null;
 // No logged-in user is the trusted local test/CLI case. A real new session
 // starts with unknown access and stays read-only until /session/access loads.
@@ -88,7 +89,7 @@ function hubSessionUser(payload, legacyUsername = "admin") {
 function applyHubPermissions() {
   const admin = hubCanAdmin(), globalAdmin = hubCanGlobalAdmin();
   for (const element of document.querySelectorAll("[data-admin-only], [data-command]")) element.hidden = !admin;
-  for (const element of document.querySelectorAll("[data-vpn-admin-only]")) element.hidden = !hubCanAdmin(vpnTarget());
+  for (const element of document.querySelectorAll("[data-vpn-admin-only]")) element.hidden = !vpnTarget() || !hubCanAdmin(vpnTarget());
   for (const element of document.querySelectorAll("[data-global-admin-only]")) element.hidden = !globalAdmin;
   for (const button of document.querySelectorAll("[data-view]")) {
     if (SERVER_ADMIN_VIEWS.has(button.dataset.view)) button.hidden = !admin;
@@ -422,6 +423,7 @@ function logout(revoke = true) {
   state.jobs = [];
   state.audit = [];
   state.vpn = null;
+  state.vpnInventoryTargetId = null;
   state.selectedId = null;
   globalThis.maintenanceReset?.();
   state.view = "overview";
@@ -605,19 +607,8 @@ async function refresh() {
       details.push(globalThis.hostBackupsRefresh());
     }
     if (state.view === "vpn") {
-      if (hubCanGlobalAdmin()) {
-        details.push(request("/api/v1/vpn").then((payload) => {
-          if (!current()) return;
-          state.vpn = payload.vpn || null;
-          renderVpn(state.vpn);
-        }).catch((error) => {
-          if (current()) { state.vpn = { source_status: "error" }; renderVpn(state.vpn); }
-          throw error;
-        }));
-      } else {
-        state.vpn = { source_status: "unavailable" };
-        renderVpn(state.vpn);
-      }
+      renderVpnControls();
+      details.push(refreshVpnInventory(current));
       if (state.vpnActionJobId) {
         details.push(request(`/api/v1/jobs/${encodeURIComponent(state.vpnActionJobId)}`).then((payload) => {
           if (!current()) return;
@@ -669,6 +660,7 @@ function renderSidebar() {
         globalThis.filesystemAlertsReset?.();
       }
       state.selectedId = server.id;
+      if (state.view === "vpn") state.vpnTargetId = server.id;
       globalThis.processInventorySelectedServer?.(state.selectedId);
       globalThis.containerLogsSelectedServer?.(state.selectedId);
       globalThis.containerActionSelectedServer?.(state.selectedId);
@@ -794,7 +786,10 @@ function setView(view) {
   }
   state.view = view;
   renderWorkspace();
-  if (view === "vpn") renderVpn({ source_status: "loading" });
+  if (view === "vpn") {
+    renderVpnControls();
+    renderVpn({ source_status: "loading" }, vpnInventoryContext(state.vpnTargetId));
+  }
   if (state.token) refresh();
 }
 
@@ -1932,27 +1927,82 @@ function vpnTarget() {
   return state.servers.find((server) => String(server.id) === String(state.vpnTargetId));
 }
 
+function vpnInventoryContext(targetId, extra = {}) {
+  if (targetId === VPN_HUB_HOST) return { kind: "hub", ...extra };
+  const server = state.servers.find((item) => String(item.id) === String(targetId));
+  return server ? { kind: "server", name: String(server.name || server.id), ...extra } : { kind: "none", ...extra };
+}
+
+async function refreshVpnInventory(current) {
+  const targetId = state.vpnTargetId;
+  const active = () => current() && String(state.vpnTargetId) === String(targetId) && state.view === "vpn";
+  if (state.vpnInventoryTargetId !== targetId) {
+    state.vpnInventoryTargetId = targetId;
+    state.vpn = { source_status: "loading" };
+    renderVpn(state.vpn, vpnInventoryContext(targetId));
+  }
+  if (!targetId) {
+    state.vpn = { source_status: "unavailable" };
+    renderVpn(state.vpn, vpnInventoryContext(targetId));
+    return;
+  }
+  try {
+    const hubHost = targetId === VPN_HUB_HOST;
+    const path = hubHost ? "/api/v1/vpn" : `/api/v1/servers/${encodeURIComponent(targetId)}/vpn`;
+    const payload = await request(path);
+    if (!active()) return;
+    let context = vpnInventoryContext(targetId);
+    if (!hubHost) {
+      if (String(payload?.server_id) !== String(targetId) ||
+          !["ok", "stale", "unavailable"].includes(payload?.freshness) ||
+          (payload.received_at !== null && (!Number.isSafeInteger(payload.received_at) || payload.received_at < 0)) ||
+          !payload.vpn || typeof payload.vpn !== "object" || Array.isArray(payload.vpn)) {
+        throw new Error("Центр мониторинга вернул неверную VPN-сводку сервера.");
+      }
+      context = vpnInventoryContext(targetId, { freshness: payload.freshness, receivedAt: payload.received_at });
+    }
+    state.vpn = payload.vpn || { source_status: "unavailable" };
+    renderVpn(state.vpn, context);
+  } catch (error) {
+    if (!active()) return;
+    const availability = error.status === 403 ? "denied" : error.status === 404 ? "unsupported" : "error";
+    state.vpn = { source_status: availability === "error" ? "error" : "unavailable" };
+    renderVpn(state.vpn, vpnInventoryContext(targetId, { availability }));
+    if (availability === "error") throw error;
+  }
+}
+
 function vpnTargetReady() {
   const server = vpnTarget();
-  return hubCanAdmin(server) && Boolean(server?.online && server?.remote_commands_enabled);
+  return hubCanAdmin(server ?? null) && Boolean(server?.online && server?.remote_commands_enabled);
 }
 
 function renderVpnControls(source) {
   const targetSelect = $("vpnTargetServer");
   const previousTarget = state.vpnTargetId;
-  if (!state.servers.some((server) => String(server.id) === String(previousTarget))) {
-    state.vpnTargetId = state.servers.find((server) => String(server.id) === String(state.selectedId))?.id ?? state.servers[0]?.id ?? null;
+  if (!(previousTarget === VPN_HUB_HOST && hubCanGlobalAdmin()) &&
+      !state.servers.some((server) => String(server.id) === String(previousTarget))) {
+    state.vpnTargetId = state.servers.find((server) => String(server.id) === String(state.selectedId))?.id ??
+      state.servers[0]?.id ?? (hubCanGlobalAdmin() ? VPN_HUB_HOST : null);
   }
   targetSelect.replaceChildren();
+  if (hubCanGlobalAdmin()) {
+    const option = document.createElement("option"); option.value = VPN_HUB_HOST;
+    option.textContent = "Хост панели (Hub)";
+    targetSelect.append(option);
+  }
   for (const server of state.servers) {
     const option = document.createElement("option"); option.value = server.id;
     option.textContent = String(server.name || server.id);
     targetSelect.append(option);
   }
+  targetSelect.disabled = !hubCanGlobalAdmin() && !state.servers.length;
   targetSelect.value = state.vpnTargetId === null ? "" : String(state.vpnTargetId);
   const server = vpnTarget();
-  $("vpnTargetStatus").textContent = !server ? "Добавьте сервер с Agent, чтобы выполнять операции." :
-    !hubCanAdmin(server) ? "Для операций с выбранным сервером нужен доступ администратора." :
+  $("vpnTargetStatus").textContent = state.vpnTargetId === VPN_HUB_HOST ?
+    "Показан хост панели. Для операций выберите сервер с Agent." :
+    !server ? "Добавьте сервер с Agent, чтобы получать VPN-сводку." :
+    !hubCanAdmin(server) ? "Сводка доступна для просмотра. Для операций нужен доступ администратора." :
     !server.online ? "Выбранный Agent сейчас не на связи." :
     !server.remote_commands_enabled ? "Разрешите команды для этого сервера в разделе «Команды»." :
     "Операции доступны. Состояние в сводке обновляется таймером раз в 30 секунд.";
@@ -2005,7 +2055,7 @@ function renderVpnActionJob() {
   }
 }
 
-function renderManagedVpn(source) {
+function renderManagedVpn(source, availability = null) {
   renderVpnControls(source);
   const status = ["loading", "ok", "stale", "error", "unavailable"].includes(source?.source_status) ? source.source_status : "unavailable";
   const labels = { loading: "Обновляем...", ok: "Данные актуальны", stale: "Данные устарели", error: "Ошибка сбора", unavailable: "Нет данных" };
@@ -2019,7 +2069,9 @@ function renderManagedVpn(source) {
   const badge = $("managedSourceBadge");
   badge.textContent = labels[status];
   badge.className = `status-badge vpn-status-${status}`;
-  $("managedSourceText").textContent = descriptions[status];
+  $("managedSourceText").textContent = availability === "denied" ?
+    "Нет доступа к сводке этого сервера." : availability === "unsupported" ?
+      "Обновите Hub, чтобы получать сводку управляемого WireGuard." : descriptions[status];
   const available = status === "ok" || status === "stale";
   const instances = available && Array.isArray(source?.instances) ? source.instances : [];
   $("managedCount").textContent = available ? String(instances.length) : "—";
@@ -2056,7 +2108,7 @@ function renderManagedVpn(source) {
   }
 }
 
-function renderAmneziaDetails(source) {
+function renderAmneziaDetails(source, availability = null) {
   const status = ["ok", "stale", "error", "unavailable"].includes(source?.source_status)
     ? source.source_status : "unavailable";
   const labels = { ok: "Данные актуальны", stale: "Данные устарели", error: "Ошибка сбора", unavailable: "Нет данных" };
@@ -2068,7 +2120,9 @@ function renderAmneziaDetails(source) {
     error: "Подробная проверка Amnezia недоступна. Сводка Docker показана отдельно.",
     unavailable: "Подробная проверка Amnezia ещё не настроена на сервере.",
   };
-  $("amneziaDetailText").textContent = descriptions[status];
+  $("amneziaDetailText").textContent = availability === "denied" ?
+    "Нет доступа к подробной сводке этого сервера." : availability === "unsupported" ?
+      "Обновите Hub, чтобы получать подробную сводку Amnezia." : descriptions[status];
   const list = $("amneziaDetailList"); list.replaceChildren();
   const services = ["ok", "stale"].includes(status) && Array.isArray(source?.services) ? source.services : [];
   if (!services.length) {
@@ -2116,24 +2170,54 @@ function renderAmneziaDetails(source) {
   }
 }
 
-function renderVpn(snapshot) {
-  renderManagedVpn(snapshot?.managed || (snapshot?.source_status === "loading" ? { source_status: "loading" } : null));
-  renderAmneziaDetails(snapshot?.amnezia_details);
-  const status = ["loading", "ok", "stale", "error", "unavailable"].includes(snapshot?.source_status) ? snapshot.source_status : "unavailable";
-  const services = Array.isArray(snapshot?.services) ? snapshot.services : [];
+function renderVpn(snapshot, source = { kind: "hub" }) {
+  // Hub receipt time decides freshness for remote Agents. Agent clocks can be
+  // skewed, and a stale source must never be displayed as current.
+  let shown = snapshot;
+  if (source.kind === "server" && source.freshness === "unavailable") {
+    shown = { source_status: "unavailable" };
+  } else if (source.kind === "server" && source.freshness === "stale") {
+    const staleIfOk = (item) => item?.source_status === "ok" ? { ...item, source_status: "stale" } : item;
+    shown = { ...snapshot, source_status: snapshot?.source_status === "ok" ? "stale" : snapshot?.source_status,
+      managed: staleIfOk(snapshot?.managed), amnezia_details: staleIfOk(snapshot?.amnezia_details) };
+  }
+  renderManagedVpn(shown?.managed || (shown?.source_status === "loading" ? { source_status: "loading" } : null), source.availability);
+  renderAmneziaDetails(shown?.amnezia_details, source.availability);
+  const status = ["loading", "ok", "stale", "error", "unavailable"].includes(shown?.source_status) ? shown.source_status : "unavailable";
+  const services = Array.isArray(shown?.services) ? shown.services : [];
   const labels = { loading: "Обновляем...", ok: "Данные актуальны", stale: "Данные устарели", error: "Ошибка сбора", unavailable: "Нет данных" };
-  const descriptions = {
-    loading: "Запрашиваем снимок состояния сервисов Amnezia.",
+  const remote = source.kind === "server";
+  const descriptions = remote ? {
+    loading: "Запрашиваем VPN-сводку выбранного сервера.",
+    ok: "Состояние обнаруженных сервисов Amnezia на выбранном сервере.",
+    stale: "Последняя VPN-сводка этого сервера устарела. Состояние сервисов могло измениться.",
+    error: "Agent не смог получить состояние Docker на выбранном сервере.",
+    unavailable: "Agent ещё не прислал VPN-сводку для выбранного сервера.",
+  } : {
+    loading: "Запрашиваем снимок состояния сервисов Amnezia на хосте панели.",
     ok: "Состояние обнаруженных сервисов Amnezia на хосте центра мониторинга.",
     stale: "Последний снимок устарел. Состояние сервисов могло измениться.",
     error: "Адаптер не смог получить состояние Docker. Дождитесь следующего снимка и обновите страницу.",
     unavailable: "Адаптер VPN ещё не настроен или не прислал первый снимок.",
   };
   const badge = $("vpnSourceBadge");
-  badge.textContent = labels[status];
+  badge.textContent = source.availability === "denied" ? "Нет доступа" :
+    source.availability === "unsupported" ? "Нужен новый Hub" : labels[status];
   badge.className = `status-badge vpn-status-${status}`;
-  $("vpnSourceText").textContent = descriptions[status];
-  $("vpnSnapshotTime").textContent = snapshot?.collected_at ? `Снимок: ${timestamp(snapshot.collected_at)}` : "Снимок ещё не получен";
+  $("vpnSourceLocation").textContent = remote ? `Источник: ${source.name}` :
+    source.kind === "hub" ? "Источник: хост панели (Hub)" : "Источник: сервер не выбран";
+  $("vpnSourceText").textContent = source.availability === "denied" ?
+    "Нет доступа к VPN-сводке выбранного сервера. Выберите доступный сервер." :
+    source.availability === "unsupported" ?
+      "Эта версия Hub ещё не поддерживает VPN-сводку выбранного источника. Обновите Hub." :
+      source.availability === "error" ?
+        "Не удалось получить VPN-сводку от Hub. Попробуйте обновить страницу." :
+        source.kind === "none" ? "Добавьте сервер с Agent или выберите хост панели." : descriptions[status];
+  $("vpnSnapshotTime").textContent = remote ?
+    (source.receivedAt !== null && source.receivedAt !== undefined
+      ? `Получено центром: ${timestamp(source.receivedAt)}${source.freshness === "stale" ? " · Данные устарели" : ""}`
+      : "Снимок с сервера ещё не получен") :
+    shown?.collected_at ? `Снимок: ${timestamp(shown.collected_at)}` : "Снимок ещё не получен";
   const available = status === "ok" || status === "stale";
   const detected = services.filter((item) => item.state !== "absent");
   $("vpnTotal").textContent = available ? String(detected.length) : "—";
@@ -3206,7 +3290,16 @@ globalThis.addEventListener?.("sovagridthemechange", () => {
 $("cancelCommandButton").addEventListener("click", () => { if (!state.commandSubmitting) $("confirmCommandDialog").close(); });
 $("confirmCommandDialog").addEventListener("cancel", (event) => { if (state.commandSubmitting) event.preventDefault(); });
 $("confirmCommandDialog").addEventListener("close", () => { state.pendingCommand = ""; state.pendingServerId = null; state.pendingCommandKey = null; $("confirmCommandText").textContent = ""; });
-$("vpnTargetServer").addEventListener("change", (event) => { state.vpnTargetId = event.target.value; renderVpnControls(state.vpn?.managed); });
+$("vpnTargetServer").addEventListener("change", (event) => {
+  const targetId = event.target.value;
+  if (targetId === VPN_HUB_HOST ? !hubCanGlobalAdmin() :
+      !state.servers.some((server) => String(server.id) === String(targetId))) return;
+  state.vpnTargetId = targetId;
+  state.vpnInventoryTargetId = null;
+  state.vpn = { source_status: "loading" };
+  renderVpn(state.vpn, vpnInventoryContext(targetId));
+  if (state.token) void refresh();
+});
 $("vpnCreateForm").addEventListener("submit", prepareVpnCreate);
 $("vpnInstanceForm").addEventListener("submit", prepareVpnInstance);
 $("vpnClientForm").addEventListener("submit", prepareVpnClient);

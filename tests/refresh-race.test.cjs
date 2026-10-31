@@ -7,13 +7,13 @@ const vm = require('node:vm');
 
 const elements = new Map();
 const element = (id) => {
-  if (!elements.has(id)) elements.set(id, { textContent: '', hidden: false, disabled: false, addEventListener() {}, setAttribute() {}, replaceChildren() {} });
+  if (!elements.has(id)) elements.set(id, { textContent: '', hidden: false, disabled: false, addEventListener() {}, setAttribute() {}, append() {}, replaceChildren() {} });
   return elements.get(id);
 };
 let fetchHook = () => { throw new Error('unexpected fetch'); };
 const context = vm.createContext({
   URL, AbortController, setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {},
-  document: { getElementById: element, querySelectorAll: () => [], addEventListener() {} },
+  document: { getElementById: element, createElement: () => element(), querySelectorAll: () => [], addEventListener() {} },
   localStorage: { getItem: () => null, setItem() {} },
   navigator: {}, location: { protocol: 'file:' },
   fetch: (...args) => fetchHook(...args),
@@ -109,6 +109,7 @@ const until = async (predicate) => { for (let i = 0; i < 100; i++) { if (predica
     throw new Error(url);
   };
   await context.refresh();
+  assert.ok(vpnRendered, element('globalError').textContent || 'VPN did not render');
   assert.equal(vpnRendered.source_status, 'stale', 'VPN status should render even with no monitored servers');
   assert.equal(element('emptyState').hidden, true, 'global VPN view should not show add-server prompt');
 

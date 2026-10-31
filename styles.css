@@ -130,6 +130,7 @@
 .vpn-control-panel input,.vpn-control-panel select{width:100%;min-height:42px;padding:10px 12px;border:1px solid #3a5360;border-radius:10px;background:#0b1822;color:#e4f3ea;outline:none}
 .vpn-control-panel input:focus,.vpn-control-panel select:focus{border-color:#7fdcb0;box-shadow:0 0 0 3px #7fdcb023}
 .vpn-control-panel .field-help{margin:9px 0 0}.vpn-control-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:16px;align-items:end}
+.vpn-source-picker{margin-top:0;margin-bottom:18px}.vpn-source-picker select{background:var(--sg-surface,#0b1822);color:var(--sg-text,#e4f3ea);border-color:var(--sg-border,#3a5360)}.vpn-source-picker #vpnTargetStatus{color:var(--sg-muted,#9bb4b5)}#vpnSourceLocation{font-weight:700;overflow-wrap:anywhere}
 .vpn-form-heading{margin:24px 0 4px;color:#dbebe4;font-size:.86rem}.vpn-control-form+.vpn-form-heading{padding-top:19px;border-top:1px solid #2e4349}
 .vpn-control-form label{grid-row:auto}.vpn-control-form input,.vpn-control-form select{grid-row:auto}.vpn-control-form .form-error,.vpn-control-form .field-help,.vpn-control-form .primary-button{grid-column:1/-1}
 .vpn-control-form .secondary-button{grid-column:1/-1;justify-self:start;margin-top:18px;min-height:42px;padding:10px 16px}
