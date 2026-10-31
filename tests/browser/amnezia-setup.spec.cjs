@@ -225,3 +225,70 @@ test('Amnezia setup on an entered Ubuntu host pins its own key and binds every s
   await expect(page.locator('#amneziaSetupSubmit')).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('entered Ubuntu host prepares VPN code before Amnezia setup on desktop and phone', async ({ page }) => {
+  const host = 'vpn.example', port = 2202;
+  const scope = { scope: 'entered_target', host, port, host_key_fingerprint: fingerprint };
+  const hashes = { source_manifest_sha256: 'a'.repeat(64), candidate_sha256: 'b'.repeat(64),
+    installed_sha256: '0'.repeat(64), state_sha256: '0'.repeat(64) };
+  const requests = [];
+  await page.route('**/api/v1/browser-ssh/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON();
+    let reply;
+    if (path.endsWith('/agent/list')) reply = [];
+    else if (path.endsWith('/target-host-key')) reply = { protocol: 1, ...scope,
+      key_type: 'ssh-ed25519', fingerprint, reverify_required: true };
+    else if (path.endsWith('/target-status')) reply = { protocol: 1, ...scope, kind: 'agent_only' };
+    else if (path.endsWith('/vpn-source/preview')) reply = { protocol: 1, ...scope,
+      ...hashes, expected: hashes, change: 'install', temporary_writes: true,
+      activation_writes: false, cleanup_required: false };
+    else if (path.endsWith('/vpn-source/apply')) reply = { protocol: 1, ...scope,
+      installed: true, changed: true, cleanup_required: false,
+      source_manifest_sha256: hashes.source_manifest_sha256,
+      candidate_sha256: hashes.candidate_sha256 };
+    else if (path.endsWith('/vpn-setup/preview')) reply = { ...missing, ...scope };
+    else throw new Error(`Unexpected gateway route: ${path}`);
+    requests.push({ path, body });
+    await route.fulfill({ status: 200, contentType: 'application/json',
+      headers: { 'Cache-Control': 'no-store' }, body: JSON.stringify(reply) });
+  });
+
+  await page.goto('/');
+  await page.locator('#hubLoginMode').click();
+  await page.locator('#hubUrl').fill('http://127.0.0.1:8900');
+  await page.locator('#username').fill('owner');
+  await page.locator('#password').fill('fixture-owner-passphrase');
+  await page.locator('#loginButton').click();
+  await expect(page.locator('#appView')).toBeVisible();
+  await page.locator('[data-view="vpn"]').click();
+  await page.locator('#amneziaSetupScopeRemote').check();
+  await page.locator('#amneziaSetupRemoteHost').fill(host);
+  await page.locator('#amneziaSetupRemotePort').fill(String(port));
+  await page.locator('#amneziaSetupInspect').click();
+  await page.locator('#amneziaSetupTrust').check();
+  await page.locator('#amneziaSetupUsername').fill('root');
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSourcePreview').click();
+  await expect(page.locator('#amneziaSourceReview')).toBeVisible();
+  await expect(page.locator('#amneziaSourceApply')).toBeVisible();
+  await expect(page.locator('#amneziaSetupPassword')).toHaveValue('');
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSourceApply').click();
+  await expect(page.locator('#amneziaSetupDialog')).toBeVisible();
+  await page.locator('#amneziaSetupDialogCancel').click();
+  expect(requests.filter(({ path }) => path.endsWith('/vpn-source/apply'))).toHaveLength(0);
+  await page.locator('#amneziaSourceApply').click();
+  await page.locator('#amneziaSetupDialogConfirm').click();
+  await expect(page.locator('#amneziaSourceNotice')).toContainText('VPN-код подготовлен');
+  await expect(page.locator('#amneziaSetupPassword')).toHaveValue('');
+  await page.locator('#amneziaSetupPassword').fill(secret);
+  await page.locator('#amneziaSetupSubmit').click();
+  await expect(page.locator('#amneziaSetupResult')).toBeVisible();
+  expect(requests.filter(({ path }) => path.includes('/vpn-source/')).map(({ path }) => path.split('/').at(-1)))
+    .toEqual(['preview', 'apply']);
+  expect(requests.find(({ path }) => path.endsWith('/vpn-source/apply')).body.expected).toEqual(hashes);
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage },
+    session: { ...sessionStorage } }))).not.toContain(secret);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
