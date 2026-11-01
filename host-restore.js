@@ -18,6 +18,7 @@ const HOST_RESTORE_BLOCKERS = Object.freeze({ APPLY_NOT_IMPLEMENTED: "Полно
   TARGET_NOT_CLEAN: "На цели уже есть данные SovaGrid.", TARGET_NOT_EMPTY: "Цель уже содержит данные SovaGrid.",
   RESTORE_DISK_SPACE: "На цели недостаточно свободного места.",
   RESTORE_ROUTING_STATE_UNSUPPORTED: "Перенос включённой VPN-маршрутизации из этой копии пока не поддерживается.",
+  VPN_PORT_UNVERIFIED: "Эту VPN-конфигурацию нельзя перенести автоматически. Восстановление AmneziaWG пока не поддерживается.",
   RESTORE_LAYOUT_UNSUPPORTED: "Схема установки в копии пока не поддерживается.",
   RESTORE_IDENTITY_EXISTS: "На цели заняты служебные учётные записи из копии.",
   RECEIPT_V1_UNSUPPORTED: "Нужна переносимая копия формата v2.",
