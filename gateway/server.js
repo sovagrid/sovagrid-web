@@ -383,6 +383,7 @@ const DIRECT_MAX_OUTPUT = 256 * 1024;
 const DIRECT_RESPONSE_OUTPUT = 64 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AGENT_ACTIONS = new Set(["prepare", "apply", "resume", "cleanup", "interrupt", "status", "list",
+  "agent-features-preview", "agent-features-apply",
   "vpn-source-preview", "vpn-source-apply", "vpn-source-recover",
   "wg-control-preview", "wg-control-apply", "wg-control-recover",
   "amnezia-provision-preview", "amnezia-provision-apply", "amnezia-provision-recover"]);
@@ -403,7 +404,8 @@ const AGENT_ERRORS = new Set(["AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILAB
   "IMAGE_IDENTITY_INVALID", "CONTAINER_IDENTITY_INVALID", "INVALID_PORT", "INVALID_SUBNET",
   "INVALID_ROUTE", "PREVIEW_STALE", "AWG_RUNTIME_UNVERIFIED", "MANUAL_RECOVERY_REQUIRED",
   "CONFIRMATION_REQUIRED", "AMNEZIA_PROVISION_FAILED", "UDP_PORT_BUSY", "SOURCE_BUSY",
-  "INSTALLATION_DRIFT"]);
+  "INSTALLATION_DRIFT", "AGENT_NOT_ENROLLED", "AGENT_UPDATE_REQUIRED", "FEATURES_UNAVAILABLE",
+  "SERVICE_FAILED", "METRIC_UNCONFIRMED"]);
 const WG_DEPENDENCIES = new Set(["wg", "wg-quick", "ip", "python3-cryptography", "apparmor_parser"]);
 const WG_REASONS = new Set(["SOURCE_NOT_PREPARED", "SOURCE_CHANGED", "AGENT_UNAVAILABLE",
   "DEPENDENCIES_UNAVAILABLE", "RECOVERY_REQUIRED", "CONTROL_ACTIVE", "BUSY",
@@ -721,6 +723,17 @@ function validateVpnActionRoute(value, extraFields) {
 
 export function validateAgentPayload(action, value) {
   if (!AGENT_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  if (action.startsWith("agent-features-")) {
+    const apply = action === "agent-features-apply";
+    const target = validateVpnActionRoute(value, ["server_id", "features",
+      ...(apply ? ["expected_review_sha256", "confirm"] : [])]);
+    if (typeof value.server_id !== "string" || !UUID.test(value.server_id) ||
+        !(value.features === null && !apply || validAgentFeatures(value.features)) ||
+        apply && (value.confirm !== true || typeof value.expected_review_sha256 !== "string" ||
+          !HEX_SHA.test(value.expected_review_sha256))) throw new Error("INVALID_INPUT");
+    return { ...target, server_id: value.server_id, features: value.features === null ? null : { ...value.features },
+      ...(apply ? { expected_review_sha256: value.expected_review_sha256, confirm: true } : {}) };
+  }
   if (action.startsWith("amnezia-provision-")) {
     const configFields = ["listen_port", "subnet", "route_mode"];
     const fields = action === "amnezia-provision-apply" ?
@@ -1049,7 +1062,48 @@ function safeAmneziaProvisionResult(action, value) {
     installed: value.installed, ...(value.container_id ? { container_id: value.container_id } : {}) };
 }
 
+function validAgentFeatures(value) {
+  return exactFields(value, ["commands", "terminal", "files"]) &&
+    ["commands", "terminal", "files"].every((key) => typeof value[key] === "boolean") &&
+    (value.commands || !value.terminal && !value.files);
+}
+
+function safeAgentFeaturesResult(action, value) {
+  const operation = action === "agent-features-preview" ? "preview" : "applied";
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("INSTALLER_UNAVAILABLE");
+  const route = safeVpnJumpPins(value);
+  const baseFields = ["protocol", "action", "scope", "host", "port", "host_key_fingerprint", ...route.fields,
+    "server_id", "kind", "current", "desired", "hub_enabled", "hub_revision", "source_manifest_sha256"];
+  const fields = operation === "preview" ? ["can_apply", "change_required", "recovery_required",
+    "pending_features", "review_sha256", "temporary_writes", "activation_writes"] :
+    ["applied", "changed", "fresh_metric_verified", "cleanup_required"];
+  if (!exactFields(value, [...baseFields, ...fields]) || value.protocol !== 1 || value.action !== operation ||
+      value.scope !== "entered_target" || value.kind !== "agent_only" ||
+      typeof value.server_id !== "string" || !UUID.test(value.server_id) ||
+      !FINGERPRINT.test(value.host_key_fingerprint) || !validAgentFeatures(value.current) ||
+      !validAgentFeatures(value.desired) || typeof value.hub_enabled !== "boolean" ||
+      !Number.isSafeInteger(value.hub_revision) || value.hub_revision < 0 ||
+      typeof value.source_manifest_sha256 !== "string" || !HEX_SHA.test(value.source_manifest_sha256)) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  const endpoint = validateTargetHostKey({ host: value.host, port: value.port });
+  if (operation === "preview" ?
+      ["can_apply", "change_required", "recovery_required"].some((key) => typeof value[key] !== "boolean") ||
+      value.pending_features !== null && !validAgentFeatures(value.pending_features) ||
+      value.review_sha256 !== null && (typeof value.review_sha256 !== "string" || !HEX_SHA.test(value.review_sha256)) ||
+      value.can_apply && value.review_sha256 === null ||
+      value.temporary_writes !== true || value.activation_writes !== false :
+      value.applied !== true || typeof value.changed !== "boolean" || value.fresh_metric_verified !== true ||
+      value.cleanup_required !== false || value.hub_enabled !== value.desired.commands ||
+      ["commands", "terminal", "files"].some((key) => value.current[key] !== value.desired[key])) {
+    throw new Error("INSTALLER_UNAVAILABLE");
+  }
+  return { ...Object.fromEntries([...baseFields, ...fields].map((key) => [key, value[key]])),
+    host: endpoint.host, ...route.values };
+}
+
 export function safeAgentResult(action, value) {
+  if (action.startsWith("agent-features-")) return safeAgentFeaturesResult(action, value);
   if (action.startsWith("amnezia-provision-")) return safeAmneziaProvisionResult(action, value);
   if (action.startsWith("wg-control-")) return safeWgControlResult(action, value);
   if (action.startsWith("vpn-source-")) return safeVpnSourceResult(action, value);
@@ -1099,6 +1153,8 @@ export function safeAgentResult(action, value) {
 }
 
 export function agentTimeoutMs(action) {
+  if (action === "agent-features-preview") return 240000;
+  if (action === "agent-features-apply") return 480000;
   if (action === "amnezia-provision-preview") return 120000;
   if (action === "amnezia-provision-apply") return 480000;
   if (action === "amnezia-provision-recover") return 180000;
@@ -2644,6 +2700,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   const stages = new WindowLimit(5, 60);
   const wgStages = new WindowLimit(8, 60);
   const provisionStages = new WindowLimit(8, 60);
+  const featureStages = new WindowLimit(8, 60);
   const terminalReads = new WindowLimit(360, 60);
   const terminalWrites = new WindowLimit(1200, 60);
   const restoreChunks = new WindowLimit(1200, 60);
@@ -2663,17 +2720,18 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const isTargetStatus = req.url === "/api/v1/browser-ssh/target-status";
     const isInstallPreview = req.url === "/api/v1/browser-ssh/target-install-preview";
     const agentAction = /^\/api\/v1\/browser-ssh\/agent\/(prepare|apply|resume|cleanup|interrupt|status|list)$/.exec(req.url || "")?.[1];
+    const agentFeaturesAction = /^\/api\/v1\/browser-ssh\/agent-features\/(preview|apply)$/.exec(req.url || "")?.[1];
     const vpnSourceAction = /^\/api\/v1\/browser-ssh\/vpn-source\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const wgControlAction = /^\/api\/v1\/browser-ssh\/wg-control\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const provisionAction = /^\/api\/v1\/browser-ssh\/amnezia-provision\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const directAction = /^\/api\/v1\/browser-ssh\/direct-terminal\/(open|events|input|resize|close)$/.exec(req.url || "")?.[1];
     const restoreAction = /^\/api\/v1\/browser-ssh\/restore\/(import-init|import-status|import-chunk|import-delete|prepare|status|list|inspect|preview|start|recover|retry)$/.exec(req.url || "")?.[1];
     const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview ||
-      Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) ||
+      Boolean(agentAction) || Boolean(agentFeaturesAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) ||
       Boolean(provisionAction) || Boolean(directAction) || Boolean(restoreAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction && !directAction && !restoreAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !agentFeaturesAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction && !directAction && !restoreAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -2687,7 +2745,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           ["status", "list", "inspect", "preview", "import-status"].includes(restoreAction) ? reads : restoreStages :
           isProbe ? probes : directAction === "events" ? terminalReads :
           directAction && directAction !== "open" ? terminalWrites :
-          provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
+          agentFeaturesAction ? featureStages : provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
           ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
       .take(address)) {
       json(res, 429, { error: "RATE_LIMIT" });
@@ -2723,7 +2781,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         return;
       }
       const value = await body(req, (isTargetStatus || isInstallPreview ||
-        ["prepare", "resume"].includes(agentAction) || vpnSourceAction ||
+        ["prepare", "resume"].includes(agentAction) || agentFeaturesAction || vpnSourceAction ||
         wgControlAction || provisionAction || vpnAction || directAction === "open") ?
         MAX_JUMP_BODY : MAX_BODY);
       clearTimeout(bodyTimer);
@@ -2738,10 +2796,10 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           } else {
             json(res, 200, directTerminals.operate(directAction, value, req.headers.authorization));
           }
-        } else if (agentAction || vpnSourceAction || wgControlAction || provisionAction) {
+        } else if (agentAction || agentFeaturesAction || vpnSourceAction || wgControlAction || provisionAction) {
           const token = BEARER.exec(req.headers.authorization || "")?.[1];
           if (!token) throw new Error("AUTH_REQUIRED");
-          const action = agentAction || (vpnSourceAction ? `vpn-source-${vpnSourceAction}` :
+          const action = agentAction || (agentFeaturesAction ? `agent-features-${agentFeaturesAction}` : vpnSourceAction ? `vpn-source-${vpnSourceAction}` :
             wgControlAction ? `wg-control-${wgControlAction}` : `amnezia-provision-${provisionAction}`);
           const selected = validateAgentPayload(action, value);
           try { json(res, 200, await agent(action, selected, token)); }
@@ -2803,7 +2861,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         ["NOT_FOUND", "DIRECT_SESSION_NOT_FOUND"].includes(code) ? 404 :
         ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED",
           "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "MANUAL_RECOVERY_REQUIRED",
-          "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE"].includes(code) ? 422 :
+          "AGENT_UNAVAILABLE", "DEPENDENCIES_UNAVAILABLE", "AGENT_NOT_ENROLLED", "AGENT_UPDATE_REQUIRED"].includes(code) ? 422 :
         ["AUTH_FAILED", "AUTH_REQUIRED"].includes(code) ? 401 :
           code === "ADMIN_FORBIDDEN" ? 403 : 503;
       json(res, status, error?.requestId && UUID.test(error.requestId) ?

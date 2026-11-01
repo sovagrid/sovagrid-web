@@ -1,0 +1,14 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.agent-features-panel { margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }
+.agent-features-panel h3 { margin: .5rem 0; }
+.agent-features-panel select { margin: .4rem 0 1rem; }
+.agent-features-choices { border: 1px solid var(--border); border-radius: 12px; padding: .75rem; margin: 1rem 0; min-width: 0; }
+.agent-features-choices label { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .35rem .65rem; align-items: start; margin: .65rem 0; }
+.agent-features-choices input[type="checkbox"], .agent-features-confirm input[type="checkbox"] { width: auto; margin: .2rem 0 0; }
+.agent-features-choices label span { grid-column: 2; font-size: .85rem; color: var(--muted); line-height: 1.5; font-weight: normal; }
+.agent-features-review { border: 1px solid var(--border); border-radius: 12px; margin-top: 1rem; padding: 1rem; overflow-wrap: anywhere; }
+.agent-features-review ul { padding-left: 1.2rem; line-height: 1.7; }
+.agent-features-confirm { display: flex; align-items: flex-start; gap: .6rem; margin: 1rem 0; }
+@media (max-width: 540px) { .agent-features-panel button { max-width: 100%; white-space: normal; } }

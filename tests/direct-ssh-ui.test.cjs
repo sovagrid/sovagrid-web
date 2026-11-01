@@ -109,8 +109,8 @@ test('direct terminal is offered after trusted host-key review and only to an un
   const sw = fs.readFileSync('sw.js', 'utf8');
   assert.match(html, /id="serverSetupDirectTerminalButton"/);
   assert.match(html, /id="directSshScreen"/);
-  assert.match(html, /direct-ssh\.js\?v=2/);
-  assert.match(sw, /direct-ssh\.js\?v=2/);
+  assert.match(html, /direct-ssh\.js\?v=3/);
+  assert.match(sw, /direct-ssh\.js\?v=3/);
   assert.match(sw, /direct-ssh\.css\?v=1/);
   const h = harness();
   assert.equal(h.element('serverSetupDirectTerminalButton').disabled, true);

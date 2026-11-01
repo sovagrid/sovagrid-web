@@ -121,6 +121,7 @@ function applyHubPermissions() {
   globalThis.releaseFeedAccessChanged?.();
   globalThis.externalAgentUpdateAccessChanged?.();
   globalThis.sovagridDirectSSH?.accessChanged?.();
+  globalThis.agentFeaturesAccessChanged?.();
 }
 const SEALED_PROFILE_INFO = "SovaGrid sealed WireGuard profile v1";
 let sealedPrepareSeq = 0;
@@ -408,6 +409,7 @@ function logout(revoke = true) {
   globalThis.hostRestoreReset?.();
   globalThis.releaseFeedReset?.();
   globalThis.externalAgentUpdateReset?.();
+  globalThis.agentFeaturesReset?.();
   globalThis.accessReset?.();
   globalThis.processInventoryReset?.();
   globalThis.containerLogsReset?.();
@@ -722,6 +724,7 @@ function renderWorkspace() {
   if (state.view === "files") globalThis.filesViewActivated?.();
   if (state.view === "journal") globalThis.journalRender?.();
   if (state.view === "start") renderStart();
+  globalThis.agentFeaturesRender?.();
 }
 
 function startBadge(id, label, ready = false) {
@@ -1178,8 +1181,8 @@ function renderCommandServer(server) {
   const enabled = Boolean(server.remote_commands_enabled);
   $("commandPermissionTitle").textContent = enabled ? "Разрешено в Hub" : "Команды отключены в Hub";
   $("commandPermissionDescription").textContent = enabled
-    ? "Для выполнения локальный агент также должен иметь allow_remote_commands=true."
-    : "Включите команды для этого сервера в Hub и отдельно в локальной конфигурации агента.";
+    ? "Допуск Hub включён. Если Agent ещё не разрешает команды, настройте его ниже по SSH."
+    : "Для работы нужны допуск Hub и локальное разрешение Agent. Их можно проверить и согласованно настроить по SSH.";
   $("commandPermissionButton").textContent = enabled ? "Отключить в Hub" : "Разрешить в Hub";
   $("prepareCommandButton").disabled = !enabled || !server.online;
 }
@@ -2725,6 +2728,7 @@ function serverSetupRenderJob() {
     "Agent установлен и подключён. Сервер появится в списке после обновления панели." :
     job.cleanup_required ? "Установка требует проверки и очистки перед повторной попыткой." :
     `${serverSetupPhaseName(job.phase)}. Временный пакет на сервере уже записан; подтвердите запуск Agent или очистите подготовку.`;
+  if ($("serverSetupAgentFeaturesButton")) $("serverSetupAgentFeaturesButton").hidden = job.phase !== "active";
   $("serverSetupApplyConfirm").disabled = serverSetup.busy || job.phase === "active" || job.cleanup_required;
   $("serverSetupApplyButton").disabled = serverSetup.busy || job.phase === "active" ||
     job.cleanup_required || !$("serverSetupApplyConfirm").checked;
@@ -2775,8 +2779,10 @@ function serverSetupRender() {
   for (const id of ["serverSetupInstallName", "serverSetupHubHost", "serverSetupHubPort", "serverSetupLocalPort"])
     $(id).disabled = serverSetup.busy;
   globalThis.sovagridDirectSSH?.render?.();
+  globalThis.agentFeaturesRender?.();
 }
 function serverSetupInvalidate() {
+  globalThis.agentFeaturesInvalidate?.();
   globalThis.sovagridDirectSSH?.reset?.({ render: false });
   serverSetup.seq++;
   for (const controller of serverSetup.controllers) controller.abort();
@@ -2797,6 +2803,7 @@ function serverSetupInvalidate() {
   serverSetupRender();
 }
 function serverSetupReset() {
+  globalThis.agentFeaturesReset?.();
   serverSetupInvalidate();
   globalThis.sovagridDirectSSH?.clearJump?.();
   globalThis.sovagridSSHKeygen?.clear?.("setup");
@@ -3067,7 +3074,7 @@ function serverSetupJobPreviewValid(reply) {
     typeof reply.platform?.ubuntu_version === "string" &&
     /^[0-9a-f]{40}$/.test(reply.source_commits?.["sovagrid-agent"] || "");
 }
-async function serverSetupReadCredentials(seq, reviewed) {
+async function serverSetupReadCredentials(seq, reviewed, { rootOnly = true, clear = true } = {}) {
   const target = serverSetupTarget();
   if (target.host !== reviewed.host || target.port !== reviewed.port ||
       !$("serverSetupTrust").checked || serverSetup.changedPin)
@@ -3075,7 +3082,7 @@ async function serverSetupReadCredentials(seq, reviewed) {
   const username = $("serverSetupUsername").value.trim();
   const method = $("serverSetupAuthKey").checked ? "private_key" : "password";
   if (!serverSetupUsernamePattern.test(username)) throw new Error("INVALID_USERNAME");
-  if (username !== "root") throw new Error("ROOT_REQUIRED");
+  if (rootOnly && username !== "root") throw new Error("ROOT_REQUIRED");
   let password = "", private_key = "", passphrase = "";
   const generated = method === "private_key" ? globalThis.sovagridSSHKeygen?.get("setup") : null;
   if (generated && !generated.downloadRequested) throw new Error("KEY_NOT_SAVED");
@@ -3105,7 +3112,7 @@ async function serverSetupReadCredentials(seq, reviewed) {
     return { host: reviewed.host, port: reviewed.port, username, method,
       fingerprint: reviewed.fingerprint, password, private_key, passphrase };
   } finally {
-    serverSetupClearSecrets();
+    if (clear) serverSetupClearSecrets();
     password = private_key = passphrase = "";
   }
 }
@@ -3341,7 +3348,10 @@ $("serverSetupAuthKey").addEventListener("change", () => serverSetupCredentialsC
 $("serverSetupPassword").addEventListener("input", () => serverSetupCredentialsChanged());
 $("serverSetupPrivateKey").addEventListener("change", () => serverSetupCredentialsChanged());
 $("serverSetupPassphrase").addEventListener("input", () => serverSetupCredentialsChanged());
-$("serverSetupStatusForm").addEventListener("submit", (event) => { void serverSetupStatus(event); });
+$("serverSetupStatusForm").addEventListener("submit", (event) => {
+  if (globalThis.agentFeaturesActive?.()) { event.preventDefault(); void globalThis.agentFeaturesRead?.(); }
+  else void serverSetupStatus(event);
+});
 $("serverSetupRecoverySelect").addEventListener("change", serverSetupSelectRecovery);
 $("serverSetupReloadJobs").addEventListener("click", () => { void serverSetupLoadJobs(); });
 $("serverSetupPrepareButton").addEventListener("click", () => { void serverSetupPrepare(); });

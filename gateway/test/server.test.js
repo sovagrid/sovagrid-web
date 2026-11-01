@@ -1735,6 +1735,65 @@ test("VPN source route enforces admin, origin and credential clearing", async ()
   assert.equal(selected.passphrase, "");
 });
 
+test("Agent feature plans require exact explicit flags and sanitize the public contract", () => {
+  const server_id = "11111111-1111-4111-8111-111111111111";
+  const flags = { commands: true, terminal: false, files: true };
+  const input = { ...statusInput(), server_id, features: null };
+  assert.equal(validateAgentPayload("agent-features-preview", input).features, null);
+  const desired = { ...input, features: flags, expected_review_sha256: "a".repeat(64), confirm: true };
+  assert.deepEqual(validateAgentPayload("agent-features-apply", desired).features, flags);
+  for (const bad of [{ ...desired, confirm: false }, { ...desired, features: null },
+    { ...desired, features: { commands: false, terminal: true, files: false } },
+    { ...desired, features: { ...flags, containers: true } },
+    { ...desired, expected_review_sha256: "unreviewed" }, { ...desired, server_id: "other" }]) {
+    assert.throws(() => validateAgentPayload("agent-features-apply", bad), /INVALID_INPUT/);
+  }
+  const result = { protocol: 1, action: "preview", scope: "entered_target", host: "remote.example", port: 22022,
+    host_key_fingerprint: FINGERPRINT, server_id, kind: "agent_only", current: flags, desired: flags,
+    hub_enabled: true, hub_revision: 1, source_manifest_sha256: "b".repeat(64), can_apply: false,
+    change_required: false, recovery_required: false, pending_features: null, review_sha256: null,
+    temporary_writes: true, activation_writes: false };
+  assert.deepEqual(safeAgentResult("agent-features-preview", result), result);
+  for (const bad of [{ ...result, private_key: "leak" }, { ...result, can_apply: true },
+    { ...result, current: { ...flags, commands: 1 } }, { ...result, kind: "managed" }]) {
+    assert.throws(() => safeAgentResult("agent-features-preview", bad), /INSTALLER_UNAVAILABLE/);
+  }
+  const applied = Object.fromEntries(Object.entries(result).filter(([key]) =>
+    !["can_apply", "change_required", "recovery_required", "pending_features", "review_sha256",
+      "temporary_writes", "activation_writes"].includes(key)));
+  Object.assign(applied, { action: "applied", applied: true, changed: true,
+    fresh_metric_verified: true, cleanup_required: false });
+  assert.deepEqual(safeAgentResult("agent-features-apply", applied), applied);
+  assert.throws(() => safeAgentResult("agent-features-apply", { ...applied, hub_enabled: false }),
+    /INSTALLER_UNAVAILABLE/);
+});
+
+test("Agent feature Web routes enforce admin and origin and forget route credentials", async () => {
+  let selected, forwarded = 0;
+  const handler = createHandler({ admin: async (authorization) => {
+    if (authorization !== "Bearer " + TOKEN) throw new Error("AUTH_REQUIRED");
+  }, agent: async (action, payload, token) => {
+    forwarded++;
+    assert.equal(action, "agent-features-preview");
+    assert.equal(token, TOKEN);
+    selected = payload;
+    assert.equal(payload.password, "server-secret");
+    return { observed: true };
+  } });
+  const path = "/api/v1/browser-ssh/agent-features/preview";
+  const payload = { ...statusInput(), server_id: "11111111-1111-4111-8111-111111111111", features: null };
+  assert.equal((await call(handler, { path, payload, headers: {
+    origin: "https://attacker.example", authorization: "Bearer " + TOKEN } })).status, 404);
+  assert.equal((await call(handler, { path, payload })).status, 401);
+  assert.equal(forwarded, 0);
+  const forbidden = createHandler({ admin: async () => { throw new Error("ADMIN_FORBIDDEN"); } });
+  assert.equal((await call(forbidden, { path, payload, headers: { authorization: "Bearer " + TOKEN } })).status, 403);
+  assert.equal((await call(handler, { path, payload, headers: { authorization: "Bearer " + TOKEN } })).status, 200);
+  assert.equal(selected.password, "");
+  assert.equal(selected.private_key, "");
+  assert.equal(selected.passphrase, "");
+});
+
 test("WireGuard broker accepts exact pinned payloads and sanitizes fixed results", () => {
   const login = statusInput({ host: "remote.example" });
   const expected = { state_revision: "a".repeat(64), source_revision: "b".repeat(64) };

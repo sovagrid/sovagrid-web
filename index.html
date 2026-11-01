@@ -29,12 +29,14 @@
   <link rel="stylesheet" href="public-web.css?v=2">
   <link rel="stylesheet" href="vpn-jump.css?v=1">
   <link rel="stylesheet" href="direct-ssh.css?v=1">
+  <link rel="stylesheet" href="agent-features.css?v=1">
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="ssh-keygen.js?v=1" defer></script>
-  <script src="app.js?v=56" defer></script>
-  <script src="direct-ssh.js?v=2" defer></script>
+  <script src="app.js?v=57" defer></script>
+  <script src="direct-ssh.js?v=3" defer></script>
   <script src="browser-ssh.js?v=4" defer></script>
+  <script src="agent-features.js?v=1" defer></script>
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
   <script src="backups-restore.js?v=1" defer></script>
@@ -433,7 +435,7 @@
           <div class="panel-heading"><div><p class="eyebrow">ИНТЕРАКТИВНАЯ СЕССИЯ</p><h2 id="terminalHeading">Терминал</h2></div><span id="terminalStatusBadge" class="status-badge waiting">Отключён</span></div>
           <div class="terminal-tab-bar"><div id="terminalTabs" class="terminal-tabs" role="tablist" aria-label="Сессии терминала"></div><button id="terminalAddTabButton" class="terminal-add-tab" type="button" aria-label="Добавить вкладку терминала" title="Открыть вкладку для выбранного сервера">+ Вкладка</button></div>
           <p id="terminalTarget" class="panel-intro">Выберите сервер и откройте отдельную терминальную сессию.</p>
-          <div class="terminal-controls"><button id="terminalStartButton" class="primary-button" type="button">Открыть терминал</button><button id="terminalReconnectButton" class="secondary-button" type="button" hidden>Восстановить связь</button><button id="terminalCloseButton" class="secondary-button" type="button" hidden>Закрыть сессию</button></div>
+          <div class="terminal-controls"><button id="terminalStartButton" class="primary-button" type="button">Открыть терминал</button><button id="terminalReconnectButton" class="secondary-button" type="button" hidden>Восстановить связь</button><button id="terminalCloseButton" class="secondary-button" type="button" hidden>Закрыть сессию</button><button id="terminalAgentFeaturesButton" class="secondary-button" type="button" data-agent-features-entry data-global-admin-only hidden>Настроить Agent по SSH</button></div>
           <p id="terminalError" class="form-error" role="alert" hidden></p>
           <div id="terminalScreen" class="terminal-screen" role="tabpanel" aria-label="Интерактивный терминал выбранного сервера"></div>
           <form id="terminalInputForm" class="terminal-line-form" autocomplete="off">
@@ -451,6 +453,7 @@
           <section class="panel command-panel" aria-labelledby="commandHeading">
             <div class="panel-heading"><div><p class="eyebrow">Управление</p><h2 id="commandHeading">Выполнить команду</h2></div></div>
             <div class="permission-row"><div><strong id="commandPermissionTitle">Команды отключены</strong><p id="commandPermissionDescription">Для запуска нужен допуск в Hub и в локальной конфигурации агента.</p></div><button id="commandPermissionButton" class="secondary-button" type="button">Разрешить в Hub</button></div>
+            <p class="field-help"><button id="commandAgentFeaturesButton" class="secondary-button" type="button" data-agent-features-entry data-global-admin-only hidden>Настроить Agent по SSH</button></p>
             <form id="commandForm"><label for="commandInput">Команда на выбранном сервере</label><textarea id="commandInput" rows="4" maxlength="2048" spellcheck="false" placeholder="Например: uptime" required></textarea><p class="field-help">До 2048 байт, 15 секунд выполнения и 8 КБ вывода. Интерактивные программы и sudo здесь не поддерживаются.</p><p id="commandError" class="form-error" role="alert" hidden></p><button id="prepareCommandButton" class="primary-button" type="submit">Проверить и запустить <span aria-hidden="true">→</span></button></form>
           </section>
           <section class="panel quick-panel" aria-labelledby="quickHeading"><div class="panel-heading"><div><p class="eyebrow">Готовые проверки</p><h2 id="quickHeading">Диагностика</h2></div></div><p>Выберите проверку, затем подтвердите её перед выполнением.</p><div class="quick-command-list"><button type="button" data-command="uptime">Время работы <span>uptime</span></button><button type="button" data-command="df -h">Место на дисках <span>df -h</span></button><button type="button" data-command="free -h">Память <span>free -h</span></button><button type="button" data-command="systemctl --failed --no-pager">Сбойные службы <span>systemctl --failed</span></button><button type="button" data-command="ps -eo pid,stat,%cpu,%mem,comm --sort=-%cpu | head -n 16">Активные процессы <span>ps -eo …</span></button></div></section>
@@ -475,6 +478,7 @@
             <div class="panel-heading"><div><p class="eyebrow">НАВИГАЦИЯ</p><h2 id="filesBrowseHeading">Каталоги</h2></div><button id="filesRefresh" class="secondary-button" type="button">Обновить</button></div>
             <label for="filesRoot">Разрешённый каталог</label><select id="filesRoot" aria-describedby="filesHelp"></select>
             <p id="filesHelp" class="field-help">Файлы доступны только в папках, разрешённых владельцем сервера.</p>
+            <p class="field-help"><button id="filesAgentFeaturesButton" class="secondary-button" type="button" data-agent-features-entry data-global-admin-only hidden>Настроить Agent по SSH</button></p>
             <div class="files-path-row"><button id="filesUp" class="secondary-button" type="button" aria-label="На уровень выше">↑</button><code id="filesPath">/</code></div>
             <div class="files-transfer-toolbar"><button id="filesUpload" class="secondary-button" type="button" disabled>Загрузить файл</button><input id="filesUploadInput" type="file" hidden aria-label="Выбрать файл для загрузки"><span>До 4 МБ за файл</span></div>
             <p id="filesTransferStatus" class="field-help" role="status"></p><button id="filesTransferCancel" class="text-button" type="button" hidden>Остановить передачу</button>
@@ -887,13 +891,13 @@
   </div>
 
   <dialog id="addServerDialog" class="modal server-setup-modal" aria-labelledby="addServerHeading">
-    <div class="modal-heading"><p class="eyebrow">Новый сервер</p><h2 id="addServerHeading">Добавить Ubuntu-сервер</h2></div>
-    <div class="server-setup-tabs" role="tablist" aria-label="Способ добавления сервера">
+    <div class="modal-heading"><p id="addServerEyebrow" class="eyebrow">Новый сервер</p><h2 id="addServerHeading">Добавить Ubuntu-сервер</h2></div>
+    <div id="serverSetupTabs" class="server-setup-tabs" role="tablist" aria-label="Способ добавления сервера">
       <button id="serverSetupSshTab" type="button" role="tab" aria-controls="serverSetupSshPanel" aria-selected="true">Подключить по SSH</button>
       <button id="serverSetupAgentTab" type="button" role="tab" aria-controls="serverSetupAgentPanel" aria-selected="false">Agent вручную</button>
     </div>
     <section id="serverSetupSshPanel" role="tabpanel" aria-labelledby="serverSetupSshTab">
-      <p class="server-setup-intro">Сверьте SSH-ключ и подключитесь к терминалу сразу. Если нужен мониторинг, затем проверьте Ubuntu и установите Agent. Данные SSH не сохраняются в браузере.</p>
+      <p id="serverSetupIntro" class="server-setup-intro">Сверьте SSH-ключ и подключитесь к терминалу сразу. Если нужен мониторинг, затем проверьте Ubuntu и установите Agent. Данные SSH не сохраняются в браузере.</p>
       <section id="serverSetupRecovery" class="server-setup-recovery" hidden aria-labelledby="serverSetupRecoveryHeading">
         <div class="server-setup-section-heading"><strong id="serverSetupRecoveryHeading">Незавершённые установки</strong><button id="serverSetupReloadJobs" class="text-button" type="button">Обновить</button></div>
         <p>Выберите запись, затем заново укажите тот же сервер и проверьте его SSH-ключ. Пароль или приватный ключ потребуется ввести снова.</p>
@@ -957,6 +961,35 @@
       </section>
       <p id="serverSetupError" class="form-error" role="alert" hidden></p>
       <div id="serverSetupResult" class="server-setup-result" role="status" hidden><strong id="serverSetupResultTitle"></strong><p id="serverSetupResultText"></p></div>
+      <section id="agentFeaturesPanel" class="agent-features-panel" aria-labelledby="agentFeaturesHeading" hidden>
+        <h3 id="agentFeaturesHeading">Разрешения отдельного Agent</h3>
+        <p class="field-help">Выберите сервер из этой панели и его SSH-адрес выше. Нужен root или пользователь с уже разрешённым sudo без пароля. Пароль SSH и ключ остаются только в этой форме до закрытия или смены вкладки.</p>
+        <label for="agentFeaturesServer">Сервер в Hub<select id="agentFeaturesServer"><option value="">Выберите сервер</option></select></label>
+        <button id="agentFeaturesRead" class="secondary-button" type="button">2. Проверить Agent и текущие разрешения</button>
+        <p class="field-help">Проверка передаст временный проверенный пакет и сверит принадлежность Agent выбранному серверу. Допуски и службы изменятся только после отдельного подтверждения.</p>
+        <p id="agentFeaturesNotice" role="status" aria-live="polite"></p>
+        <p id="agentFeaturesError" class="form-error" role="alert" hidden></p>
+        <section id="agentFeaturesOptions" hidden aria-labelledby="agentFeaturesOptionsHeading">
+          <h3 id="agentFeaturesOptionsHeading">Что разрешить на Agent</h3>
+          <p id="agentFeaturesCurrent" class="field-help"></p>
+          <fieldset class="agent-features-choices"><legend>Новые локальные разрешения</legend>
+            <label><input id="agentFeaturesCommands" type="checkbox">Произвольные команды <span>Включает локальный допуск Agent и допуск команд в Hub. Команды выполняются от пользователя Agent без sudo; этот допуск нужен также для заданий WireGuard.</span></label>
+            <label><input id="agentFeaturesTerminal" type="checkbox">Интерактивный терминал <span>Дополнительное разрешение PTY для отдельного пользователя терминала.</span></label>
+            <label><input id="agentFeaturesFiles" type="checkbox">Файлы <span>Доступ только к управляемому каталогу Agent. Существующие файлы сохраняются.</span></label>
+          </fieldset>
+          <p id="agentFeaturesDependency" class="field-help" hidden>Для терминала и файлов сначала явно разрешите произвольные команды. Мастер не включает их автоматически.</p>
+          <p class="field-help">Мониторинг контейнеров и специальные брокеры настраиваются отдельно. Этот мастер предназначен для отдельных Agent, подключённых через SSH; полная установка Hub здесь не изменяется.</p>
+          <button id="agentFeaturesPreview" class="secondary-button" type="button">3. Показать план</button>
+        </section>
+        <section id="agentFeaturesReview" class="agent-features-review" aria-labelledby="agentFeaturesReviewHeading" hidden>
+          <h3 id="agentFeaturesReviewHeading">Подтвердите изменения</h3>
+          <p id="agentFeaturesScope"></p><ul id="agentFeaturesChanges"></ul>
+          <p class="field-help">Agent будет перезапущен. При отключении терминала или файлов текущие сессии могут завершиться. Права пользователей Hub сохраняются.</p>
+          <label class="agent-features-confirm"><input id="agentFeaturesConfirm" type="checkbox"><span id="agentFeaturesConfirmText">Я проверил сервер и подтверждаю этот план</span></label>
+          <button id="agentFeaturesApply" class="primary-button" type="button" disabled>4. Применить разрешения</button>
+        </section>
+        <p class="field-help">При потере связи изменения могли завершиться. Подключитесь снова и сначала проверьте текущее состояние Agent; повторное применение требует нового плана.</p>
+      </section>
       <section id="serverSetupInstallPanel" class="server-setup-install" aria-labelledby="serverSetupInstallHeading" hidden>
         <h3 id="serverSetupInstallHeading">Установить Agent на этот сервер</h3>
         <p id="serverSetupInstallIntro">Для установки снова введите SSH-пароль или выберите ключ выше. Проверка связи ничего не изменяет; следующий шаг загрузит временный пакет и создаст запись восстановления.</p>
@@ -978,6 +1011,7 @@
         <dl class="server-setup-job-details"><div><dt>Сервер</dt><dd id="serverSetupJobName"></dd></div><div><dt>Ubuntu</dt><dd id="serverSetupJobUbuntu"></dd></div><div><dt>Отпечаток Hub</dt><dd><code id="serverSetupJobHubFingerprint"></code></dd></div><div><dt>Версия Agent</dt><dd><code id="serverSetupJobSource"></code></dd></div><div><dt>ID восстановления</dt><dd><code id="serverSetupJobId"></code></dd></div></dl>
         <label class="server-setup-trust"><input id="serverSetupApplyConfirm" type="checkbox"> Я проверил сервер, ключ Hub и понимаю, что установка запустит Agent и зарегистрирует сервер в панели</label>
         <div class="server-setup-job-actions"><button id="serverSetupApplyButton" class="primary-button" type="button">4. Установить и подключить Agent</button><button id="serverSetupCleanupButton" class="secondary-button" type="button">Очистить незавершённую установку</button></div>
+        <p><button id="serverSetupAgentFeaturesButton" class="secondary-button" type="button" data-global-admin-only hidden>Настроить команды, терминал и файлы</button></p>
         <p class="field-help">Если связь прервётся, откройте «Добавить сервер» снова и выберите эту запись. Для восстановления понадобятся SSH-данные.</p>
       </section>
       <button id="serverSetupInterruptButton" class="secondary-button server-setup-interrupt" type="button" hidden>Остановить текущую операцию</button>

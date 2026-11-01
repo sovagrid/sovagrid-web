@@ -341,7 +341,7 @@ async function directSshJumpInspect() {
     if (seq === serverSetup.seq) { serverSetup.busy = false; serverSetup.phase = null; serverSetupRender(); }
   }
 }
-async function directSshJumpCredentials(seq, reviewed) {
+async function directSshJumpCredentials(seq, reviewed, { clear = true } = {}) {
   const target = directSshJumpTarget();
   if (target.host !== reviewed?.host || target.port !== reviewed.port ||
       !$("directSshJumpTrust").checked || directSSH.jump.changedPin) throw new Error("STALE_REQUEST");
@@ -367,7 +367,7 @@ async function directSshJumpCredentials(seq, reviewed) {
     return { host: reviewed.host, port: reviewed.port, username, method,
       fingerprint: reviewed.fingerprint, password, private_key, passphrase };
   } finally {
-    directSshJumpClearSecrets();
+    if (clear) directSshJumpClearSecrets();
     password = private_key = passphrase = "";
   }
 }
@@ -385,12 +385,12 @@ function directSshReviewedJump() {
   return { ...reviewed };
 }
 
-async function directSshInstallJumpCredentials(seq, reviewed) {
+async function directSshInstallJumpCredentials(seq, reviewed, options) {
   const current = directSshReviewedJump();
   if (!current || current.host !== reviewed?.host || current.port !== reviewed.port ||
       current.fingerprint !== reviewed.fingerprint ||
       current.host_key_blob !== reviewed.host_key_blob) throw new Error("STALE_REQUEST");
-  const credentials = await directSshJumpCredentials(seq, current);
+  const credentials = await directSshJumpCredentials(seq, current, options);
   return { ...credentials, host_key_blob: current.host_key_blob };
 }
 async function directSshInspectTargetViaJump() {
@@ -753,4 +753,5 @@ globalThis.addEventListener?.("sovagridthemechange", () => {
 globalThis.sovagridDirectSSH = { render: directSshRender, reset: directSshReset,
   accessChanged: directSshAccessChanged, jumpEnabled: directSshJumpEnabled,
   inspectTargetViaJump: directSshInspectTargetViaJump, clearJump: directSshJumpClear,
-  reviewedJump: directSshReviewedJump, installJumpCredentials: directSshInstallJumpCredentials };
+  reviewedJump: directSshReviewedJump, installJumpCredentials: directSshInstallJumpCredentials,
+  clearCredentials: directSshJumpClearSecrets };
