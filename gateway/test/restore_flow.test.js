@@ -17,6 +17,8 @@ const META = Object.fromEntries(["host_manifest", "host", "images_manifest", "im
   .map((part) => [part, { bytes: 1, sha256: "c".repeat(64) }]));
 const route = { host: "server.example.com", port: 22, username: "root", fingerprint: FP };
 const login = { ...route, method: "password", password: "ephemeral-password", private_key: "", passphrase: "" };
+const PUBLIC_POLICY = Object.freeze({ queued_jobs: "cancel", telegram_confirmations: "cancel",
+  vpn: "restore_configuration_down", public_address_override: false });
 function imported() {
   return { protocol: "sovagrid-web-restore-v1", source_id: ID, archive_id: OP,
     max_chunk_bytes: 4194304, pending_chunk: null, complete: false,
@@ -29,7 +31,9 @@ function state() {
     progress: "План готов", target: { protocol: "sovagrid-portable-restore-target-v1", operation_id: OP,
       archive_id: ID, request_sha256: "f".repeat(64), phase: "review", registered: true,
       backend_supported: true, target_ready: true, apply_available: true,
-      blockers: [], apply_review_sha256: "d".repeat(64) }, error: null, expected_revision: "e".repeat(64) };
+      blockers: [], apply_review_sha256: "d".repeat(64), preview: { target_free_bytes: 8 * 1024 ** 3,
+        required_free_bytes: 1024 ** 3, target_empty: true, policy: { ...PUBLIC_POLICY } } },
+    error: null, expected_revision: "e".repeat(64) };
 }
 function request(action, value, { raw = null, origin = "https://panel.example.com" } = {}) {
   const req = Readable.from([raw || Buffer.from(JSON.stringify(value))]);
@@ -68,6 +72,25 @@ test("bounded result projection refuses credential fields and contradictory appl
     const reply = state(); reply.target.preview = invalid;
     assert.throws(() => safeRestoreResult("status", reply), /INSTALLER_UNAVAILABLE/);
   }
+});
+
+test("gateway forwards the validated public review and refuses internal or changed policy", async () => {
+  const result = state();
+  const review = result.target.apply_review_sha256;
+  assert.deepEqual(safeRestoreResult("preview", result).target.preview.policy, PUBLIC_POLICY);
+  for (const policy of [{ ...PUBLIC_POLICY, layout: "full", receipt: "v2" },
+    { ...PUBLIC_POLICY, unexpected: "ignored" }, { ...PUBLIC_POLICY, queued_jobs: "keep" },
+    { ...PUBLIC_POLICY, public_address_override: 0 }, null]) {
+    const changed = state(); changed.target.preview.policy = policy;
+    assert.throws(() => safeRestoreResult("preview", changed), /INSTALLER_UNAVAILABLE/);
+  }
+  const handler = createHandler({ admin: async () => {},
+    restore: async () => safeRestoreResult("preview", result) });
+  const res = response();
+  await handler(request("preview", { ...login, operation_id: OP }), res);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.value.target.preview.policy, PUBLIC_POLICY);
+  assert.equal(res.value.target.apply_review_sha256, review);
 });
 
 test("all restore mutations require same-origin current unrestricted admin before dispatch", async () => {

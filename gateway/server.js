@@ -1106,6 +1106,8 @@ export function safeRestoreResult(action, value) {
           ["target_free_bytes", "required_free_bytes"].some((key) => Object.hasOwn(preview, key) &&
             (!Number.isSafeInteger(preview[key]) || preview[key] < 0)) ||
           Object.hasOwn(preview, "target_empty") && typeof preview.target_empty !== "boolean") throw new Error("INSTALLER_UNAVAILABLE");
+      // The root adapter validates the full/v2 Core policy and exposes only
+      // this public subset. Internal fields or extensions must not pass here.
       if (preview.policy !== undefined && (!exactFields(preview.policy,
           ["queued_jobs", "telegram_confirmations", "vpn", "public_address_override"]) ||
           preview.policy.queued_jobs !== "cancel" || preview.policy.telegram_confirmations !== "cancel" ||
