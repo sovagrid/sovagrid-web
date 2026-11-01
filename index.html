@@ -29,7 +29,7 @@
   <link rel="stylesheet" href="public-web.css?v=2">
   <link rel="stylesheet" href="vpn-jump.css?v=1">
   <link rel="stylesheet" href="direct-ssh.css?v=1">
-  <link rel="stylesheet" href="agent-features.css?v=1">
+  <link rel="stylesheet" href="agent-features.css?v=2">
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="ssh-keygen.js?v=1" defer></script>
@@ -948,7 +948,7 @@
           <p class="field-help">Ключ создаётся на устройстве и хранится в памяти вкладки. При проверке или установке приватный ключ передаётся SSH-шлюзу панели по HTTPS или через локальный SSH-туннель; копия в памяти удаляется при закрытии мастера или страницы.</p>
           <label for="serverSetupPassphrase">Парольная фраза ключа, если есть<input id="serverSetupPassphrase" type="password" autocomplete="off"></label>
         </div>
-        <p class="field-help">Данные SSH используются только для этой проверки и удаляются из формы после запроса. Двухфакторный вход пока не поддерживается. Для точного результата нужен root или sudo без интерактивного запроса пароля.</p>
+        <p class="field-help">Данные SSH не сохраняются в настройках браузера и очищаются при закрытии мастера. Двухфакторный вход пока не поддерживается. Для точного результата нужен root или sudo без интерактивного запроса пароля.</p>
         <div class="direct-ssh-entry-actions"><button id="serverSetupDirectTerminalButton" class="primary-button" type="button" disabled>2. Открыть SSH-терминал</button><button id="serverSetupStatusButton" class="secondary-button" type="submit" disabled>Проверить состояние без изменений (для Agent)</button></div>
       </form>
       <section id="directSshPanel" class="direct-ssh-panel" aria-labelledby="directSshHeading" hidden>
