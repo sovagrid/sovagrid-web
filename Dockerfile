@@ -7,6 +7,7 @@ RUN cp /usr/bin/caddy /usr/local/bin/caddy-rootless && chmod 0755 /usr/local/bin
 COPY deploy/Caddyfile.container /etc/caddy/Caddyfile
 COPY index.html app.js direct-ssh.js direct-ssh.css browser-ssh.js files.js amnezia.js vpn-jump.js vpn-jump.css process-inventory.js container-logs.js container-control.js container-alerts.js filesystem-alerts.js filesystem-alerts.css service-control.js telegram.js monitoring.js inode.js public-web.js local-web.js journal.js maintenance.js theme.js styles.css theme.css public-web.css manifest.webmanifest sw.js legal.html legal.css LICENSE ATTRIBUTION.md NOTICE users.js access.js users.css backups.js backups-restore.js backups.css host-backups.js host-backups.css updates.js updates.css external-agent-update.js external-agent-update.css checks.js checks.css ssh-keygen.js /srv/
 COPY install.js install.css /srv/
+COPY host-restore.js host-restore.css /srv/
 COPY icons /srv/icons
 COPY vendor /srv/vendor
 

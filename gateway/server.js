@@ -116,6 +116,17 @@ const AGENT_SOCKET = "/run/sovagrid-web-agent/control.sock";
 const MAX_BODY = 70 * 1024;
 const MAX_JUMP_BODY = 160 * 1024;
 const MAX_AGENT_REPLY = 32 * 1024;
+const RESTORE_CHUNK = 4 * 1024 * 1024;
+const RESTORE_ID = /^[0-9a-f]{32}$/;
+const RESTORE_ACTIONS = new Set(["import-init", "import-status", "import-chunk", "import-delete",
+  "prepare", "status", "list", "inspect", "preview", "start", "recover", "retry"]);
+const RESTORE_LIMITS = Object.freeze({ host_manifest: 65536, host: 8 * 1024 ** 3,
+  images_manifest: 4096, images: 8 * 1024 ** 3, receipt: 8192 });
+const RESTORE_ERRORS = new Set(["INVALID_INPUT", "INVALID_OPERATION", "INVALID_OFFSET", "UNSAFE_STATE",
+  "INSUFFICIENT_SPACE", "ARCHIVE_FULL", "BUSY", "SOURCE_CHANGED", "SOURCE_UNAVAILABLE", "SOURCE_INCOMPLETE",
+  "SOURCE_UNSUPPORTED", "SOURCE_UNTRUSTED", "TARGET_CHANGED", "TARGET_UNAVAILABLE", "STALE_REVISION",
+  "RESUME_REQUIRED", "RESPONSE_TOO_LARGE", "RESTORE_PREPARE_FAILED", "RESTORE_RESPONSE_UNCERTAIN",
+  "AUTH_REQUIRED", "ADMIN_FORBIDDEN", "HUB_UNAVAILABLE", "RUNTIME_UNAVAILABLE"]);
 const MAX_OUTPUT = 4096;
 const MAX_STATUS_OUTPUT = 512;
 // The installer can list 128 owned clients, each with a 32-character name.
@@ -961,6 +972,195 @@ export async function requireUnrestrictedAdmin(authorization, { fetchImpl = fetc
   if (access.mode !== "all" || access.unrestricted_admin !== true) {
     throw new Error("ADMIN_FORBIDDEN");
   }
+}
+
+function restoreArtifacts(value, received = false) {
+  if (!exactFields(value, Object.keys(RESTORE_LIMITS))) throw new Error("INVALID_INPUT");
+  for (const [part, item] of Object.entries(value)) {
+    if (!exactFields(item, received ? ["bytes", "sha256", "received", "complete"] : ["bytes", "sha256"]) ||
+        !Number.isSafeInteger(item.bytes) || item.bytes < 1 || item.bytes > RESTORE_LIMITS[part] ||
+        typeof item.sha256 !== "string" || !HEX_SHA.test(item.sha256) ||
+        received && (!Number.isSafeInteger(item.received) || item.received < 0 || item.received > item.bytes ||
+          typeof item.complete !== "boolean" || item.complete !== (item.received === item.bytes))) {
+      throw new Error("INVALID_INPUT");
+    }
+  }
+  if (Object.values(value).reduce((total, item) => total + item.bytes, 0) > 16 * 1024 ** 3)
+    throw new Error("INVALID_INPUT");
+  return value;
+}
+
+export function validateRestorePayload(action, value) {
+  if (!RESTORE_ACTIONS.has(action)) throw new Error("INVALID_INPUT");
+  const id = (item) => typeof item === "string" && RESTORE_ID.test(item);
+  if (action === "list") {
+    if (!exactFields(value, [])) throw new Error("INVALID_INPUT");
+    return {};
+  }
+  if (action === "import-init") {
+    if (!exactFields(value, ["source_id", "archive_id", "artifacts"]) ||
+        !id(value.source_id) || !id(value.archive_id)) throw new Error("INVALID_INPUT");
+    restoreArtifacts(value.artifacts);
+    return value;
+  }
+  if (action === "import-chunk") {
+    if (!exactFields(value, ["source_id", "part", "offset", "length", "sha256"]) ||
+        !id(value.source_id) || !Object.hasOwn(RESTORE_LIMITS, value.part) ||
+        !Number.isSafeInteger(value.offset) || value.offset < 0 ||
+        !Number.isSafeInteger(value.length) || value.length < 1 || value.length > RESTORE_CHUNK ||
+        value.offset + value.length > RESTORE_LIMITS[value.part] ||
+        typeof value.sha256 !== "string" || !HEX_SHA.test(value.sha256)) throw new Error("INVALID_INPUT");
+    return value;
+  }
+  if (["status", "import-status", "import-delete"].includes(action)) {
+    const key = action === "status" ? "operation_id" : "source_id";
+    if (!exactFields(value, [key, ...(action === "import-delete" ? ["confirm"] : [])]) ||
+        !id(value[key]) || action === "import-delete" && value.confirm !== true) throw new Error("INVALID_INPUT");
+    return value;
+  }
+  const fields = ["operation_id", ...(action === "prepare" ? ["source"] :
+    ["start", "recover", "retry"].includes(action) ? ["expected_revision", "confirm",
+      ...(action === "start" ? ["apply_review_sha256"] : action === "retry" ? ["terminal_sha256"] : [])] : [])];
+  const selected = validateVpnActionRoute(value, fields);
+  if (!id(value.operation_id)) throw new Error("INVALID_INPUT");
+  if (action === "prepare" && (!exactFields(value.source, ["kind", "id"]) ||
+      !["backup", "upload"].includes(value.source.kind) || !id(value.source.id))) throw new Error("INVALID_INPUT");
+  if (["start", "recover", "retry"].includes(action)) {
+    if (value.confirm !== true || typeof value.expected_revision !== "string" || !HEX_SHA.test(value.expected_revision) ||
+        action === "start" && (typeof value.apply_review_sha256 !== "string" || !HEX_SHA.test(value.apply_review_sha256)) ||
+        action === "retry" && (typeof value.terminal_sha256 !== "string" || !HEX_SHA.test(value.terminal_sha256))) throw new Error("INVALID_INPUT");
+  }
+  return { ...selected, ...Object.fromEntries(fields.map((key) => [key, value[key]])) };
+}
+
+export function safeRestoreResult(action, value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.protocol !== "sovagrid-web-restore-v1") throw new Error("INSTALLER_UNAVAILABLE");
+  if (action === "list") {
+    if (!exactFields(value, ["protocol", "operations"]) || !Array.isArray(value.operations) || value.operations.length > 8)
+      throw new Error("INSTALLER_UNAVAILABLE");
+    return { protocol: value.protocol, operations: value.operations.map((item) => safeRestoreResult("status", item)) };
+  }
+  if (action.startsWith("import-")) {
+    if (typeof value.source_id !== "string" || !RESTORE_ID.test(value.source_id)) throw new Error("INSTALLER_UNAVAILABLE");
+    if (action === "import-delete") {
+      if (!exactFields(value, ["protocol", "source_id", "deleted"]) || value.deleted !== true) throw new Error("INSTALLER_UNAVAILABLE");
+      return value;
+    }
+    try { restoreArtifacts(value.artifacts, true); } catch { throw new Error("INSTALLER_UNAVAILABLE"); }
+    if (!exactFields(value, ["protocol", "source_id", "archive_id", "max_chunk_bytes", "pending_chunk", "complete", "artifacts"]) ||
+        typeof value.archive_id !== "string" || !RESTORE_ID.test(value.archive_id) ||
+        value.max_chunk_bytes !== RESTORE_CHUNK || typeof value.complete !== "boolean" ||
+        value.complete !== Object.values(value.artifacts).every((item) => item.complete)) throw new Error("INSTALLER_UNAVAILABLE");
+    if (value.pending_chunk !== null) {
+      try { validateRestorePayload("import-chunk", { source_id: value.source_id, ...value.pending_chunk }); }
+      catch { throw new Error("INSTALLER_UNAVAILABLE"); }
+    }
+    return value;
+  }
+  const fields = ["protocol", "operation_id", "created_at", "source", "archive_id", "route", "phase", "worker_active",
+    "progress", "target", "error", "expected_revision"];
+  if (!exactFields(value, fields) || typeof value.operation_id !== "string" || !RESTORE_ID.test(value.operation_id) ||
+      typeof value.archive_id !== "string" || !RESTORE_ID.test(value.archive_id) ||
+      !Number.isSafeInteger(value.created_at) || value.created_at < 1 || value.created_at > 253402300799 ||
+      !exactFields(value.source, ["kind", "id"]) || !["backup", "upload"].includes(value.source.kind) ||
+      typeof value.source.id !== "string" || !RESTORE_ID.test(value.source.id) ||
+      typeof value.phase !== "string" || !/^[a-z_]{1,48}$/.test(value.phase) ||
+      typeof value.worker_active !== "boolean" || typeof value.progress !== "string" || value.progress.length > 256 ||
+      typeof value.expected_revision !== "string" || !HEX_SHA.test(value.expected_revision) ||
+      value.error !== null && !RESTORE_ERRORS.has(value.error)) throw new Error("INSTALLER_UNAVAILABLE");
+  const routeFields = ["host", "port", "username", "fingerprint"];
+  const route = value.route;
+  if (!exactFields(route, [...routeFields, ...(Object.hasOwn(route ?? {}, "jump") ? ["jump"] : [])]) ||
+      typeof route.host !== "string" || route.host.length > 253 || !Number.isSafeInteger(route.port) ||
+      route.port < 1 || route.port > 65535 || typeof route.username !== "string" || !USERNAME.test(route.username) ||
+      typeof route.fingerprint !== "string" || !FINGERPRINT.test(route.fingerprint) ||
+      route.jump && (!exactFields(route.jump, routeFields) || typeof route.jump.host !== "string" ||
+        route.jump.host.length > 253 || !Number.isSafeInteger(route.jump.port) || route.jump.port < 1 || route.jump.port > 65535 ||
+        typeof route.jump.username !== "string" || !USERNAME.test(route.jump.username) ||
+        typeof route.jump.fingerprint !== "string" || !FINGERPRINT.test(route.jump.fingerprint))) throw new Error("INSTALLER_UNAVAILABLE");
+  if (value.target !== null) {
+    const target = value.target;
+    const allowed = ["protocol", "operation_id", "archive_id", "request_sha256", "registered", "phase", "backend_supported",
+      "target_ready", "apply_available", "blockers", "apply_review_sha256", "worker_active", "retry_available",
+      "retry_in_progress", "terminal_sha256", "error", "preview"];
+    if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).some((key) => !allowed.includes(key)) ||
+        target.protocol !== "sovagrid-portable-restore-target-v1" || target.operation_id !== value.operation_id ||
+        target.archive_id !== value.archive_id || typeof target.request_sha256 !== "string" || !HEX_SHA.test(target.request_sha256) ||
+        typeof target.phase !== "string" || !/^[a-z_]{1,48}$/.test(target.phase) ||
+        ["registered", "worker_active", "retry_available", "retry_in_progress"].some((key) =>
+          Object.hasOwn(target, key) && typeof target[key] !== "boolean") ||
+        ["apply_review_sha256", "terminal_sha256"].some((key) => Object.hasOwn(target, key) && target[key] !== null &&
+          (typeof target[key] !== "string" || !HEX_SHA.test(target[key]))) ||
+        target.error !== undefined && target.error !== null &&
+          (typeof target.error !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(target.error)) ||
+        !["backend_supported", "target_ready", "apply_available"].every((key) => typeof target[key] === "boolean") ||
+        !Array.isArray(target.blockers) || target.blockers.length > 256 ||
+        target.blockers.some((code) => typeof code !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(code)) ||
+        target.apply_available && (!target.backend_supported || !target.target_ready || target.blockers.length ||
+          typeof target.apply_review_sha256 !== "string" || !HEX_SHA.test(target.apply_review_sha256))) throw new Error("INSTALLER_UNAVAILABLE");
+    if (target.preview !== undefined) {
+      const preview = target.preview;
+      if (!preview || typeof preview !== "object" || Array.isArray(preview) ||
+          Object.keys(preview).some((key) => !["target_free_bytes", "required_free_bytes", "target_empty", "policy"].includes(key)) ||
+          ["target_free_bytes", "required_free_bytes"].some((key) => Object.hasOwn(preview, key) &&
+            (!Number.isSafeInteger(preview[key]) || preview[key] < 0)) ||
+          Object.hasOwn(preview, "target_empty") && typeof preview.target_empty !== "boolean") throw new Error("INSTALLER_UNAVAILABLE");
+      if (preview.policy !== undefined && (!exactFields(preview.policy,
+          ["queued_jobs", "telegram_confirmations", "vpn", "public_address_override"]) ||
+          preview.policy.queued_jobs !== "cancel" || preview.policy.telegram_confirmations !== "cancel" ||
+          preview.policy.vpn !== "restore_configuration_down" || preview.policy.public_address_override !== false))
+        throw new Error("INSTALLER_UNAVAILABLE");
+    }
+  }
+  return value;
+}
+
+export function proxyRestore(action, payload, token, { binary = null, socketPath = AGENT_SOCKET, timeoutMs = 600000 } = {}) {
+  validateRestorePayload(action, payload);
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("AUTH_REQUIRED");
+  if (action === "import-chunk" && (!Buffer.isBuffer(binary) || binary.length !== payload.length) ||
+      action !== "import-chunk" && binary !== null) throw new Error("INVALID_INPUT");
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ path: socketPath });
+    const header = Buffer.from(JSON.stringify({ action: `restore-${action}`, session_token: token, payload }) + "\n");
+    let output = Buffer.alloc(0), settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true; header.fill(0); output.fill(0); socket.destroy();
+      if (error) reject(error); else resolve(value);
+    };
+    socket.setTimeout(timeoutMs, () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("error", () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("close", () => finish(new Error("INSTALLER_UNAVAILABLE")));
+    socket.on("connect", () => { socket.write(header); socket.end(binary || undefined); });
+    socket.on("data", (part) => {
+      if (output.length + part.length > MAX_AGENT_REPLY) { finish(new Error("INSTALLER_UNAVAILABLE")); return; }
+      output = Buffer.concat([output, part]);
+      const end = output.indexOf(10);
+      if (end < 0) return;
+      if (end !== output.length - 1) { finish(new Error("INSTALLER_UNAVAILABLE")); return; }
+      try {
+        const result = JSON.parse(output.subarray(0, end).toString("utf8"));
+        if (exactFields(result, ["ok", "result"]) && result.ok === true) finish(null, safeRestoreResult(action, result.result));
+        else if (exactFields(result, ["ok", "error"]) && result.ok === false && RESTORE_ERRORS.has(result.error))
+          finish(new Error(result.error));
+        else throw new Error();
+      } catch { finish(new Error("INSTALLER_UNAVAILABLE")); }
+    });
+  });
+}
+
+async function restoreBinaryBody(req, expected) {
+  if (req.headers["content-type"] !== "application/octet-stream") throw new Error("INVALID_INPUT");
+  const parts = []; let size = 0;
+  for await (const part of req) {
+    size += part.length;
+    if (size > expected || size > RESTORE_CHUNK) throw new Error("INVALID_INPUT");
+    parts.push(part);
+  }
+  if (size !== expected) throw new Error("INVALID_INPUT");
+  return Buffer.concat(parts, size);
 }
 
 export function safeAmneziaPreview(raw, expectedTarget) {
@@ -2196,7 +2396,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   preview = previewAmneziaSetup, enrollPreview = previewAmneziaEnrollment,
   enroll = enrollAmneziaSetup, vpnMutate = mutateAmneziaSetup,
   installPreview = previewTargetInstall,
-  agent = proxyAgent, admin = requireUnrestrictedAdmin,
+  agent = proxyAgent, restore = proxyRestore, admin = requireUnrestrictedAdmin,
   directTerminals = new DirectTerminalSessions() } = {}) {
   const probes = new WindowLimit(20, 60);
   const reads = new WindowLimit(60, 60);
@@ -2206,6 +2406,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
   const provisionStages = new WindowLimit(8, 60);
   const terminalReads = new WindowLimit(360, 60);
   const terminalWrites = new WindowLimit(1200, 60);
+  const restoreChunks = new WindowLimit(1200, 60);
+  const restoreStages = new WindowLimit(16, 60);
   let active = 0;
   return async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") {
@@ -2225,12 +2427,13 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     const wgControlAction = /^\/api\/v1\/browser-ssh\/wg-control\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const provisionAction = /^\/api\/v1\/browser-ssh\/amnezia-provision\/(preview|apply|recover)$/.exec(req.url || "")?.[1];
     const directAction = /^\/api\/v1\/browser-ssh\/direct-terminal\/(open|events|input|resize|close)$/.exec(req.url || "")?.[1];
+    const restoreAction = /^\/api\/v1\/browser-ssh\/restore\/(import-init|import-status|import-chunk|import-delete|prepare|status|list|inspect|preview|start|recover|retry)$/.exec(req.url || "")?.[1];
     const isAdminRoute = Boolean(vpnAction) || isTargetProbe || isTargetStatus || isInstallPreview ||
       Boolean(agentAction) || Boolean(vpnSourceAction) || Boolean(wgControlAction) ||
-      Boolean(provisionAction) || Boolean(directAction);
+      Boolean(provisionAction) || Boolean(directAction) || Boolean(restoreAction);
     if (req.method !== "POST" || (!["/api/v1/browser-ssh/host-key", "/api/v1/browser-ssh/login",
         "/api/v1/browser-ssh/target-host-key", "/api/v1/browser-ssh/target-status",
-        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction && !directAction) ||
+        "/api/v1/browser-ssh/target-install-preview"].includes(req.url) && !agentAction && !vpnAction && !vpnSourceAction && !wgControlAction && !provisionAction && !directAction && !restoreAction) ||
         typeof host !== "string" || !/^[-.A-Za-z0-9:[\]]+(?::[0-9]{1,5})?$/.test(host) ||
         !["http", "https"].includes(proto) || origin !== proto + "://" + host ||
         typeof address !== "string" || net.isIP(address) === 0 ||
@@ -2240,7 +2443,9 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
     }
     const isProbe = req.url === "/api/v1/browser-ssh/host-key" || isTargetProbe;
     const isAgentRead = ["status", "list", "interrupt"].includes(agentAction);
-    if (!(isProbe ? probes : directAction === "events" ? terminalReads :
+    if (!(restoreAction === "import-chunk" ? restoreChunks : restoreAction ?
+          ["status", "list", "inspect", "preview", "import-status"].includes(restoreAction) ? reads : restoreStages :
+          isProbe ? probes : directAction === "events" ? terminalReads :
           directAction && directAction !== "open" ? terminalWrites :
           provisionAction ? provisionStages : wgControlAction ? wgStages : vpnSourceAction ? stages : isAgentRead ||
           ["preview", "enroll-preview"].includes(vpnAction) ? reads : attempts)
@@ -2253,9 +2458,30 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
       return;
     }
     active++;
-    const bodyTimer = setTimeout(() => req.destroy(), 10000);
+    const bodyTimer = setTimeout(() => req.destroy(), restoreAction === "import-chunk" ? 300000 : 10000);
     try {
       if (isAdminRoute) await admin(req.headers.authorization);
+      if (restoreAction) {
+        let selected, binary = null;
+        try {
+          if (restoreAction === "import-chunk") {
+            const metadata = req.headers["x-sovagrid-restore-meta"];
+            if (typeof metadata !== "string" || metadata.length > 4096) throw new Error("INVALID_INPUT");
+            try { selected = validateRestorePayload(restoreAction, JSON.parse(decodeURIComponent(metadata))); }
+            catch { throw new Error("INVALID_INPUT"); }
+            binary = await restoreBinaryBody(req, selected.length);
+          } else selected = validateRestorePayload(restoreAction, await body(req, MAX_JUMP_BODY));
+          clearTimeout(bodyTimer);
+          await admin(req.headers.authorization);
+          const token = BEARER.exec(req.headers.authorization || "")?.[1];
+          if (!token) throw new Error("AUTH_REQUIRED");
+          json(res, 200, await restore(restoreAction, selected, token, { binary }));
+        } finally {
+          clearCredentials(selected);
+          if (binary) binary.fill(0);
+        }
+        return;
+      }
       const value = await body(req, (isTargetStatus || isInstallPreview ||
         ["prepare", "resume"].includes(agentAction) || vpnSourceAction ||
         wgControlAction || provisionAction || vpnAction || directAction === "open") ?
@@ -2322,7 +2548,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
         "SETUP_UNAVAILABLE", "SETUP_CHANGED", "SETUP_UNCERTAIN", "STATUS_UNAVAILABLE",
         "ROUTE_UNAVAILABLE", "UNSUPPORTED_AUTH_METHOD", "DIRECT_SESSION_NOT_FOUND",
         "DIRECT_SESSION_CLOSED", "DIRECT_CURSOR_EXPIRED",
-        ...AGENT_ERRORS]
+        ...AGENT_ERRORS, ...RESTORE_ERRORS]
         .includes(error?.message) ? error.message : "SSH_UNAVAILABLE";
       const status = code === "INVALID_INPUT" || code.startsWith("INVALID_") &&
         code !== "INVALID_JOURNAL" ? 400 :
@@ -2332,7 +2558,8 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
           "STATE_CONFLICT", "OWNERSHIP_CONFLICT", "STALE_PREVIEW", "PREVIEW_STALE",
           "ALREADY_INSTALLED", "CONTAINER_EXISTS", "UDP_PORT_BUSY", "SOURCE_BUSY", "CONTROL_ACTIVE",
           "INSTALLATION_DRIFT",
-          "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK"].includes(code) ? 409 :
+          "STAGE_CLEANUP_REQUIRED", "UNSAFE_LOCK", "SOURCE_INCOMPLETE", "TARGET_CHANGED",
+          "RESTORE_RESPONSE_UNCERTAIN"].includes(code) ? 409 :
         ["NOT_FOUND", "DIRECT_SESSION_NOT_FOUND"].includes(code) ? 404 :
         ["UNSUPPORTED_AUTH_METHOD", "ROOT_REQUIRED", "SOURCE_NOT_PREPARED", "SOURCE_UNTRUSTED",
           "UNSUPPORTED_PLATFORM", "TUN_UNAVAILABLE", "MANUAL_RECOVERY_REQUIRED",
@@ -2348,7 +2575,7 @@ export function createHandler({ inspect = inspectHostKey, inspectTarget = inspec
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const server = http.createServer(createHandler());
   server.headersTimeout = 10000;
-  server.requestTimeout = 15000;
+  server.requestTimeout = 300000;
   server.maxConnections = 32;
   server.listen(8768, "0.0.0.0");
 }

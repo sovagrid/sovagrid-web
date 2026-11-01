@@ -42,7 +42,9 @@ test('service worker precaches only scoped public assets and preserves other pat
     assert.ok(fs.statSync(path || 'index.html').isFile());
   }
   assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/install.js?v=3')));
-  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-backups.js?v=3')));
+  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-backups.js?v=4')));
+  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-restore.js?v=1')));
+  assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-restore.css?v=1')));
   assert.ok(w.added.some((request) => request.url.endsWith('/sovagrid/monitoring/host-backups.css?v=3')));
   assert.ok(w.added.some((request) => request.url.endsWith('/icons/maskable-512.png')));
 });
@@ -58,7 +60,7 @@ test('HTML fallback for a missing script aborts installation without caching the
   };
   await assert.rejects(w.event('install'), /Incomplete SovaGrid app shell/);
   assert.equal(w.added.length, 0);
-  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v90']);
+  assert.deepEqual(w.removed, ['sovagrid-shell:%2Fsovagrid%2Fmonitoring%2F:v91']);
 });
 
 test('HTML fallback for a script never replaces the cached JavaScript on refresh', async () => {

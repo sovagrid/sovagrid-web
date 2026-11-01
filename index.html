@@ -32,13 +32,15 @@
   <script src="vendor/xterm.js?v=1" defer></script>
   <script src="vendor/addon-fit.js?v=2" defer></script>
   <script src="ssh-keygen.js?v=1" defer></script>
-  <script src="app.js?v=55" defer></script>
+  <script src="app.js?v=56" defer></script>
   <script src="direct-ssh.js?v=2" defer></script>
   <script src="browser-ssh.js?v=4" defer></script>
   <script src="users.js?v=2" defer></script>
   <script src="backups.js?v=2" defer></script>
   <script src="backups-restore.js?v=1" defer></script>
-  <script src="host-backups.js?v=3" defer></script>
+  <script src="host-backups.js?v=4" defer></script>
+  <script src="host-restore.js?v=1" defer></script>
+  <link rel="stylesheet" href="host-restore.css?v=1">
   <script src="updates.js?v=2" defer></script>
   <script src="external-agent-update.js?v=1" defer></script>
   <script src="access.js?v=1" defer></script>
@@ -843,6 +845,7 @@
           <p id="hostBackupPlan" class="field-help">Проверяем план хоста.</p>
           <div class="backups-actions"><button id="hostBackupReload" class="secondary-button" type="button">Обновить</button><button id="hostBackupCreate" class="primary-button" type="button" disabled>Создать копию хоста…</button><button id="hostBackupPortableCreate" class="secondary-button" type="button" disabled>Создать переносимую копию…</button></div>
           <p id="hostBackupPortableSupport" class="field-help">Проверяем поддержку переносимых копий.</p>
+          <button id="hostRestoreOpenImport" class="secondary-button" type="button">Восстановить сервер из файлов…</button>
           <p id="hostBackupStatus" class="field-help" role="status" aria-live="polite">Проверяем доступ к копиям хоста.</p>
           <p id="hostBackupError" class="form-error" role="alert" hidden></p>
           <div id="hostBackupDownloadPending" class="host-portable-pending" role="status" aria-live="polite" hidden></div>
@@ -1067,6 +1070,42 @@
     <section id="installGuide"><h3 id="installGuideTitle">Установить через браузер</h3><p id="installGuideIntro"></p><ol id="installSteps"></ol><p><a id="installHelp" target="_blank" rel="noopener noreferrer">Официальная инструкция</a></p></section>
     <p class="install-connection">Для актуальных данных нужна связь с Hub. Пароли, сеанс, команды и метрики не сохраняются для работы без сети. После открытия с новой иконки может потребоваться повторный вход.</p>
     <div class="install-actions"><button id="installDone" class="secondary-button" type="button">Понятно</button><button id="installConfirm" class="primary-button" type="button" hidden>Установить</button></div>
+  </dialog>
+  <dialog id="hostRestoreDialog" class="modal host-restore-modal" aria-labelledby="hostRestoreHeading">
+    <div class="modal-heading"><p class="eyebrow">ПЕРЕНОС НА ЧИСТЫЙ UBUNTU</p><h2 id="hostRestoreHeading">Восстановить сервер</h2></div>
+    <p id="hostRestoreSource" class="field-help"></p>
+    <label for="hostRestoreHistory">Сохранённая операция</label><select id="hostRestoreHistory"><option value="">Новая операция</option></select>
+    <div class="host-restore-import"><label for="hostRestoreOperationId">Или ID более ранней операции</label><input id="hostRestoreOperationId" type="text" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false"><button id="hostRestoreOpenOperation" type="button" class="secondary-button">Открыть по ID</button></div>
+    <div class="host-restore-import"><label for="hostRestoreFiles">Пять файлов переносимой копии v2</label><input id="hostRestoreFiles" type="file" multiple>
+      <button id="hostRestoreNativePick" class="secondary-button" type="button" hidden>Выбрать большую копию на устройстве…</button>
+      <button id="hostRestoreImportDelete" class="secondary-button" type="button" disabled>Удалить импорт с Hub…</button>
+      <p class="field-help">Архив, его манифест, images.tar, manifest.json и receipt.json. Большие файлы передаются частями.</p></div>
+    <fieldset class="host-restore-ssh"><legend>Целевой сервер</legend><div class="host-restore-grid">
+      <label>IP или имя хоста<input id="hostRestoreTargetHost" type="text" autocomplete="off" placeholder="server.example.com"></label>
+      <label>SSH-порт<input id="hostRestoreTargetPort" type="number" min="1" max="65535" value="22"></label>
+      <label>SSH-пользователь<input id="hostRestoreTargetUsername" type="text" autocomplete="off" value="root"></label>
+      <label>Вход<select id="hostRestoreTargetMethod"><option value="password">Пароль SSH</option><option value="private_key">Приватный ключ</option></select></label>
+    </div><div id="hostRestoreTargetPasswordFields"><label>Пароль SSH<input id="hostRestoreTargetPassword" type="password" autocomplete="off"></label></div>
+      <div id="hostRestoreTargetKeyFields" hidden><label>Файл приватного ключа<input id="hostRestoreTargetKeyFile" type="file"></label><label>Или текст приватного ключа<textarea id="hostRestoreTargetPrivateKey" rows="3" spellcheck="false" autocomplete="off"></textarea></label><label>Парольная фраза ключа<input id="hostRestoreTargetPassphrase" type="password" autocomplete="off"></label></div>
+      <button id="hostRestoreTargetProbe" class="secondary-button" type="button">Получить SSH-ключ цели</button><p id="hostRestoreTargetFingerprint" class="field-help host-restore-pin"></p>
+      <label class="host-restore-check"><input id="hostRestoreTargetTrust" type="checkbox">Я независимо сверил отпечаток целевого сервера</label>
+    </fieldset>
+    <label class="host-restore-check"><input id="hostRestoreUseJump" type="checkbox">Подключаться через промежуточный SSH-хост</label>
+    <fieldset id="hostRestoreJumpFields" class="host-restore-ssh" hidden><legend>Промежуточный хост</legend><div class="host-restore-grid">
+      <label>IP или имя хоста<input id="hostRestoreJumpHost" type="text" autocomplete="off" placeholder="relay.example.com"></label>
+      <label>SSH-порт<input id="hostRestoreJumpPort" type="number" min="1" max="65535" value="22"></label>
+      <label>SSH-пользователь<input id="hostRestoreJumpUsername" type="text" autocomplete="off" value="root"></label>
+      <label>Вход<select id="hostRestoreJumpMethod"><option value="password">Пароль SSH</option><option value="private_key">Приватный ключ</option></select></label>
+    </div><div id="hostRestoreJumpPasswordFields"><label>Пароль SSH<input id="hostRestoreJumpPassword" type="password" autocomplete="off"></label></div>
+      <div id="hostRestoreJumpKeyFields" hidden><label>Файл приватного ключа<input id="hostRestoreJumpKeyFile" type="file"></label><label>Или текст приватного ключа<textarea id="hostRestoreJumpPrivateKey" rows="3" spellcheck="false" autocomplete="off"></textarea></label><label>Парольная фраза ключа<input id="hostRestoreJumpPassphrase" type="password" autocomplete="off"></label></div>
+      <button id="hostRestoreJumpProbe" class="secondary-button" type="button">Получить ключ промежуточного хоста</button><p id="hostRestoreJumpFingerprint" class="field-help host-restore-pin"></p>
+      <label class="host-restore-check"><input id="hostRestoreJumpTrust" type="checkbox">Я независимо сверил отпечаток промежуточного хоста</label>
+    </fieldset>
+    <p class="field-help">Для установки зависимостей и восстановления нужны root или уже настроенный sudo без запроса пароля. Пароль sudo не запрашивается.</p>
+    <p id="hostRestoreStatus" role="status" aria-live="polite"></p><p id="hostRestoreError" class="form-error" role="alert" hidden></p>
+    <pre id="hostRestoreSummary" class="host-restore-summary"></pre>
+    <div class="modal-actions"><button id="hostRestorePrepare" class="secondary-button" type="button" disabled>Подготовить и проверить…</button><button id="hostRestoreInspect" class="secondary-button" type="button" disabled>Проверить сервер</button><button id="hostRestorePreview" class="secondary-button" type="button" disabled>Получить свежий план</button><button id="hostRestoreApply" class="primary-button" type="button" disabled>Восстановить сервер…</button></div>
+    <div class="modal-actions"><button id="hostRestoreRecover" class="secondary-button" type="button" disabled>Проверить безопасный откат…</button><button id="hostRestoreRetry" class="secondary-button" type="button" disabled>Новый план после отката…</button><button id="hostRestoreClose" class="secondary-button" type="button">Закрыть</button></div>
   </dialog>
 </body>
 </html>

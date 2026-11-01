@@ -405,6 +405,7 @@ function logout(revoke = true) {
   globalThis.usersReset?.();
   globalThis.backupsReset?.();
   globalThis.hostBackupsReset?.();
+  globalThis.hostRestoreReset?.();
   globalThis.releaseFeedReset?.();
   globalThis.externalAgentUpdateReset?.();
   globalThis.accessReset?.();

@@ -1,0 +1,15 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Jigokuraku01
+ * Additional author attribution terms: see ATTRIBUTION.md. */
+.host-restore-modal { width: min(940px, calc(100vw - 32px)); max-height: 92dvh; overflow: auto; }
+.host-restore-modal label { display: grid; gap: .35rem; margin: .6rem 0; min-width: 0; overflow-wrap: anywhere; }
+.host-restore-modal input:not([type="checkbox"]), .host-restore-modal select, .host-restore-modal textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.host-restore-modal select, .host-restore-modal textarea { font: inherit; color: var(--sg-text, #edf3f5); background: var(--sg-input, #14222c); border: 1px solid var(--sg-border-strong, #34434d); border-radius: 10px; padding: .65rem; }
+.host-restore-grid { display: grid; grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); gap: .7rem; }
+.host-restore-ssh { border: 1px solid var(--border, #475569); border-radius: 12px; padding: .8rem; margin: 1rem 0; min-width: 0; }
+.host-restore-check { display: flex !important; align-items: flex-start; gap: .6rem !important; }
+.host-restore-modal .host-restore-check input { width: 18px; height: 18px; min-height: 18px; padding: 0; margin: .2rem 0 0; flex: 0 0 18px; accent-color: var(--sg-accent, #80e1af); }
+.host-restore-pin { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.host-restore-summary { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.host-restore-import { margin: 1rem 0; padding: .8rem; border-radius: 12px; background: var(--surface-soft, rgba(127,127,127,.08)); }
+@media(max-width: 650px) { .host-restore-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .host-restore-modal .modal-actions { flex-wrap: wrap; } }

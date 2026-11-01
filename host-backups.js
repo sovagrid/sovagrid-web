@@ -459,8 +459,14 @@ function hostBackupRender() {
   if (!portableFiles.hidden) {
     const result = client.portableVerified;
     const summary = document.createElement("p");
-    summary.textContent = `Пара проверена: архив ${bytes(result.archive.bytes)}, образы ${bytes(result.imagesBytes)}. Скачайте все пять файлов. На целевом сервере положите архив и его манифест рядом, а образы, их манифест и квитанцию — в каталог ${result.archive.id}/. Файлы содержат секреты сервера.`;
+    summary.textContent = `Пара проверена: архив ${bytes(result.archive.bytes)}, образы ${bytes(result.imagesBytes)}. Можно сохранить все пять файлов или восстановить чистый сервер через SSH. Файлы содержат секреты сервера.`;
     portableFiles.append(summary);
+    if (hostBackupSameOrigin() && typeof hostRestoreOpen === "function" && serverSetupAllowed()) {
+      const restore = document.createElement("button"); restore.type = "button"; restore.className = "primary-button";
+      restore.textContent = "Восстановить на другом сервере…";
+      restore.addEventListener("click", () => { void hostRestoreOpen({ kind: "backup", id: result.requestId }); });
+      portableFiles.append(restore);
+    }
     if (!hostBackupSameOrigin()) {
       const notice = document.createElement("p");
       notice.textContent = "Для скачивания откройте веб-панель самого выбранного Hub и войдите там. Файлы не пересылаются через этот сайт.";
