@@ -509,6 +509,65 @@ test("target status runs only the fixed read-only inventory after host-key verif
   assert.equal(keyInput.passphrase, "");
 });
 
+test("emitted target inventory verifies an Agent VPN receipt without executing remote source", {
+  skip: process.platform === "win32",
+}, async () => {
+  const operations = {};
+  await probeTargetStatus(statusInput(), { clientFactory: () => fakeClient(operations,
+    { output: "SG_STATUS_V1:agent_only\n" }) });
+  assert.match(operations.script, /if not vpn or managed_vpn_source\(\):/);
+  const fixture = String.raw`import ast,hashlib,json,os,pathlib,sys,tempfile
+tree=ast.parse(sys.argv[1])
+function=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='managed_vpn_source')
+namespace={}
+exec(compile(ast.Module(body=[function],type_ignores=[]),'<actual-gateway-inventory>','exec'),namespace)
+predicate=namespace['managed_vpn_source']
+with tempfile.TemporaryDirectory() as temporary:
+ root=pathlib.Path(temporary)
+ def file(name,data):
+  path=root/name.lstrip('/')
+  path.parent.mkdir(parents=True,exist_ok=True)
+  path.write_bytes(data)
+  return path
+ names=('LICENSE','NOTICE','ATTRIBUTION.md','deploy/install-amnezia-control.py',
+  'deploy/install-wireguard-control.py','deploy/sovagrid-amnezia-provision',
+  'sovagrid_vpn/__init__.py','sovagrid_vpn/amnezia_install.py','sovagrid_vpn/amnezia_admin.py',
+  'sovagrid_vpn/amnezia_provision.py','sovagrid_vpn/wireguard_install.py')
+ sources,packages={},{}
+ for name in names:
+  raw=b'raise RuntimeError("must never execute fixture source")\n'
+  file('/opt/sovagrid-src/sovagrid-vpn/'+name,raw)
+  sources[name]=hashlib.sha256(raw).hexdigest()
+  if name.startswith('sovagrid_vpn/'):
+   leaf=name.split('/')[1]
+   file('/opt/sovagrid-vpn/sovagrid_vpn/'+leaf,raw)
+   packages[leaf]=sources[name]
+ state={'protocol':1,'phase':'active','source_manifest_sha256':'a'*64,
+  'source_files':sources,'package_files':packages,'garbage_stage':None}
+ receipt=file('/var/lib/sovagrid/vpn-source/state.json',json.dumps(state,sort_keys=True,separators=(',',':')).encode())
+ receipt.chmod(0o600)
+ receipt.parent.chmod(0o700)
+ assert predicate(root,owner=os.getuid()) is True
+ unknown=file('/opt/sovagrid-src/foreign',b'leave me')
+ assert predicate(root,owner=os.getuid()) is False
+ unknown.unlink()
+ changed=root/'opt/sovagrid-vpn/sovagrid_vpn/amnezia_admin.py'
+ original=changed.read_bytes()
+ changed.write_bytes(b'tampered')
+ assert predicate(root,owner=os.getuid()) is False
+ changed.write_bytes(original)
+ file('/var/lib/sovagrid/vpn/status.json',b'{"schema_version":1,"collected_at":1}')
+ assert predicate(root,owner=os.getuid()) is True
+ file('/var/lib/sovagrid/.managed-by-run-sh',b'foreign Hub marker')
+ assert predicate(root,owner=os.getuid()) is False
+print('actual-gateway-vpn-receipt-verified')
+`;
+  const result = spawnSync("python3", ["-I", "-c", fixture, operations.script],
+    { encoding: "utf8", timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.equal(result.stdout, "actual-gateway-vpn-receipt-verified\n");
+});
+
 test("target status maps untrusted output to a coarse kind and rejects a changed key", async () => {
   for (const output of ["SG_STATUS_V1:missing\nextra", "root:x:0:0", "SG_STATUS_V1:missing\nSG_STATUS_V1:managed\n"]) {
     const operations = {};
